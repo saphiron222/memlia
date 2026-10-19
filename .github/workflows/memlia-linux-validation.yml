@@ -1,0 +1,33 @@
+# Copyright 2026 Memlia. All rights reserved.
+name: Validation Linux — types et bundles, sans build Next
+on:
+  workflow_dispatch:
+  push:
+    branches: [validation/linux-typecheck]
+permissions:
+  contents: read
+concurrency:
+  group: memlia-linux-validation-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  validate-linux:
+    if: github.event.repository.private == false && github.repository == 'saphiron222/memlia'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Vérifier les notices amont avant téléchargement
+        run: |
+          python3 scripts/ci/test_upstream_notices.py -v
+          python3 scripts/ci/check-upstream-notices.py --root .
+          python3 scripts/ci/check-upstream-notices.py --root . --history
+      - name: Vérifier le superviseur et la séparation validation/build
+        run: python3 scripts/ci/test-linux-build-metrics.py -v
+      - name: Valider typegen, TypeScript et bundles natifs sans build Next
+        shell: bash
+        run: bash scripts/ci/run-linux-build.sh --validation-only
+      # Distinct check: never supplies the required build check or a standalone result.
+      # No source, raw logs, dependencies, caches, .next, bundles or image upload.

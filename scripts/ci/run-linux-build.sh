@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 # Copyright 2026 Memlia. All rights reserved.
-# Real product build, dedicated Docker cgroups, quantitative output only.
+# Product validation or full build, dedicated Docker cgroups, quantitative output only.
 set -euo pipefail
 umask 077
+scope=build
+if [[ "$#" != 0 ]]; then
+  [[ "$#" == 1 && "$1" == --validation-only ]] || { echo 'Unsupported validation mode' >&2; exit 2; }
+  scope=validation
+fi
 root="$(git rev-parse --show-toplevel)"
 : "${RUNNER_TEMP:?GitHub runner temporary directory required}"
 metrics="$RUNNER_TEMP/memlia-metrics"
@@ -16,6 +21,8 @@ postgres='pgvector/pgvector:pg17@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca
 containers=()
 network_created=0
 completed=0
+next_started=0
+standalone_verified=0
 current_stage=bootstrap
 database_ready_exit_code=''
 database_init_exit_code=''
@@ -41,7 +48,8 @@ cleanup() {
     cleanup_ok=0
   fi
   python3 - "$metrics/result.json" "$result" "$completed" "$cleanup_ok" \
-    "${current_stage:-bootstrap}" "${database_ready_exit_code:-}" "${database_init_exit_code:-}" <<'PY' || receipt_ok=0
+    "${current_stage:-bootstrap}" "${database_ready_exit_code:-}" "${database_init_exit_code:-}" \
+    "${scope:-build}" "${next_started:-0}" "${standalone_verified:-0}" <<'PY' || receipt_ok=0
 import json,sys
 from pathlib import Path
 def exit_code(value, optional=False):
@@ -53,12 +61,21 @@ code=exit_code(sys.argv[2]); completed,cleanup=map(int,sys.argv[3:5]); stage=sys
 allowed={'bootstrap','host','pull_node','pull_database','download_bun','verify_bun','extract_bun',
          'prepare_database','create_network','start_database','database_readiness','database_initialization',
          'phase_test','phase_install','toolchain','phase_inventory','phase_typegen','phase_typecheck',
-         'phase_cli','phase_sandbox','phase_next','phase_standalone','completed'}
+         'phase_cli','phase_sandbox','phase_next','phase_standalone','completed','validation_completed'}
+scope=sys.argv[8]; next_started,standalone=map(int,sys.argv[9:11])
 assert stage in allowed and completed in (0,1) and cleanup in (0,1), 'Invalid fixed build diagnostic'
+assert scope in ('build','validation') and next_started in (0,1) and standalone in (0,1), 'Invalid validation diagnostic'
+normal=code==0 and completed and cleanup
+validation_passed=normal and scope=='validation' and stage=='validation_completed' and not next_started and not standalone
+build_passed=normal and scope=='build' and stage=='completed' and next_started and standalone
+status='validation_passed' if validation_passed else 'passed' if build_passed else 'failed'
 Path(sys.argv[1]).write_text(json.dumps({'exitCode':code,'stage':stage,
     'databaseReadyExitCode':exit_code(sys.argv[6],True),'databaseInitExitCode':exit_code(sys.argv[7],True),
     'normalCompletion':bool(completed),'cleanup':bool(cleanup),
-    'status':'passed' if code==0 and completed and cleanup else 'failed'},indent=2)+'\n')
+    'scope':scope,'nextStarted':bool(next_started),'standaloneVerified':bool(standalone),
+    'buildStatus':'passed' if build_passed else 'not_run' if not next_started else 'failed',
+    'status':status},indent=2)+'\n')
+if status=='failed': raise SystemExit(1)
 PY
   # Only our fixed-schema JSON receipts are shown; no raw build logs/artifacts.
   python3 - "$metrics" <<'PY' || receipt_ok=0
@@ -172,21 +189,34 @@ docker run --rm --network none --user "$(id -u):$(id -g)" --read-only --cap-drop
   --mount "type=bind,source=$root,target=/work,readonly" \
   --mount "type=bind,source=$private/tools,target=/tools,readonly" \
   --mount "type=bind,source=$metrics,target=/metrics" "$image" python3 -c '
-import hashlib,json,subprocess
+import hashlib,json,re,subprocess
 from pathlib import Path
 node=Path("/usr/local/bin/node"); bun=Path("/tools/bun-linux-x64/bun")
 r={"node":subprocess.check_output([str(node),"--version"],text=True).strip(),"bun":subprocess.check_output([str(bun),"--version"],text=True).strip(),"nodeSha256":hashlib.sha256(node.read_bytes()).hexdigest(),"bunSha256":hashlib.sha256(bun.read_bytes()).hexdigest()}
 for name in ["next","typescript"]: r[name]=json.loads((Path("/work/node_modules")/name/"package.json").read_text())["version"]
+manifest=json.loads(Path("/work/apps/sim/package.json").read_text())
+overrides=json.loads(Path("/work/package.json").read_text())["overrides"]
+expected=manifest["dependencies"]["next"]
+assert isinstance(expected,str) and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+",expected), "Exact Next pin required"
+assert overrides["next"]==expected and r["next"]==expected, "Installed Next differs from versioned pin"
+r["expectedNext"]=expected
 Path("/metrics/toolchain.json").write_text(json.dumps(r,indent=2)+"\n")
-assert r["node"]=="v24.22.0" and r["bun"]=="1.4.2" and r["next"]=="16.4.0" and r["typescript"]=="7.0.2"
+assert r["node"]=="v24.22.0" and r["bun"]=="1.4.2" and r["typescript"]=="7.0.2"
 ' > "$private/toolchain.log" 2>&1
+run_product_phases() {
 phase inventory /work/apps/sim bun run ../../packages/sim-cli/scripts/print-command-inventory.ts
 phase typegen /work/apps/sim node ../../node_modules/next/dist/bin/next typegen --webpack
 # The installed TypeScript launcher selects the Linux native compiler via execve.
 phase typecheck /work/apps/sim node ../../node_modules/typescript/bin/tsc --noEmit --singleThreaded
 phase cli /work/apps/sim bun run build:cli-runtime
 phase sandbox /work/apps/sim bun run build:sandbox-bundles
+if [[ "$scope" == validation ]]; then
+  current_stage=validation_completed
+  completed=1
+  return
+fi
 # Preserve the controlled heap and worker; measure the documented memory cache profile.
+next_started=1
 phase next /work/apps/sim node ../../node_modules/next/dist/bin/next build --webpack
 phase standalone /work/apps/sim python3 -c '
 from pathlib import Path
@@ -200,5 +230,8 @@ assert (root/"static").is_dir()
 assert (root/"required-server-files.json").is_file()
 assert json.loads((root/"required-server-files.json").read_text())["config"]["output"]=="standalone"
 '
+standalone_verified=1
 current_stage=completed
 completed=1
+}
+run_product_phases
