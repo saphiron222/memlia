@@ -16,11 +16,13 @@ Le raccordement optionnel de cette prévisualisation aux providers conserve l'in
 
 Les adaptations de l'historique Annuler/Rétablir, du refus des anciens remplacements socket et de la représentation des snapshots conservent les notices Sim des fichiers modifiés. Le helper socket retiré n'est pas remplacé par du code Enterprise. Le nouveau port d'observation des capacités Excel et ses tests sont des ajouts Memlia sous droits réservés ; le noyau et les bibliothèques gardent leurs licences propres.
 
+La borne de représentation des styles Edge conserve les droits Apache du décodeur et de ses tests dérivés de Sim. Le profil de garde macOS milestone, sa politique et ses tests, ainsi que les scripts d'expériences Linux avec swap et leur documentation sont des développements Memlia sous droits réservés. Les tests ne confèrent aucun droit sur un composant absent ; aucun binaire système, moteur distant ou code Enterprise n'est ajouté par ces mesures.
+
 ## Ajouts Memlia
 
 Copyright 2026 Memlia. Tous droits réservés sur les nouveaux développements propres à Memlia. Le propriétaire a autorisé leur visibilité publique pendant le développement ; leur licence logicielle future n’est pas encore choisie. Aucune licence Apache, MIT ou autre licence libre ne leur est implicitement attribuée. Cette réserve ne restreint aucun droit fourni indépendamment par une licence tierce, la loi ou les conditions de la plateforme d’hébergement.
 
-Les composants nouveaux sont notamment `agents/windows/`, `packages/memlia-contracts/`, `scripts/compliance/`, `scripts/ci/`, `scripts/dev/build_guard.py`, `scripts/dev/test_build_guard.py`, `deploy/memlia/`, `apps/sim/lib/memlia/` et les remplacements explicitement identifiés dans les sources. Les fichiers de licences tierces, textes de notices et recettes directement reprises gardent leurs conditions originales. La politique de conformité contient des empreintes de composants exclus, jamais leur code.
+Les composants nouveaux sont notamment `agents/windows/`, `packages/memlia-contracts/`, `scripts/compliance/`, `scripts/ci/`, `scripts/dev/build_guard.py`, `scripts/dev/milestone_policy.py`, `scripts/dev/test_build_guard.py`, `deploy/memlia/`, `apps/sim/lib/memlia/` et les remplacements explicitement identifiés dans les sources. Les fichiers de licences tierces, textes de notices et recettes directement reprises gardent leurs conditions originales. La politique de conformité contient des empreintes de composants exclus, jamais leur code.
 
 ## Limites de cette publication de développement
 

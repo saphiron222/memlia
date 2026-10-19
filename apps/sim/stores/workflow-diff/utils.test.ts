@@ -561,4 +561,70 @@ describe('GET snapshot representation boundary', () => {
     const { draftRevision: _revision, ...expected } = response
     expect(decodeDiffWorkflowSnapshot(response)).toEqual(expected)
   })
+  it.each(['style', 'labelStyle', 'labelBgStyle'] as const)(
+    'preserves %s scalar values, custom names and explicit undefined without rewriting them',
+    async (field) => {
+      const { workflowStateResponseSchema } = await import('@/lib/api/contracts/workflows')
+      const response = workflowStateResponseSchema.parse({
+        ...source(),
+        edges: [
+          {
+            id: 'styled',
+            source: 'legacy',
+            target: 'legacy',
+            [field]: {
+              stroke: '',
+              strokeWidth: 0,
+              '--radix-height': '12px',
+              '--radix-count': 2,
+              '--radix-unset': null,
+              '--radix-absent-value': undefined,
+              '--memlia-color': 'var(--custom-color)',
+            },
+          },
+        ],
+      })
+      const original = structuredClone(response)
+      const { draftRevision: _revision, ...expected } = original
+      const decoded = decodeDiffWorkflowSnapshot(response)
+      expect(decoded).toEqual(expected)
+      expect(Object.keys(decoded.edges[0][field] ?? {})).toEqual([
+        'stroke',
+        'strokeWidth',
+        '--radix-height',
+        '--radix-count',
+        '--radix-unset',
+        '--radix-absent-value',
+        '--memlia-color',
+      ])
+      expect(Object.hasOwn(decoded.edges[0][field] ?? {}, '--radix-absent-value')).toBe(true)
+      expect(response).toEqual(original)
+    }
+  )
+  it.each(
+    (['style', 'labelStyle', 'labelBgStyle'] as const).flatMap((field) =>
+      [true, { fictional: 'not a scalar' }, ['not a scalar']].map((value) => ({ field, value }))
+    )
+  )(
+    'refuses the non-scalar $value in $field instead of passing it to the editor',
+    async ({ field, value }) => {
+      const { workflowStateResponseSchema } = await import('@/lib/api/contracts/workflows')
+      const response = workflowStateResponseSchema.parse({
+        ...source(),
+        edges: [
+          {
+            id: 'invalid-style',
+            source: 'legacy',
+            target: 'legacy',
+            [field]: { '--radix-test': value },
+          },
+        ],
+      })
+      const original = structuredClone(response)
+      expect(() => decodeDiffWorkflowSnapshot(response)).toThrow(
+        'The server snapshot is not representable by this editor. Synchronize before continuing.'
+      )
+      expect(response).toEqual(original)
+    }
+  )
 })

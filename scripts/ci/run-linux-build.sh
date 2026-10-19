@@ -4,12 +4,22 @@
 set -euo pipefail
 umask 077
 scope=build
+swap_variant=''
 if [[ "$#" != 0 ]]; then
-  [[ "$#" == 1 && "$1" == --validation-only ]] || { echo 'Unsupported validation mode' >&2; exit 2; }
-  scope=validation
+  if [[ "$#" == 1 && "$1" == --validation-only ]]; then
+    scope=validation
+  elif [[ "$#" == 2 && "$1" == --swap ]]; then
+    case "$2" in webpack|turbopack|turbopack-zram) swap_variant="$2";;
+      *) echo 'Unsupported validation mode' >&2; exit 2;; esac
+  else
+    echo 'Unsupported validation mode' >&2; exit 2
+  fi
 fi
 root="$(git rev-parse --show-toplevel)"
 : "${RUNNER_TEMP:?GitHub runner temporary directory required}"
+if [[ -n "$swap_variant" && "${MEMLIA_SWAP_HOST_READY:-}" != 1 ]]; then
+  exec python3 "$root/scripts/ci/linux-swap-host.py" "$swap_variant"
+fi
 metrics="$RUNNER_TEMP/memlia-metrics"
 [[ ! -e "$metrics" ]] || { echo 'Metrics directory already exists'; exit 1; }
 mkdir "$metrics"
@@ -61,7 +71,7 @@ code=exit_code(sys.argv[2]); completed,cleanup=map(int,sys.argv[3:5]); stage=sys
 allowed={'bootstrap','host','pull_node','pull_database','download_bun','verify_bun','extract_bun',
          'prepare_database','create_network','start_database','database_readiness','database_initialization',
          'phase_test','phase_install','toolchain','phase_inventory','phase_typegen','phase_typecheck',
-         'phase_cli','phase_sandbox','phase_next','phase_standalone','completed','validation_completed'}
+         'phase_cli','phase_sandbox','phase_config','phase_next','phase_standalone','completed','validation_completed'}
 scope=sys.argv[8]; next_started,standalone=map(int,sys.argv[9:11])
 assert stage in allowed and completed in (0,1) and cleanup in (0,1), 'Invalid fixed build diagnostic'
 assert scope in ('build','validation') and next_started in (0,1) and standalone in (0,1), 'Invalid validation diagnostic'
@@ -91,12 +101,26 @@ PY
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 current_stage=host
-python3 - "$metrics/host.json" "$root" <<'PY'
+python3 - "$metrics/host.json" "$root" "$swap_variant" <<'PY'
 import hashlib,json,os,platform,shutil,subprocess,sys
 from pathlib import Path
 mem = {k:int(v.split()[0])*1024 for k,v in (x.split(':',1) for x in Path('/proc/meminfo').read_text().splitlines())}
 root=Path(sys.argv[2]); disk=shutil.disk_usage(root)
-receipt={'sourceCommit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),'lockSha256':hashlib.sha256((root/'bun.lock').read_bytes()).hexdigest(),'architecture':platform.machine(),'kernel':platform.release(),'cpuCount':os.cpu_count(),'hostMemTotalBytes':mem['MemTotal'],'hostMemAvailableBytes':mem['MemAvailable'],'hostSwapTotalBytes':mem['SwapTotal'],'hostSwapUsedBytes':mem['SwapTotal']-mem['SwapFree'],'diskFreeBytes':disk.free,'buildCgroupLimitBytes':13*1024**3,'databaseLimitBytes':512*1024**2,'v8OldSpaceMiB':10240,'bundler':'webpack','webpackCacheProfile':'memory','nextWorkers':2,'runnerImageOS':os.environ.get('ImageOS'),'runnerImageVersion':os.environ.get('ImageVersion')}
+receipt={'sourceCommit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),'lockSha256':hashlib.sha256((root/'bun.lock').read_bytes()).hexdigest(),'architecture':platform.machine(),'kernel':platform.release(),'cpuCount':os.cpu_count(),'hostMemTotalBytes':mem['MemTotal'],'hostMemAvailableBytes':mem['MemAvailable'],'hostSwapTotalBytes':mem['SwapTotal'],'hostSwapUsedBytes':mem['SwapTotal']-mem['SwapFree'],'diskFreeBytes':disk.free,'buildCgroupLimitBytes':13*1024**3,'databaseLimitBytes':512*1024**2,'v8OldSpaceMiB':10240,'nextV8OldSpaceMiB':11264,'bundler':'webpack','webpackCacheProfile':'memory','nextWorkers':2,'runnerImageOS':os.environ.get('ImageOS'),'runnerImageVersion':os.environ.get('ImageVersion')}
+if sys.argv[3]:
+    variant=sys.argv[3]
+    assert variant in ('webpack','turbopack','turbopack-zram')
+    import importlib.util
+    spec=importlib.util.spec_from_file_location('swap_host',root/'scripts/ci/linux-swap-host.py')
+    swap_host=importlib.util.module_from_spec(spec); spec.loader.exec_module(swap_host)
+    zram=os.environ.get('MEMLIA_ZRAM_DEVICE')
+    assert bool(zram)==(variant=='turbopack-zram')
+    swap_host.verify_active_swap(os.environ['RUNNER_TEMP'],os.environ['MEMLIA_SWAP_FILE'],zram)
+    receipt.update({'experiment':variant,'nextV8OldSpaceMiB':24576 if variant=='webpack' else 11264,
+                    'bundler':'webpack' if variant=='webpack' else 'turbopack',
+                    'webpackCacheProfile':'memory' if variant=='webpack' else 'not_applied',
+                    'nextSwapLimitBytes':24*1024**3,'nextMemoryAndSwapBytes':37*1024**3,
+                    'turbopackNativeMemoryBoundedByV8':False})
 Path(sys.argv[1]).write_text(json.dumps(receipt,indent=2)+'\n')
 assert platform.machine()=='x86_64'
 assert mem['MemTotal']>=14*1024**3 and mem['MemAvailable']>=13*1024**3
@@ -173,17 +197,37 @@ PY
   local name="$prefix-$label"
   containers+=("$name")
   local code=0
+  local memory_swap=13g
+  local metrics_extra=() env_extra=()
+  if [[ -n "${swap_variant:-}" ]]; then
+    env_extra+=(--env "MEMLIA_SWAP_VARIANT=$swap_variant")
+    if [[ "$label" == next ]]; then
+      memory_swap=37g
+      metrics_extra+=(--experiment "$swap_variant" --timeout 6000)
+    fi
+  fi
   docker run --name "$name" --platform linux/amd64 --network "$prefix" \
     --user "$(id -u):$(id -g)" --read-only --cap-drop ALL --security-opt no-new-privileges:true \
-    --memory 13g --memory-swap 13g --cpus 4 --pids-limit 512 \
-    --env-file "$private/build.env" --env PATH=/tools/bun-linux-x64:/usr/local/bin:/usr/bin:/bin \
+    --memory 13g --memory-swap "$memory_swap" --cpus 4 --pids-limit 512 \
+    --env-file "$private/build.env" "${env_extra[@]}" --env PATH=/tools/bun-linux-x64:/usr/local/bin:/usr/bin:/bin \
     --mount "type=bind,source=$root,target=/work" \
     --mount "type=bind,source=$private,target=/scratch" \
     --mount "type=bind,source=$private/tools,target=/tools,readonly" \
     --mount "type=bind,source=$private/tracked-sources.json,target=/scratch/tracked-sources.json,readonly" \
     --mount "type=bind,source=$metrics,target=/metrics" --workdir "$cwd" \
     "$image" python3 /work/scripts/ci/linux-build-metrics.py --phase "$label" \
-    --report "/metrics/$label.json" --tracked-sources /scratch/tracked-sources.json --source-root /work -- "$@" > "$private/$label.log" 2>&1 || code=$?
+    --report "/metrics/$label.json" "${metrics_extra[@]}" --tracked-sources /scratch/tracked-sources.json --source-root /work -- "$@" > "$private/$label.log" 2>&1 || code=$?
+  if [[ -n "${swap_variant:-}" && "$label" == next ]]; then
+    docker inspect --format '{{json .HostConfig}}' "$name" > "$private/limits.json"
+    python3 - "$private/limits.json" "$metrics/next-limits.json" <<'PYLIMITS'
+import json,sys
+from pathlib import Path
+raw=json.loads(Path(sys.argv[1]).read_text())
+receipt={key:raw[key] for key in ('Memory','MemorySwap','NanoCpus','PidsLimit')}
+Path(sys.argv[2]).write_text(json.dumps(receipt,indent=2)+'\n')
+assert receipt=={'Memory':13*1024**3,'MemorySwap':37*1024**3,'NanoCpus':4000000000,'PidsLimit':512}
+PYLIMITS
+  fi
   docker inspect --format '{{json .State}}' "$name" > "$private/state.json"
   python3 - "$metrics/$label-container.json" "$private/state.json" "$code" "$metrics/$label.json" <<'PY'
 import json,sys
@@ -218,7 +262,11 @@ assert r["node"]=="v24.22.0" and r["bun"]=="1.4.2" and r["typescript"]=="7.0.2"
 ' > "$private/toolchain.log" 2>&1
 run_product_phases() {
 phase inventory /work/apps/sim bun run ../../packages/sim-cli/scripts/print-command-inventory.ts
-phase typegen /work/apps/sim node ../../node_modules/next/dist/bin/next typegen --webpack
+if [[ "${swap_variant:-}" == turbopack* ]]; then
+  phase typegen /work/apps/sim node ../../node_modules/next/dist/bin/next typegen
+else
+  phase typegen /work/apps/sim node ../../node_modules/next/dist/bin/next typegen --webpack
+fi
 # The installed TypeScript launcher selects the Linux native compiler via execve.
 phase typecheck /work/apps/sim node ../../node_modules/typescript/bin/tsc --noEmit --singleThreaded --pretty false
 phase cli /work/apps/sim bun run build:cli-runtime
@@ -228,12 +276,31 @@ if [[ "$scope" == validation ]]; then
   completed=1
   return
 fi
-# Preserve the controlled heap and worker; measure the documented memory cache profile.
+# One bounded Next-only heap experiment; the container and other phases stay unchanged.
 next_started=1
-phase next /work/apps/sim node ../../node_modules/next/dist/bin/next build --webpack
+if [[ -n "${swap_variant:-}" ]]; then
+  phase config /work/apps/sim node -e '
+const fs=require("node:fs"); const load=require("next/dist/server/config").default;
+const bundler=process.env.MEMLIA_SWAP_VARIANT==="webpack"?"webpack":"turbopack";
+require("next/dist/lib/bundler").parseBundlerArgs(bundler==="webpack"?{webpack:true}:{turbopack:true});
+load(require("next/constants").PHASE_PRODUCTION_BUILD,process.cwd()).then(c=>{
+const r={bundler,productionBrowserSourceMaps:c.productionBrowserSourceMaps,serverSourceMaps:c.experimental.serverSourceMaps,
+ enablePrerenderSourceMaps:c.enablePrerenderSourceMaps,cpus:c.experimental.cpus,output:c.output,
+ webpackCallbackApplicable:process.env.MEMLIA_SWAP_VARIANT==="webpack"};
+fs.writeFileSync("/metrics/next-config.json",JSON.stringify(r)+"\n");
+if(r.productionBrowserSourceMaps!==false||r.serverSourceMaps!==false||r.enablePrerenderSourceMaps!==false||r.cpus!==2||r.output!=="standalone")process.exitCode=1;
+}).catch(()=>{process.exitCode=1});'
+  if [[ "$swap_variant" == webpack ]]; then
+    phase next /work/apps/sim env DEBUG=next:build:webpack-build DEBUG_COLORS=0 NODE_OPTIONS=--max-old-space-size=24576 node ../../node_modules/next/dist/bin/next build --webpack
+  else
+    phase next /work/apps/sim env NODE_OPTIONS=--max-old-space-size=11264 node ../../node_modules/next/dist/bin/next build --turbopack
+  fi
+else
+  phase next /work/apps/sim env DEBUG=next:build:webpack-build DEBUG_COLORS=0 NODE_OPTIONS=--max-old-space-size=11264 node ../../node_modules/next/dist/bin/next build --webpack
+fi
 phase standalone /work/apps/sim python3 -c '
 from pathlib import Path
-import json
+import json,os
 root=Path(".next")
 assert (root/"BUILD_ID").read_text().strip()
 assert (root/"standalone/apps/sim/server.js").is_file()
@@ -241,7 +308,13 @@ assert (root/"routes-manifest.json").is_file()
 assert (root/"prerender-manifest.json").is_file()
 assert (root/"static").is_dir()
 assert (root/"required-server-files.json").is_file()
-assert json.loads((root/"required-server-files.json").read_text())["config"]["output"]=="standalone"
+config=json.loads((root/"required-server-files.json").read_text())["config"]
+assert config["output"]=="standalone"
+if os.environ.get("MEMLIA_SWAP_VARIANT"):
+    assert config["productionBrowserSourceMaps"] is False
+    assert config["experimental"]["serverSourceMaps"] is False
+    assert config["enablePrerenderSourceMaps"] is False
+    assert config["experimental"]["cpus"]==2
 '
 standalone_verified=1
 current_stage=completed

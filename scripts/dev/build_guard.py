@@ -4,6 +4,7 @@
 import argparse
 import ctypes
 import errno
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -127,23 +128,73 @@ def _stop_owned(child):
     child.wait(timeout=5)
 
 
-def run_guard(command, report, *, measure=mac_snapshot, interval=2):
-    started = time.monotonic()
+def run_guard(command, report, *, measure=mac_snapshot, interval=2, profile='strict',
+              disk_path=None, measure_disk=None, clock=time.monotonic):
+    if profile not in ('strict', 'milestone'):
+        raise ValueError('unknown profile')
+    started = clock()
+    policy = None
+    if profile == 'milestone':
+        # Load only our sibling, including for callers importing this script by path.
+        spec = importlib.util.spec_from_file_location(
+            'memlia_milestone_policy', Path(__file__).with_name('milestone_policy.py'))
+        milestone = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(milestone)
+        policy = milestone.MilestonePolicy(started=started)
+        volume = Path.cwd() if disk_path is None else disk_path
+        if measure_disk is None:
+            def measure_disk():
+                usage = os.statvfs(volume)
+                return usage.f_bavail * usage.f_frsize
     receipt = {'status': 'refused', 'reason': None, 'childExitCode': None,
                'observations': 0, 'peakFootprintBytes': 0, 'peakSwapGrowthBytes': 0}
+    if policy is not None:
+        receipt.update(profile='milestone', timeoutSeconds=milestone.TIMEOUT_SECONDS,
+                       minimumDiskBytes=milestone.MIN_DISK_BYTES,
+                       peakSwapBytes=0, minDiskFreeBytes=None, minFreePercent=None,
+                       criticalSeconds=0, peakCriticalSeconds=0, pressureSequence=[], pressureSequenceTruncated=False)
     owned = {}
     def write():
-        receipt['elapsedSeconds'] = round(time.monotonic() - started, 3)
+        receipt['elapsedSeconds'] = round(clock() - started, 3)
         report.write_text(json.dumps(receipt, indent=2) + '\n')
     def observe(pid):
         sample = measure(pid)
-        for identity in sample.get('processes', []):
-            owned[identity['pid']] = identity
+        if policy is not None:
+            # Ownership survives an independent disk/pressure measurement failure.
+            identities = milestone.capture_identities(sample)
+            for identity in identities:
+                owned[identity['pid']] = identity
+            sample = milestone.capture_sample(sample, measure_disk(), identities)
+        else:
+            for identity in sample.get('processes', []):
+                owned[identity['pid']] = identity
         receipt['observations'] += 1
         receipt['lastObservation'] = sample
         receipt['peakFootprintBytes'] = max(receipt['peakFootprintBytes'], sample['footprintBytes'])
+        if policy is not None:
+            receipt['peakSwapBytes'] = max(receipt['peakSwapBytes'], sample['swapBytes'])
+            for receipt_key, sample_key in (('minDiskFreeBytes', 'diskFreeBytes'),
+                                            ('minFreePercent', 'freePercent')):
+                old = receipt[receipt_key]
+                receipt[receipt_key] = sample[sample_key] if old is None else min(old, sample[sample_key])
         return sample
     def budget(sample):
+        if policy is not None:
+            now = clock()
+            reason = policy.evaluate(sample, now)
+            receipt['criticalSeconds'] = round(policy.critical_seconds, 3)
+            receipt['peakCriticalSeconds'] = max(receipt['peakCriticalSeconds'], receipt['criticalSeconds'])
+            growth = sample['swapBytes'] - receipt['baseline']['swapBytes']
+            receipt['peakSwapGrowthBytes'] = max(receipt['peakSwapGrowthBytes'], growth)
+            sequence = receipt['pressureSequence']
+            entry = {'elapsedSeconds': round(now - started, 3), 'level': sample['pressureLevel']}
+            if not sequence or sequence[-1]['level'] != entry['level']:
+                if len(sequence) < 128:
+                    sequence.append(entry)
+                else:
+                    receipt['pressureSequenceTruncated'] = True
+            return reason
+
         if sample['pressureLevel'] != 1:
             return 'system-pressure'
         if sample['freePercent'] < 20:
@@ -178,7 +229,7 @@ def run_guard(command, report, *, measure=mac_snapshot, interval=2):
                 receipt['reason'] = budget(observe(child.pid))
             except Exception:
                 # Finishing between ps/vmmap is a normal race, not missing monitoring.
-                if child.poll() is None:
+                if policy is not None or child.poll() is None:
                     receipt['reason'] = 'monitoring-unavailable'
             if receipt['reason']:
                 break
@@ -188,6 +239,14 @@ def run_guard(command, report, *, measure=mac_snapshot, interval=2):
                 pass
     except KeyboardInterrupt:
         receipt['reason'] = 'operator-interrupt'
+    try:
+        # Even an immediate child exit must not skip the final disk/deadline observation.
+        if policy is not None and not receipt['reason']:
+            receipt['reason'] = budget(observe(None))
+    except KeyboardInterrupt:
+        receipt['reason'] = 'operator-interrupt'
+    except Exception:
+        receipt['reason'] = 'monitoring-unavailable'
     try:
         if not receipt['reason'] and any(_same_process(item) for item in owned.values()):
             receipt['reason'] = 'descendants-still-running'
@@ -239,6 +298,8 @@ def run_guard(command, report, *, measure=mac_snapshot, interval=2):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--report', type=Path, required=True)
+    parser.add_argument('--profile', choices=('strict', 'milestone'), default='strict')
+    parser.add_argument('--disk-path', type=Path, help='milestone build output volume; default cwd')
     parser.add_argument('command', nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ['--'] else args.command
@@ -252,7 +313,9 @@ def main():
             raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, interrupt)
     signal.signal(signal.SIGINT, interrupt)
-    return run_guard(command, args.report)
+    if args.disk_path is not None and args.profile != 'milestone':
+        parser.error('--disk-path requires --profile milestone')
+    return run_guard(command, args.report, profile=args.profile, disk_path=args.disk_path)
 
 
 if __name__ == '__main__':

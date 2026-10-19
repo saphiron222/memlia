@@ -1,0 +1,60 @@
+# Copyright 2026 Memlia. All rights reserved.
+name: Expérience Linux avec swap — non qualifiée
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, build/linux-swap-measurement]
+permissions:
+  contents: read
+concurrency:
+  group: memlia-linux-swap-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  measure:
+    if: github.event.repository.private == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        variant: [turbopack, webpack, turbopack-zram]
+    env:
+      MEMLIA_PUBLIC_RUN: '1'
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Vérifier la provenance et les contrôles portables
+        run: |
+          python3 scripts/ci/test_upstream_notices.py -v
+          python3 scripts/ci/check-upstream-notices.py --root .
+          python3 scripts/ci/check-upstream-notices.py --root . --history
+          python3 scripts/ci/test-linux-build-metrics.py -v
+          python3 scripts/ci/test-linux-swap-host.py -v
+      - name: Mesurer un seul candidat froid dans cette VM
+        shell: bash
+        env:
+          MEMLIA_VARIANT: ${{ matrix.variant }}
+        run: bash scripts/ci/run-linux-build.sh --swap "$MEMLIA_VARIANT"
+      - name: Lire uniquement les reçus fermés
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json,os
+          from pathlib import Path
+          root=Path(os.environ['RUNNER_TEMP'])/'memlia-metrics'
+          names=['host','toolchain','result','next-config','next-limits']
+          for phase in ['test','install','inventory','typegen','typecheck','cli','sandbox','config','next','standalone']:
+              names.extend([phase,phase+'-container'])
+          for name in names:
+              path=root/(name+'.json')
+              if path.is_file():
+                  with path.open('rb') as stream: data=stream.read(131073)
+                  if len(data)>131072: raise SystemExit('Receipt exceeds publication bound')
+                  print(json.dumps(json.loads(data),sort_keys=True))
+          PY
+      # No artifacts: raw logs, .next, maps, heap dumps and dependencies stay on the ephemeral VM.

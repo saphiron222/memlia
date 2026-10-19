@@ -400,5 +400,218 @@ class TypeScriptDiagnosticTests(unittest.TestCase):
                     self.assertEqual(metrics.phase_typescript_locations(
                         phase,output,manifest,root,root.parent)['locations'],[])
 
+
+class WebpackObservationTests(unittest.TestCase):
+    PREFIX = b'2026-10-19T11:16:08.269Z next:build:webpack-build '
+
+    def observe(self, raw, enabled=True):
+        observer = metrics.WebpackObservation(enabled)
+        with tempfile.TemporaryFile() as output:
+            output.write(raw)
+            output.flush()
+            observer.drain(output, final=True)
+        return observer.receipt()
+
+    def test_incremental_split_lines_keep_writer_offset_and_early_stages(self):
+        observer = metrics.WebpackObservation(True)
+        with tempfile.TemporaryFile() as output:
+            output.write(self.PREFIX + b'starting ser')
+            position = output.tell()
+            output.flush()
+            observer.drain(output)
+            self.assertEqual(output.tell(), position)
+            self.assertEqual(observer.receipt()['events'], [])
+            output.write(b'ver compiler\n' + b'x\n' * 40000)
+            output.flush()
+            observer.drain(output)
+            output.write(self.PREFIX + b'server compiler finished 12ms\n')
+            output.flush()
+            observer.drain(output, final=True)
+            self.assertEqual(observer.receipt()['events'], [
+                {'compiler':'server','event':'started'},
+                {'compiler':'server','event':'finished','durationMs':12}])
+            self.assertTrue(observer.receipt()['sequenceValid'])
+            self.assertFalse(observer.receipt()['complete'])
+
+
+    def test_real_child_can_be_observed_before_exit_without_losing_partial_line(self):
+        observer = metrics.WebpackObservation(True)
+        first = self.PREFIX + b'starting ser'
+        with tempfile.TemporaryFile() as output:
+            program = ('import os,sys; os.write(2,' + repr(first) + '); print("ready",flush=True); '
+                       'sys.stdin.readline(); os.write(2,b"ver compiler\\n")')
+            # Actual subprocess, real file output and stdin barrier, no /proc simulation.
+            with subprocess.Popen([sys.executable,'-c',program], stdin=subprocess.PIPE,
+                                  stdout=subprocess.PIPE, stderr=output) as child:
+                try:
+                    self.assertEqual(child.stdout.readline(), b'ready\n')
+                    observer.drain(output)
+                    self.assertIsNone(child.poll())
+                    self.assertEqual(observer.receipt()['events'], [])
+                finally:
+                    child.communicate(b'continue\n', timeout=5)
+                self.assertEqual(child.returncode, 0)
+            observer.drain(output, final=True)
+            self.assertEqual(observer.receipt()['events'], [{'compiler':'server','event':'started'}])
+
+    def test_exact_native_sequence_and_only_fixed_values(self):
+        raw = b''
+        for compiler in [b'server', b'edge-server', b'client']:
+            raw += self.PREFIX + b'starting ' + compiler + b' compiler\n'
+            raw += self.PREFIX + compiler + b' compiler finished 42ms\n'
+        receipt = self.observe(raw)
+        self.assertEqual(len(receipt['events']), 6)
+        self.assertTrue(receipt['complete'])
+        self.assertTrue(receipt['sequenceValid'])
+        self.assertEqual(receipt['events'][3], {'compiler':'edge','event':'finished','durationMs':42})
+        self.assertFalse(receipt['truncated'])
+        self.assertEqual(self.observe(raw, False)['events'], [])
+
+    def test_malformed_canaries_controls_and_incomplete_lines_are_not_published(self):
+        canary = b'PRIVATE_CANARY_VALUE'
+        raw = b''.join([
+            canary + self.PREFIX + b'starting server compiler\n',
+            self.PREFIX + b'starting server compiler ' + canary + b'\n',
+            self.PREFIX.replace(b'webpack-build', b'webpack-build-fake') + b'starting server compiler\n',
+            b'\x1b[31m' + self.PREFIX + b'starting server compiler\n',
+            self.PREFIX + b'starting server compiler\x1b[0m\n',
+            self.PREFIX + b'starting server compiler\r\n',
+            self.PREFIX + b'starting server compiler\xff\n',
+            self.PREFIX + b'server compiler finished 999999999999999ms\n',
+            self.PREFIX + b'server compiler finished -1ms\n',
+            self.PREFIX + b'starting secret compiler\n',
+            b'x' * 700 + self.PREFIX + b'starting server compiler\n',
+            self.PREFIX + b'starting server compiler'])
+        receipt = self.observe(raw)
+        self.assertEqual(receipt['events'], [])
+        self.assertTrue(receipt['truncated'])
+        self.assertNotIn(canary.decode(), json.dumps(receipt))
+
+    def test_sequence_repetition_volume_and_event_bounds(self):
+        start = self.PREFIX + b'starting server compiler\n'
+        receipt = self.observe(start * 1000)
+        self.assertEqual(len(receipt['events']), 16)
+        self.assertFalse(receipt['sequenceValid'])
+        self.assertFalse(receipt['complete'])
+        self.assertTrue(receipt['truncated'])
+        self.assertFalse(self.observe(self.PREFIX + b'starting client compiler\n')['sequenceValid'])
+        # A valid-looking suffix at a byte boundary must not become a fresh line.
+        receipt = self.observe(b'x' * (8 * 1024 * 1024) + start)
+        self.assertEqual(receipt['events'], [])
+        self.assertTrue(receipt['truncated'])
+
+    def test_real_child_observation_never_changes_exit_verdict_or_exposes_output(self):
+        # Real child/output/receipt; only Linux /proc+cgroup observations are doubled.
+        for phase, code in [('next', 3), ('next', 0), ('typecheck', 0)]:
+            with self.subTest(phase=phase, code=code), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                raw = b'PRIVATE_CANARY_VALUE\n'
+                for compiler in [b'server', b'edge-server', b'client']:
+                    raw += self.PREFIX + b'starting ' + compiler + b' compiler\n'
+                    raw += self.PREFIX + compiler + b' compiler finished 1ms\n'
+                args = SimpleNamespace(cgroup=str(root), report=str(root/'receipt.json'), phase=phase,
+                                       tracked_sources=None, source_root=str(root), timeout=5,
+                                       command=[sys.executable, '-c',
+                                                'import os,time; os.write(1,' + repr(raw) + '); time.sleep(.03); raise SystemExit(' + str(code) + ')'])
+                reading = {'pids':[os.getpid()],'limitBytes':1024,'swapBytes':0,'events':{}}
+                with patch.object(metrics, 'cgroup_read', return_value=reading), \
+                     patch.object(metrics, 'host_memory', return_value={'availableBytes':1024,'swapUsedBytes':0}):
+                    self.assertEqual(metrics.run(args), int(code != 0))
+                encoded = (root/'receipt.json').read_text(); receipt = json.loads(encoded)
+                self.assertEqual(receipt['status'], 'passed' if code == 0 else 'failed')
+                self.assertNotIn('PRIVATE_CANARY', encoded)
+                self.assertEqual(len(receipt['webpackObservation']['events']), 6 if phase == 'next' else 0)
+                self.assertEqual(receipt['webpackObservation']['complete'], phase == 'next')
+
+    def test_read_error_is_observational_only(self):
+        observer = metrics.WebpackObservation(True)
+        with tempfile.TemporaryFile() as output:
+            with patch.object(metrics.os, 'pread', side_effect=OSError('PRIVATE_CANARY')):
+                observer.drain(output, final=True)
+        self.assertTrue(observer.receipt()['readError'])
+        self.assertNotIn('PRIVATE_CANARY', json.dumps(observer.receipt()))
+
+    def test_debug_environment_is_scoped_to_the_real_next_command(self):
+        source = (HERE / 'run-linux-build.sh').read_text()
+        block = source[source.index('run_product_phases() {'):source.index('\nrun_product_phases\n')]
+        script = ('set -e\nscope=build\n'
+                  'phase() { python3 -c "import json,sys; print(json.dumps(sys.argv[1:]))" "$@"; }\n'
+                  + block + '\nrun_product_phases\n')
+        result = subprocess.run(['bash','-c',script],capture_output=True,text=True,timeout=10)
+        self.assertEqual(result.returncode,0,result.stderr)
+        calls = [json.loads(line) for line in result.stdout.splitlines()]
+        call = next(c for c in calls if c[0] == 'next')
+        self.assertEqual(call[2:], ['env','DEBUG=next:build:webpack-build','DEBUG_COLORS=0',
+                                    'NODE_OPTIONS=--max-old-space-size=11264',
+                                    'node','../../node_modules/next/dist/bin/next','build','--webpack'])
+        self.assertFalse(any('DEBUG=' in arg for c in calls if c[0] != 'next' for arg in c))
+        self.assertFalse(any('NODE_OPTIONS=' in arg for c in calls if c[0] != 'next' for arg in c))
+
+    def test_next_heap_receipt_matches_its_command_and_keeps_other_phases_at_ten(self):
+        # Parse the actual receipt without executing bootstrap or reading secrets.
+        import ast
+        source = (HERE / 'run-linux-build.sh').read_text()
+        line = next(line for line in source.splitlines() if line.startswith('receipt={'))
+        tree = ast.parse(line).body[0].value
+        fields = {key.value: value for key, value in zip(tree.keys, tree.values)}
+        self.assertEqual(ast.literal_eval(fields['v8OldSpaceMiB']), 10240)
+        self.assertEqual(ast.literal_eval(fields['nextV8OldSpaceMiB']), 11264)
+        # The normal environment is unchanged; only the Next phase overrides it.
+        self.assertIn("'NODE_OPTIONS':'--max-old-space-size=10240'", source)
+
+class SwapExperimentTests(unittest.TestCase):
+    def test_explicit_swap_modes_reach_only_next_with_the_selected_bundler_and_heap(self):
+        source = (HERE / 'run-linux-build.sh').read_text()
+        block = source[source.index('run_product_phases() {'):source.index('\nrun_product_phases\n')]
+        for variant, bundler, heap in [('webpack','webpack',24576), ('turbopack','turbopack',11264), ('turbopack-zram','turbopack',11264)]:
+            script = ('set -e\nscope=build; swap_variant="$1"\n'
+                      'phase() { python3 -c "import json,sys; print(json.dumps(sys.argv[1:]))" "$@"; }\n'
+                      + block + '\nrun_product_phases\n')
+            result = subprocess.run(['bash','-c',script,'phase-test',variant],capture_output=True,text=True,timeout=10)
+            self.assertEqual(result.returncode,0,result.stderr)
+            calls = [json.loads(line) for line in result.stdout.splitlines()]
+            next_call = next(c for c in calls if c[0]=='next')
+            self.assertEqual(next_call[-1], '--'+bundler)
+            self.assertIn('NODE_OPTIONS=--max-old-space-size='+str(heap),next_call)
+            self.assertTrue(any(c[0]=='config' for c in calls))
+            self.assertFalse(any('NODE_OPTIONS=' in a for c in calls if c[0]!='next' for a in c))
+
+    def test_swap_limit_mismatch_refuses_before_real_child(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary); marker=root/'child-ran'
+            args=SimpleNamespace(cgroup=str(root),report=str(root/'receipt.json'),phase='next',experiment='webpack',timeout=2,
+                                 command=[sys.executable,'-c',f"open({str(marker)!r},'w').write('ran')"])
+            reading={'pids':[os.getpid()],'limitBytes':13*1024**3,'swapLimitBytes':0,'swapBytes':0,'events':{}}
+            with patch.object(metrics,'cgroup_read',return_value=reading), patch.object(metrics,'host_memory',return_value={'availableBytes':1024,'swapUsedBytes':0}):
+                self.assertNotEqual(metrics.run(args),0)
+            self.assertFalse(marker.exists())
+
+class SwapCounterTests(unittest.TestCase):
+    def test_kernel_peak_and_missing_optional_peak_are_distinct(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            self.assertEqual(metrics.swap_observation(root), {'peakBytes':None,'peakSource':'sampled','events':None})
+            (root/'memory.swap.peak').write_text('12345')
+            (root/'memory.swap.events').write_text('high 2\nmax 3\nfail 4\n')
+            self.assertEqual(metrics.swap_observation(root), {'peakBytes':12345,'peakSource':'kernel','events':{'high':2,'max':3,'fail':4}})
+
+    def test_actual_child_gets_a_failing_verdict_even_with_available_swap(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            (root/'memory.swap.peak').write_text('8192')
+            (root/'memory.swap.events').write_text('high 0\nmax 1\nfail 0\n')
+            args=SimpleNamespace(cgroup=str(root),report=str(root/'receipt.json'),phase='next',experiment='turbopack',timeout=2,
+                command=[sys.executable,'-c','print("PRIVATE_CANARY"); raise SystemExit(7)'])
+            reading={'pids':[os.getpid()],'limitBytes':13*1024**3,'swapLimitBytes':24*1024**3,'swapBytes':4096,'events':{},'cpuMax':[400000,100000],'cpuUsageUsec':{'usage_usec':10}}
+            with patch.object(metrics,'cgroup_read',return_value=reading), patch.object(metrics,'host_memory',return_value={'availableBytes':4*1024**3,'swapUsedBytes':8192}):
+                self.assertEqual(metrics.run(args),1)
+            receipt=json.loads((root/'receipt.json').read_text())
+            self.assertEqual(receipt['childExitCode'],7)
+            self.assertEqual(receipt['swapObservation']['peakBytes'],8192)
+            self.assertEqual(receipt['swapObservation']['peakSource'],'kernel')
+            self.assertEqual(receipt['peakSampledSwapBytes'],4096)
+            self.assertFalse(receipt['webpackObservation']['enabled'])
+            self.assertNotIn('PRIVATE_CANARY',json.dumps(receipt))
+
 if __name__ == '__main__':
     unittest.main()

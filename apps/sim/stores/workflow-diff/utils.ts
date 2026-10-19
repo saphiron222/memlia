@@ -1,4 +1,4 @@
-// Modified by Memlia: bind draft revision attestations to applied client snapshots.
+// Modified by Memlia: bind draft revisions and validate lossless editor snapshots.
 
 import { createLogger } from '@sim/logger'
 import { isPlainRecord, sortObjectKeysDeep } from '@sim/utils/object'
@@ -140,7 +140,20 @@ const editorOutputSchema = z.union([
     .passthrough(),
 ])
 const wireBlockSchema = workflowStateResponseSchema.shape.blocks.valueType
+// Bound the style representation to editor-compatible scalars. This does not
+// validate browser CSS property names, units or rendering semantics.
+const editorStyleSchema = z.record(
+  z.string(),
+  z.union([z.string(), z.number(), z.null(), z.undefined()])
+)
 const editorSnapshotSchema = workflowStateResponseSchema.extend({
+  edges: z.array(
+    workflowStateResponseSchema.shape.edges.element.extend({
+      style: editorStyleSchema.optional(),
+      labelStyle: editorStyleSchema.optional(),
+      labelBgStyle: editorStyleSchema.optional(),
+    })
+  ),
   blocks: z.record(
     z.string(),
     wireBlockSchema.extend({
