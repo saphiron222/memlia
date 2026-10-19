@@ -2,6 +2,8 @@
 
 ## Sources tierces
 
+Les paragraphes suivants retracent les adaptations successives ; les mentions de raccordements encore absents décrivent leur étape historique. L’état actuel et ses limites sont précisés dans README.md et dans le complément ci-dessous.
+
 Le socle Sim provient du dépôt officiel https://github.com/simstudioai/sim au commit `c6cef5f87b6a1d1d01df89e7140bad9e9fd4c2e2`. Les fichiers réutilisés conservent leurs droits et leurs notices Apache-2.0, disponibles sous `compliance/upstream/sim/`. Les licences imbriquées restent à leur emplacement. Les textes de licence des bibliothèques ne sont pas remplacés par les présentes indications.
 
 Le répertoire Enterprise `apps/sim/ee`, les empreintes Enterprise interdites, les polices Season Sans et Söhne et les archives/exécutables opaques non admis sont exclus de cet export. Le dépôt ne distribue pas actuellement les moteurs OpenAdapt ; leur intégration est en cours de développement.
@@ -33,3 +35,9 @@ Les composants nouveaux sont notamment `agents/windows/`, `packages/memlia-contr
 ## Limites de cette publication de développement
 
 Cet export source n’est pas une release commerciale. Les dépendances téléchargées, binaires générés, images conteneur, source maps, ressources graphiques et archives de livraison ont leurs propres obligations et gates. Aucun résultat de compilation n’autorise à distribuer un artefact dont les licences n’ont pas été contrôlées. Les preuves internes, secrets, données du laboratoire et l’historique de travail privé ne sont pas publiés.
+
+## Complément de cette composition Chat, Windows et Excel
+
+Le raccordement HTTP local, les capacités serveur, le consentement et l’interface native de Chat, ainsi que la création explicite d’un brouillon depuis Home réemploient les moteurs Sim. Leurs adaptations amont conservent Apache-2.0 et leurs mentions de modification. Les nouveaux modules Memlia, le profil Compose, le protocole Excel, son superviseur, son image et ses recettes restent sous droits réservés, sans attribution implicite Apache/MIT. Les dépendances Polars/openpyxl, HTTPX/cryptography et les composants OpenAdapt gardent leurs droits propres ; les textes de licence tiers et les réserves publiques Windows/contrats sont préservés.
+
+Le contrôle HTTP standalone, la recette Linux Excel et ses sondes sont des sources de test, pas une image, une roue tierce, un moteur OpenAdapt embarqué ou une activation de service. Aucun code util-linux/Linux n’est copié dans les sondes. Le verrou Bun reste identique ; aucune distribution de cache, poids, bundle généré non admis, source map ou sortie de test n’est ajoutée. Le candidat exige ses contrôles frais et les jobs GitHub requis ; les succès historiques ne sont pas réattribués.

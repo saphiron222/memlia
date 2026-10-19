@@ -1,4 +1,5 @@
-import { copilotChats, copilotRuns, member, settings, user } from '@sim/db/schema'
+// Modified by Memlia: qualify persistent local engine boundaries.
+import { copilotChats, copilotRuns, member, settings, user, workspace } from '@sim/db/schema'
 import {
   dbChainMockFns,
   queueTableRows,
@@ -16,7 +17,10 @@ import {
   mothershipChatMessagesMock,
   mothershipChatMessagesMockFns,
 } from '@sim/testing/mocks/mothership-chat-messages.mock'
-import { mothershipChatStatusMock } from '@sim/testing/mocks/mothership-chat-status.mock'
+import {
+  mothershipChatStatusMock,
+  mothershipChatStatusMockFns,
+} from '@sim/testing/mocks/mothership-chat-status.mock'
 import {
   permissionGroupsResolveMock,
   permissionGroupsResolveMockFns,
@@ -27,6 +31,7 @@ import { ChatSendSupersededError } from '@/lib/mothership/chat/application/send-
 
 const hoisted = vi.hoisted(() => ({
   lease: vi.fn(),
+  workspaceAuth: vi.fn(),
   resolveDesktop: vi.fn(),
 }))
 const mocks = {
@@ -36,6 +41,10 @@ const mocks = {
   config: permissionGroupsResolveMockFns.mockGetUserPermissionConfigForOrganization,
   searchAvailable: knowledgeAvailabilityMockFns.mockRequireOrganizationSearchAvailable,
 }
+vi.mock('@/lib/core/application/workspace-authorization', async (original) => ({
+  ...(await original<typeof import('@/lib/core/application/workspace-authorization')>()),
+  authorizeWorkspaceOperation: hoisted.workspaceAuth,
+}))
 vi.mock('@/lib/knowledge/access/availability', () => knowledgeAvailabilityMock)
 afterAll(resetEnvFlagsMock)
 vi.mock('@/lib/mothership/chat/messages-store', () => mothershipChatMessagesMock)
@@ -259,6 +268,154 @@ describe('organization turn admission through current private-chat authorization
     await expect(admitChatTurn.execute({ principal, input: request })).rejects.toThrow(
       'Turn identity'
     )
+    expect(dbChainMockFns.insert).not.toHaveBeenCalled()
+  })
+})
+
+describe('local durable admission (SQL builder double, native use case)', () => {
+  const workspaceId = '33333333-3333-4333-8333-333333333333'
+  const marker = { kind: 'memlia_local_chat', version: 1, recovery: 'none' }
+  const local = {
+    kind: 'memlia_local_chat' as const,
+    version: 1 as const,
+    request: {
+      userId: 'actor',
+      chatId,
+      messageId: streamId,
+      workspaceId,
+      workflowId: 'workflow',
+      message: 'Find the policy',
+      mode: 'agent' as const,
+    },
+  }
+  function localInput() {
+    const { recovery: _recovery, ...rest } = input('agent')
+    return { ...rest, local: { ...local, request: { ...local.request } } }
+  }
+  beforeEach(() => {
+    resetDbChainMock()
+    mocks.banned.mockResolvedValue([])
+    hoisted.workspaceAuth.mockReset().mockResolvedValue(undefined)
+    queueTableRows(copilotChats, [
+      {
+        userId: 'actor',
+        workspaceId,
+        organizationId: null,
+        workflowId: 'workflow',
+        type: 'copilot',
+        mode: 'agent',
+      },
+    ])
+    queueTableRows(workspace, [
+      {
+        id: workspaceId,
+        organizationId: null,
+        allowPersonalApiKeys: false,
+        billedAccountUserId: 'actor',
+      },
+    ])
+    dbChainMockFns.returning
+      .mockResolvedValueOnce([{ model: null }])
+      .mockResolvedValueOnce([{ id: 'run-1' }])
+      .mockResolvedValueOnce([{ key: 'claim' }])
+  })
+  it('commits the local identity with the message and claim, without worker recovery', async () => {
+    await admitChatTurn.execute({ principal, input: localInput() })
+    const row = dbChainMockFns.values.mock.calls.find(([value]) => value.id === 'run-1')?.[0]
+    expect(row.requestContext).toEqual({
+      requestId: 'request-1',
+      controllerToken: 'controller',
+      localExecution: marker,
+    })
+    expect(row.workflowId).toBe('workflow')
+    expect(mocks.append).toHaveBeenCalledOnce()
+    expect(hoisted.workspaceAuth).toHaveBeenCalledOnce()
+    expect(hoisted.resolveDesktop).not.toHaveBeenCalled()
+  })
+  it.each(['userId', 'chatId', 'workspaceId', 'workflowId', 'messageId', 'message'] as const)(
+    'rejects conflicting local %s before writing',
+    async (key) => {
+      await expect(
+        admitChatTurn.execute({
+          principal,
+          input: {
+            ...localInput(),
+            local: { ...local, request: { ...local.request, [key]: 'foreign' } },
+          },
+        })
+      ).rejects.toThrow()
+      expect(mocks.append).not.toHaveBeenCalled()
+      expect(dbChainMockFns.insert).not.toHaveBeenCalled()
+    }
+  )
+  it('cannot combine local admission with worker recovery', async () => {
+    await expect(
+      admitChatTurn.execute({
+        principal,
+        input: { ...localInput(), recovery: input('agent').recovery },
+      })
+    ).rejects.toThrow()
+    expect(mocks.append).not.toHaveBeenCalled()
+  })
+  it.each([
+    { desktopDeviceId: 'desktop' },
+    {
+      message: {
+        id: streamId,
+        content: 'Find the policy',
+        requestMode: 'agent' as const,
+        contexts: [],
+      },
+    },
+  ])('refuses unsupported local context before any write', async (extra) => {
+    await expect(
+      admitChatTurn.execute({ principal, input: { ...localInput(), ...extra } })
+    ).rejects.toThrow('Local Chat is unavailable.')
+    expect(mocks.append).not.toHaveBeenCalled()
+    expect(dbChainMockFns.insert).not.toHaveBeenCalled()
+  })
+  it('owns the accepted local message and claim across the lease await', async () => {
+    const candidate = localInput()
+    mocks.lease.mockImplementationOnce(async () => {
+      candidate.message.content = 'foreign mutation'
+      candidate.sendClaim.claimToken = 'foreign-claim'
+      candidate.runId = 'foreign-run'
+      candidate.local.request.message = 'foreign intention'
+    })
+    await admitChatTurn.execute({ principal, input: candidate })
+    expect(mocks.append).toHaveBeenCalledWith(
+      chatId,
+      [expect.objectContaining({ content: 'Find the policy' })],
+      expect.anything(),
+      expect.anything()
+    )
+    expect(dbChainMockFns.values).toHaveBeenCalledWith(expect.objectContaining({ id: 'run-1' }))
+    expect(dbChainMockFns.set.mock.calls.at(-1)?.[0].result.claimToken).toBe('token')
+  })
+  it('publishes only the committed local stream identity after a mutable caller crosses admission', async () => {
+    const candidate = { ...localInput(), notifyWorkspaceStatus: true }
+    dbChainMockFns.returning
+      .mockReset()
+      .mockResolvedValueOnce([{ model: null }])
+      .mockResolvedValueOnce([
+        { id: 'run-1', streamId, requestContext: { localExecution: marker } },
+      ])
+      .mockResolvedValueOnce([{ key: 'claim' }])
+    mocks.lease.mockImplementationOnce(async () => {
+      candidate.message.id = 'foreign-stream'
+    })
+    await admitChatTurn.execute({ principal, input: candidate })
+    expect(mothershipChatStatusMockFns.mockPublishChatStatusChanged).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceId, userId: 'actor' }),
+      { chatId, type: 'started', streamId }
+    )
+  })
+  it('rejects revoked workspace authorization before persisting the marker', async () => {
+    hoisted.workspaceAuth.mockRejectedValue(new Error('revoked'))
+    await expect(admitChatTurn.execute({ principal, input: localInput() })).rejects.toThrow(
+      'revoked'
+    )
+    expect(mocks.append).not.toHaveBeenCalled()
     expect(dbChainMockFns.insert).not.toHaveBeenCalled()
   })
 })

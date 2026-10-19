@@ -1,3 +1,4 @@
+// Modified by Memlia: qualify durable local-only provenance on the native queue.
 import { beforeEach, describe, expect, it } from 'vitest'
 import {
   liveQueueKey,
@@ -14,6 +15,48 @@ const message = (id: string, content = `content-${id}`): QueuedMothershipMessage
 describe('useMothershipQueueStore', () => {
   beforeEach(() => {
     useMothershipQueueStore.getState().reset()
+  })
+
+  it('origin is acquired by an explicitly local edit and cannot be erased by later edits', () => {
+    const store = useMothershipQueueStore.getState()
+    store.enqueue('chat-origin', message('origin'))
+    store.replaceAt('chat-origin', 'origin', { content: 'local edit', localOrigin: true })
+    expect(useMothershipQueueStore.getState().queues['chat-origin'][0]).toMatchObject({
+      localOrigin: true,
+      content: 'local edit',
+    })
+    store.replaceAt('chat-origin', 'origin', { content: 'later edit' })
+    expect(useMothershipQueueStore.getState().queues['chat-origin'][0]).toMatchObject({
+      localOrigin: true,
+      content: 'later edit',
+    })
+  })
+
+  it('origin survives native migration, holds, reinsertion and persisted merge', () => {
+    const store = useMothershipQueueStore.getState()
+    store.enqueue('pending::origin', { ...message('retained'), localOrigin: true })
+    store.holdForSurface('pending::origin', 'owned-surface')
+    store.adoptHeldSends('pending::new-origin', 'owned-surface')
+    store.migrate('pending::new-origin', 'chat-origin')
+    const retained = useMothershipQueueStore.getState().queues['chat-origin'][0]
+    expect(retained.localOrigin).toBe(true)
+    store.remove('chat-origin', retained.id)
+    store.insertAt('chat-origin', 0, { ...retained, hold: 'online' })
+    store.releaseHeldUntilOnline()
+    store.deferRetry('chat-origin', retained.id, { attempt: 1, notBefore: 1 })
+    const persisted = JSON.parse(
+      JSON.stringify({ queues: useMothershipQueueStore.getState().queues })
+    )
+    const restored = useMothershipQueueStore.persist.getOptions().merge!(
+      persisted,
+      useMothershipQueueStore.getState()
+    )
+    expect(restored.queues['chat-origin'][0]).toMatchObject({
+      localOrigin: true,
+      content: 'content-retained',
+    })
+    expect(restored.queues['chat-origin'][0]).not.toHaveProperty('hold')
+    expect(JSON.stringify(persisted)).not.toMatch(/token|profile|model|key/i)
   })
 
   describe('enqueue / remove', () => {

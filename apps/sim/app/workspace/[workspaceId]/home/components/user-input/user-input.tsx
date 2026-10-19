@@ -1,4 +1,7 @@
+// Modified by Memlia: explicit workflow draft creation and restrictive local draft restoration.
 'use client'
+
+// Modified by Memlia: preserve rejected drafts and present authorized local capabilities.
 
 import type React from 'react'
 import {
@@ -43,12 +46,17 @@ import type {
 import { useFileAttachments } from '@/app/workspace/[workspaceId]/w/[workflowId]/components/panel/components/copilot/components/user-input/hooks'
 import type { AttachedFile } from '@/app/workspace/[workspaceId]/w/[workflowId]/components/panel/components/copilot/components/user-input/hooks/use-file-attachments'
 import { mentionifyIntegrations } from '@/blocks/integration-matcher'
+import type { LocalChatPresentation } from '@/hooks/queries/local-chat-capabilities'
 import { useChatInputFocus } from '@/hooks/use-chat-input-focus'
 import { useHydrated } from '@/hooks/use-hydrated'
 import { isMobileViewport } from '@/hooks/use-is-mobile'
 import { useSettingsNavigation } from '@/hooks/use-settings-navigation'
 import { useVoiceInput } from '@/hooks/use-voice-input'
-import { type DraftPayload, useMothershipDraftsStore } from '@/stores/mothership-drafts/store'
+import {
+  type DraftPayload,
+  readDraftLocalOrigin,
+  useMothershipDraftsStore,
+} from '@/stores/mothership-drafts/store'
 import type { ChatContext } from '@/stores/panel'
 
 export type { FileAttachmentForApi } from '@/app/workspace/[workspaceId]/home/types'
@@ -64,7 +72,14 @@ interface UserInputProps {
     text: string,
     fileAttachments?: FileAttachmentForApi[],
     contexts?: ChatContext[]
-  ) => void
+  ) => void | boolean | Promise<void>
+  localChat?: LocalChatPresentation
+  workflowDraft?: {
+    available: boolean
+    pending: boolean
+    message: string | null
+    create: (text: string, isCurrent: () => boolean) => Promise<boolean>
+  }
   isSending: boolean
   onStopGeneration: () => void
   isInitialView?: boolean
@@ -94,6 +109,8 @@ const UserInputImpl = forwardRef<UserInputHandle, UserInputProps>(function UserI
     defaultValue = '',
     draftScopeKey,
     onSubmit,
+    localChat,
+    workflowDraft,
     isSending,
     onStopGeneration,
     isInitialView = true,
@@ -102,6 +119,33 @@ const UserInputImpl = forwardRef<UserInputHandle, UserInputProps>(function UserI
   },
   ref
 ) {
+  const localChatRef = useRef(localChat)
+  localChatRef.current = localChat
+  const [unsupportedNotice, setUnsupportedNotice] = useState<string | null>(null)
+  const [draftOrigin, setDraftOrigin] = useState<'none' | 'local' | 'invalid'>('none')
+  const draftOriginRef = useRef(draftOrigin)
+  const updateDraftOrigin = (origin: 'none' | 'local' | 'invalid') => {
+    draftOriginRef.current = origin
+    setDraftOrigin(origin)
+  }
+  const originBlocksSend = () =>
+    draftOriginRef.current === 'invalid' ||
+    (draftOriginRef.current === 'local' && localChatRef.current?.backend !== 'local')
+  const restrictOptions =
+    draftOrigin !== 'none' || Boolean(localChat && localChat.backend !== 'legacy')
+  const refuseUnsupported = () => {
+    if (
+      draftOriginRef.current === 'none' &&
+      (!localChatRef.current || localChatRef.current.backend === 'legacy')
+    )
+      return false
+    setUnsupportedNotice(
+      'Les fichiers et ressources supplémentaires ne sont pas disponibles dans ce Chat. Votre brouillon est conservé.'
+    )
+    return true
+  }
+  const refuseUnsupportedRef = useRef(refuseUnsupported)
+  refuseUnsupportedRef.current = refuseUnsupported
   const { workspaceId } = useParams<{ workspaceId: string }>()
   const { navigateToSettings } = useSettingsNavigation()
   const { userId, onContextAdd, onContextRemove } = useChatSurface()
@@ -127,7 +171,7 @@ const UserInputImpl = forwardRef<UserInputHandle, UserInputProps>(function UserI
   filesRef.current = files
 
   const handlePasteFiles = useCallback((pasted: FileList) => {
-    filesRef.current.processFiles(pasted)
+    if (!refuseUnsupportedRef.current()) filesRef.current.processFiles(pasted)
   }, [])
 
   const editor = usePromptEditor({
@@ -178,6 +222,7 @@ const UserInputImpl = forwardRef<UserInputHandle, UserInputProps>(function UserI
     try {
       const draft = useMothershipDraftsStore.getState().drafts[draftScopeKey]
       if (!draft) return
+      updateDraftOrigin(readDraftLocalOrigin(draft))
       if (draft.contexts?.length) {
         restoredContexts = draft.contexts
       }
@@ -238,6 +283,9 @@ const UserInputImpl = forwardRef<UserInputHandle, UserInputProps>(function UserI
       key: draftScopeKeyRef.current,
       payload: {
         text: editor.value,
+        ...(draftOriginRef.current !== 'none'
+          ? { localOrigin: draftOriginRef.current === 'local' ? true : null }
+          : {}),
         fileAttachments: fileAttachments.length > 0 ? fileAttachments : undefined,
         contexts: editor.contexts.length > 0 ? editor.contexts : undefined,
       },
@@ -249,7 +297,7 @@ const UserInputImpl = forwardRef<UserInputHandle, UserInputProps>(function UserI
       pendingDraftRef.current = null
       draftSaveTimerRef.current = null
     }, 200)
-  }, [editor.value, files.attachedFiles, editor.contexts])
+  }, [editor.value, files.attachedFiles, editor.contexts, draftOrigin])
 
   useEffect(
     () => () => {
@@ -293,7 +341,12 @@ const UserInputImpl = forwardRef<UserInputHandle, UserInputProps>(function UserI
     prevSelectedContextsRef.current = curr
   }, [editor.contexts])
 
-  const canSubmit = (editor.value.trim().length > 0 || hasFiles) && !isSending && !hasUploadingFiles
+  const canSubmit =
+    (editor.value.trim().length > 0 || hasFiles) &&
+    !isSending &&
+    !hasUploadingFiles &&
+    !localChat?.blocked &&
+    !originBlocksSend()
 
   /**
    * Sync the editor when the `defaultValue` prop changes post-mount — e.g.
@@ -358,6 +411,7 @@ const UserInputImpl = forwardRef<UserInputHandle, UserInputProps>(function UserI
     ref,
     () => ({
       loadQueuedMessage: (msg: QueuedMessage) => {
+        updateDraftOrigin(readDraftLocalOrigin(msg))
         const currentEditor = editorRef.current
         currentEditor.setValue(msg.content)
         const restored: AttachedFile[] = (msg.fileAttachments ?? []).map((a) => ({
@@ -388,7 +442,7 @@ const UserInputImpl = forwardRef<UserInputHandle, UserInputProps>(function UserI
   )
 
   const handleFileSelectStable = useCallback(() => {
-    filesRef.current.handleFileSelect()
+    if (!refuseUnsupportedRef.current()) filesRef.current.handleFileSelect()
   }, [])
 
   const handleFileClick = useCallback((file: AttachedFile) => {
@@ -414,6 +468,11 @@ const UserInputImpl = forwardRef<UserInputHandle, UserInputProps>(function UserI
 
   const handleContainerDrop = useCallback(
     (e: React.DragEvent) => {
+      if (refuseUnsupportedRef.current()) {
+        e.preventDefault()
+        e.stopPropagation()
+        return
+      }
       const resourcesJson = e.dataTransfer.getData(SIM_RESOURCES_DRAG_TYPE)
       if (resourcesJson) {
         e.preventDefault()
@@ -457,7 +516,7 @@ const UserInputImpl = forwardRef<UserInputHandle, UserInputProps>(function UserI
   }, [])
 
   const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    filesRef.current.handleFileChange(e)
+    if (!refuseUnsupportedRef.current()) filesRef.current.handleFileChange(e)
   }, [])
 
   useEffect(() => {
@@ -483,6 +542,7 @@ const UserInputImpl = forwardRef<UserInputHandle, UserInputProps>(function UserI
 
   /** Empties the text, chips, attachments, transcript, and the saved draft in one step. */
   const clearComposer = useCallback(() => {
+    updateDraftOrigin('none')
     editorRef.current.clear()
     if (draftSaveTimerRef.current !== null) {
       window.clearTimeout(draftSaveTimerRef.current)
@@ -500,6 +560,7 @@ const UserInputImpl = forwardRef<UserInputHandle, UserInputProps>(function UserI
   }, [resetTranscript])
 
   const handleSubmit = useCallback(() => {
+    if (originBlocksSend() || localChatRef.current?.blocked) return
     const currentFiles = filesRef.current
     const currentEditor = editorRef.current
 
@@ -518,12 +579,12 @@ const UserInputImpl = forwardRef<UserInputHandle, UserInputProps>(function UserI
     // so the message reads as clean `/skill-name` (skills travel via contexts
     // regardless). Only the submitted copy is converted; the live input is not.
     const activeContexts = currentEditor.getActiveContexts()
-    onSubmit(
+    const accepted = onSubmit(
       currentEditor.getPlainValue(),
       fileAttachmentsForApi.length > 0 ? fileAttachmentsForApi : undefined,
       activeContexts.length > 0 ? activeContexts : undefined
     )
-    clearComposer()
+    if (accepted !== false) clearComposer()
   }, [onSubmit, clearComposer])
 
   /**
@@ -532,7 +593,12 @@ const UserInputImpl = forwardRef<UserInputHandle, UserInputProps>(function UserI
    * on an empty input mid-stream, and otherwise submit.
    */
   const handleEnterSubmit = useCallback(() => {
-    if (filesRef.current.attachedFiles.some((f) => f.uploading)) return
+    if (
+      originBlocksSend() ||
+      localChatRef.current?.blocked ||
+      filesRef.current.attachedFiles.some((f) => f.uploading)
+    )
+      return
     const hasSubmitPayload =
       editorRef.current.getValue().trim().length > 0 ||
       filesRef.current.attachedFiles.some((file) => !file.uploading && file.key)
@@ -608,7 +674,103 @@ const UserInputImpl = forwardRef<UserInputHandle, UserInputProps>(function UserI
         )}
       />
 
+      {draftOrigin !== 'none' && (
+        <div role='status' aria-live='polite' className='px-2 py-1 text-sm'>
+          <p>
+            Ce brouillon local exige les réglages du cabinet. Il ne sera pas envoyé au Chat
+            précédent.
+          </p>
+          {draftOrigin === 'invalid' && (
+            <p>Son origine est invalide. Reprenez-le explicitement dans le Chat local.</p>
+          )}
+          {draftOrigin === 'invalid' && localChat?.backend === 'local' && (
+            <button
+              type='button'
+              className='min-h-6 underline focus-visible:outline'
+              onClick={() => {
+                if (localChatRef.current?.backend !== 'local') return
+                updateDraftOrigin('local')
+                const key = draftScopeKeyRef.current
+                if (key) {
+                  const store = useMothershipDraftsStore.getState()
+                  store.setDraft(key, {
+                    ...store.drafts[key],
+                    text: editorRef.current.getValue(),
+                    localOrigin: true,
+                  })
+                }
+              }}
+            >
+              Reprendre ce brouillon local
+            </button>
+          )}
+        </div>
+      )}
+      {workflowDraft && localChat?.backend === 'local' && (
+        <div role='status' aria-live='polite' className='px-2 py-1 text-sm'>
+          <button
+            type='button'
+            className='min-h-6 underline focus-visible:outline'
+            disabled={
+              !workflowDraft.available ||
+              workflowDraft.pending ||
+              !editor.value.trim() ||
+              hasFiles ||
+              hasUploadingFiles ||
+              editor.contexts.length > 0
+            }
+            onClick={() => {
+              if (
+                !workflowDraft.available ||
+                workflowDraft.pending ||
+                filesRef.current.attachedFiles.length ||
+                editorRef.current.contexts.length
+              )
+                return
+              const text = editorRef.current.getValue()
+              void workflowDraft.create(
+                text,
+                () =>
+                  editorRef.current.getValue() === text &&
+                  filesRef.current.attachedFiles.length === 0 &&
+                  editorRef.current.contexts.length === 0
+              )
+            }}
+          >
+            {workflowDraft.pending
+              ? 'Création du brouillon…'
+              : 'Créer un workflow avec ce brouillon'}
+          </button>
+          <p>
+            Aucun message envoyé automatiquement. Dans le workflow, choisissez les réglages du
+            cabinet puis envoyez pour lancer la génération.
+          </p>
+          {workflowDraft.message && <p>{workflowDraft.message}</p>}
+        </div>
+      )}
+      {localChat && localChat.backend !== 'legacy' && (
+        <div role='status' aria-live='polite' className='px-2 py-1 text-sm'>
+          {localChat.model && <p>Modèle du cabinet : {localChat.model}</p>}
+          {localChat.settings && <p>{localChat.settings}</p>}
+          {localChat.message && <p>{localChat.message}</p>}
+          {unsupportedNotice && <p>{unsupportedNotice}</p>}
+          {localChat.backend === 'local' && !localChat.adopted && (
+            <button
+              type='button'
+              className='underline focus-visible:outline'
+              onClick={localChat.adopt}
+            >
+              Utiliser les réglages du cabinet
+            </button>
+          )}
+        </div>
+      )}
       <InputToolbar
+        selectionControl={
+          restrictOptions ? (
+            <span className='text-sm'>Réglages du cabinet · lecture seule</span>
+          ) : undefined
+        }
         plan={requestMode === 'plan'}
         leadingControls={
           <>
@@ -619,6 +781,8 @@ const UserInputImpl = forwardRef<UserInputHandle, UserInputProps>(function UserI
                   leftIcon={Plus}
                   onClick={handlePlusClick}
                   aria-label='Add resources'
+                  disabled={restrictOptions}
+                  title={restrictOptions ? 'Ressources supplémentaires non disponibles' : undefined}
                 />
               </Tooltip.Trigger>
               <Tooltip.Content side='top'>Add resources</Tooltip.Content>
@@ -630,6 +794,8 @@ const UserInputImpl = forwardRef<UserInputHandle, UserInputProps>(function UserI
                   leftIcon={Paperclip}
                   onClick={handleFileSelectStable}
                   aria-label='Attach file'
+                  disabled={restrictOptions}
+                  title={restrictOptions ? 'Pièces jointes non disponibles' : undefined}
                 />
               </Tooltip.Trigger>
               <Tooltip.Content side='top'>Attach file</Tooltip.Content>
@@ -641,12 +807,25 @@ const UserInputImpl = forwardRef<UserInputHandle, UserInputProps>(function UserI
                   leftIcon={Slash}
                   onClick={handleSlashTriggerClick}
                   aria-label='Skills'
+                  disabled={restrictOptions}
+                  title={
+                    restrictOptions ? 'Compétences supplémentaires non disponibles' : undefined
+                  }
                 />
               </Tooltip.Trigger>
               <Tooltip.Content side='top'>Skills</Tooltip.Content>
             </Tooltip.Root>
             {onModeChange && (
-              <ConversationModeSelector value={requestMode} onChange={handleModeChange} />
+              <ConversationModeSelector
+                value={requestMode}
+                onChange={(mode) => {
+                  if (restrictOptions && mode !== 'agent') {
+                    setUnsupportedNotice('Seul le mode de conversation du workflow est disponible.')
+                    return
+                  }
+                  handleModeChange(mode)
+                }}
+              />
             )}
           </>
         }

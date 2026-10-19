@@ -197,9 +197,59 @@ le job `build` modifié qui devra s’exécuter sur son propre candidat. Aucun a
 statut `measure(...)` n’est renommé en `build` ni reporté sur un autre commit.
 La protection de `main` n’est pas modifiée ; le vrai contrôle requis reste à passer.
 
-La phase Linux `standalone` vérifie **les fichiers et configurations**, elle ne
-lance aucun serveur HTTP : health/login/assets Linux, inventaire complet de
-licences/secrets d’un artefact redistribué, Docker Compose et Hyper-V restent hors
-de cette preuve. Une compilation réussie n’est pas une release commerciale.
+Les résultats historiques ci-dessus vérifiaient seulement les fichiers et
+configurations standalone, sans serveur HTTP. Ils ne qualifient pas le smoke
+HTTP ajouté ci-dessous. Inventaire complet de licences/secrets d’un artefact
+redistribué, Docker Compose et Hyper-V restent hors de ces preuves. Une
+compilation réussie n’est pas une release commerciale.
 Le workflow expérimental et sa matrice restent inchangés et ne fournissent pas le
 check `build` ; aucune fusion ou publication n’est effectuée par ce patch.
+
+
+## Smoke HTTP standalone — protocole ajouté, Linux réel encore à mesurer
+
+La même phase `standalone` conserve les contrôles BUILD_ID, server.js, manifests,
+static et output standalone. En mode swap, les trois source maps doivent toujours
+être désactivées et cpus=2. `--validation-only` ne démarre ni Next ni ce serveur.
+Le succès de la phase exige désormais aussi une réponse `/api/health` JSON avec
+status=ok, `/login` en HTML200 et deux ressources distinctes `/_next/static/`
+référencées par ce HTML, non vides et de type CSS ou JavaScript.
+
+`scripts/ci/linux-standalone-smoke.py` copie la sortie standalone dans un stage
+privé possédé puis y ajoute public et .next/static, selon les premières copies du
+Dockerfile natif. Les liens internes relatifs peuvent être conservés ; les liens
+absolus, sortant de leur source, les racines/ancêtres de copie symboliques et les
+collisions de destination symboliques sont refusés. Les surcharges de packages
+runtime du Dockerfile (notamment sharp/oracledb et bundles spécifiques) ne sont
+pas requalifiées par ce stage.
+
+Node24 démarre en production sur un port IPv4 loopback libre. Avant chaque GET,
+le listener doit être associé à un inode socket du PID Node enfant encore
+possédé dans procfs ; un listener étranger n'est jamais interrogé. Aucune
+redirection n'est suivie, chaque réponse est bornée à1Mio et chaque attente HTTP
+à5s au plus, dans une fenêtre HTTP de67s. Huit secondes sont réservées à l'arrêt ;
+la phase entière est plafonnée à120s par le superviseur existant. TERM, puis KILL
+si nécessaire, ciblent uniquement cet enfant avec wait. Une interruption ou une
+lecture HTTP refusée reste un échec, même quand le nettoyage réussit.
+
+L'environnement runtime est une sélection fermée des fixtures du build possédé,
+avec télémétrie désactivée, aucun compte ni clé IA, aucun DSN de migration transmis
+au serveur. La base éphémère existante n'est pas migrée pour ce smoke. Le health
+natif ne consulte pas la DB ; ni health, ni la page login sans session ne prouvent
+une autorisation, une authentification ou un fonctionnement métier PostgreSQL.
+
+Les logs serveur restent dans un fichier temporaire privé puis sont supprimés,
+sans impression ni upload. Le seuil8Mio est contrôlé pendant l'attente du listener
+et après les lectures HTTP, pas un quota disque continu. Le reçu fermé
+`standalone-http.json` ne contient aucun corps, chemin d'asset, URL, argument,
+environnement, secret ou exception brute. Les reçus phase/cgroup/cleanup/OOM
+existants restent bloquants ; aucun ancien succès n'est attribué à ce protocole.
+
+La phase de tests existante exécute les tests du contrôleur puis
+`python3 scripts/ci/test-linux-standalone-smoke.py -v` avant les étapes lourdes.
+Les tests portables utilisent de petits serveurs Python fictifs possédés avec un
+listener doublé hors Linux. Le cas Linux procfs utilise réellement les inodes du
+socket enfant et est explicitement ignoré sur Mac. Ces tests ne remplacent pas
+une exécution du standalone Next réel dans la future CI. Aucun build Linux avec
+ce nouveau smoke, aucune recette navigateur, Windows ou release n'est revendiqué
+par l'ajout du code.

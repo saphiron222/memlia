@@ -38,7 +38,11 @@ import { TraceEvent } from '@/lib/mothership/generated/trace-events-v1'
 import { resolveEnterpriseByokKey } from '@/lib/mothership/request/enterprise-byok'
 import { mothershipRequestHeaders } from '@/lib/mothership/request/headers'
 import { finalizeStream } from '@/lib/mothership/request/lifecycle/finalize'
-import { streamRecoveryConfig } from '@/lib/mothership/request/lifecycle/recovery-config'
+import {
+  classifyRunExecution,
+  LOCAL_CHAT_EXECUTION,
+  streamRecoveryConfig,
+} from '@/lib/mothership/request/lifecycle/recovery-config'
 import {
   type CopilotLifecycleOptions,
   runCopilotLifecycle,
@@ -125,6 +129,23 @@ export function createSSEStream(params: StreamingOrchestrationParams): ReadableS
     suppliedOptions.localChat === undefined
       ? undefined
       : captureLocalChatOptions(suppliedOptions.localChat)
+  const admittedExecution = classifyRunExecution(params.admittedRun?.requestContext)
+  if (
+    admittedExecution === 'unavailable' ||
+    (admittedExecution === 'local' && !localChat) ||
+    (localChat &&
+      params.admittedRun &&
+      (admittedExecution !== 'local' ||
+        params.admittedRun.id !== runId ||
+        params.admittedRun.executionId !== executionId ||
+        params.admittedRun.streamId !== streamId ||
+        params.admittedRun.chatId !== chatId ||
+        params.admittedRun.userId !== userId ||
+        params.admittedRun.workspaceId !== workspaceId ||
+        params.admittedRun.workflowId !== localChat.workflow?.workflowId ||
+        params.admittedRun.organizationId))
+  )
+    throw new Error('Local Chat is unavailable.')
   if (
     localChat &&
     (suppliedOptions.recovery ||
@@ -140,6 +161,17 @@ export function createSSEStream(params: StreamingOrchestrationParams): ReadableS
       suppliedOptions.chatId !== chatId)
   )
     throw new Error('Local Chat is unavailable.')
+  // Own the checked database row across asynchronous publisher/lease work.
+  const admittedRun =
+    localChat && params.admittedRun
+      ? {
+          ...params.admittedRun,
+          requestContext: {
+            ...toRecordOrNull(params.admittedRun.requestContext),
+            localExecution: LOCAL_CHAT_EXECUTION,
+          },
+        }
+      : params.admittedRun
   const orchestrateOptions = localChat
     ? {
         ...suppliedOptions,
@@ -369,17 +401,17 @@ export function createSSEStream(params: StreamingOrchestrationParams): ReadableS
           if (!orchestrateOptions.recovery) await clearFilePreviewSessions(streamId)
 
           const savedRequestContext = {
-            ...(params.admittedRun?.requestContext ?? {}),
+            ...(admittedRun?.requestContext ?? {}),
             requestId,
             controllerToken: lease?.value,
-            recovery: localChat
-              ? undefined
-              : await streamRecoveryConfig(orchestrateOptions, requestPayload),
+            ...(localChat
+              ? { localExecution: LOCAL_CHAT_EXECUTION }
+              : { recovery: await streamRecoveryConfig(orchestrateOptions, requestPayload) }),
           }
           try {
             if (chatId && !orchestrateOptions.recovery) {
               const run =
-                params.admittedRun ??
+                admittedRun ??
                 (await createRunSegment({
                   id: runId,
                   executionId,
@@ -462,7 +494,7 @@ export function createSSEStream(params: StreamingOrchestrationParams): ReadableS
               abortSignal: abortController.signal,
               assertControllerOwnership,
               onBillingAdmission: async (admission) => {
-                if (!chatId || !savedRequestContext.recovery) return
+                if (!chatId || !toRecordOrNull(savedRequestContext)?.recovery) return
                 await assertControllerOwnership()
                 if (!lease) throw new StreamControllerSupersededError()
                 const updated = await recordRunBillingAdmission(

@@ -107,6 +107,11 @@ Les essais de verrouillage/UAC/RDP physiques et le produit intégré restent dis
 - [CreateMutexExW](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createmutexexw)
 - [WaitForSingleObject et WAIT_ABANDONED](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitforsingleobject)
 
+La primitive [d’arrêt local coopératif](LOCAL_STOP.md) s'arme avant tout travail,
+réemploie cette réservation et expose un signal monotone avec contrôle pré-action.
+La fixture hotkey Windows reste NON EXÉCUTÉE ; elle ne donne aucun consentement et
+ne livre pas encore d'indicateur de capture ou d'interface de gestion.
+
 P07 reste ouvert : mTLS/DPAPI/enrôlement, commandes/TTL/déduplication durables,
 consentement et indicateur local, arrêt d’urgence, transport et intégration backend
 ne font pas partie de cette tranche. P08/P13 et toute qualification commerciale

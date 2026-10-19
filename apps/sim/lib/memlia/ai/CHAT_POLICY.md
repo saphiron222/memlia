@@ -37,7 +37,7 @@ Les objets doivent être des records ordinaires (prototype objet ou nul), avec
 uniquement des propriétés propres, énumérables et de données. Accesseurs,
 propriétés cachées, symboles et champs hérités sont refusés. Les erreurs publiques
 restent `Chat installation policy is unavailable.`, sans contenu de configuration
-ni cause brute. Les configurations sémantiques sont strictes aux deux niveaux.
+ni cause brute. Les configurations sémantiques et leurs sous-objets sont stricts.
 Les bornes de champs ne sont pas une limite mémoire d'un futur lecteur JSON/HTTP.
 
 Le résultat est un clone figé, y compris `data`, portant les mêmes champs validés
@@ -45,6 +45,40 @@ et deux marqueurs : `kind: 'configuration_decision'`, `activation: 'blocked'`.
 Il ne contient ni clé, ciphertext, référence de credential, identité utilisateur,
 endpoint, header, prompt, graphe ou catalogue. Il n'est pas une preuve d'autorité
 administrateur. Passer un objet au parseur ne prouve pas sa provenance serveur.
+
+## Sélection explicite du moteur local
+
+La même configuration peut comporter `localBackend`, sous forme stricte :
+
+```json
+{
+  "kind": "memlia_local_chat",
+  "version": 1,
+  "budgetWindow": { "id": "cabinet_chat_v1", "version": 7 }
+}
+```
+
+Ce champ ne contient ni secret, prix, utilisateur, endpoint ni règle de permission.
+Il est facultatif ; son absence conserve la décision historique. Toute présence
+malformée, même NULL ou undefined en mémoire, est refusée sans repli worker.
+La version de format est1 ; la référence de fenêtre doit comporter un ID ASCII
+alphanumérique/underscore/tiret de1à128caractères et une version entière1à2147483647.
+Les objets et sous-objets sont copiés et figés ; les getters, symboles, champs
+cachés et clés supplémentaires restent interdits.
+
+Cette sélection exige `provider: openai` : la réservation de chaque tentative
+physique actuellement disponible est spécifique à ce transport. Une configuration
+Anthropic sans sélection locale reste valide, sans prétendre à une qualification
+Anthropic du moteur local. Le modèle reste choisi dans le catalogue natif.
+
+**L'activation reste blocked**, même avec ce champ. Le lecteur de fichier
+administrateur existant reste la seule source de cette décision. Avant un envoi,
+le futur compositeur devra relire la fenêtre canonique avec exactement cet ID
+et cette version, exiger son état/période/profil valide et le même modèle, puis
+passer par les autorisations natives et la réservation après COMMIT de chaque
+transport. Une référence de fenêtre n'est ni un budget disponible ni une
+permission de dépenser. Aucune création de fenêtre, clé, route ou activation
+HTTP n'est réalisée par cette extension du parseur.
 
 ## Source administrateur : fichier Linux POSIX
 

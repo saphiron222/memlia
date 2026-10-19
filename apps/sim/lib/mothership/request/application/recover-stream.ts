@@ -1,3 +1,4 @@
+// Modified by Memlia: local persistent runs can be replayed but never restarted by a worker.
 import {
   type DelegatedPrincipal,
   type OrganizationDelegatedPrincipal,
@@ -31,6 +32,7 @@ import {
   planRecovery,
 } from '@/lib/mothership/request/lifecycle/controller-ownership'
 import {
+  classifyRunExecution,
   RESOURCE_AUTHORING_VERSION,
   StreamRecoveryConfigSchema,
 } from '@/lib/mothership/request/lifecycle/recovery-config'
@@ -151,6 +153,10 @@ export const takeOverStreamRun = defineAuthorizedChatUseCase({
  */
 async function recoverStreamRun(context: StreamRunContext, admission?: AbortSignal) {
   const { run, chatId, userId, workspaceId, organizationId } = context
+  const executionKind = classifyRunExecution(run.requestContext)
+  if (executionKind === 'unavailable')
+    throw new OrchestrationError('validation', 'Local Chat is unavailable.')
+  if (executionKind === 'local') return run
   if (isTerminalStreamStatus(run.status)) return run
   const saved = run.requestContext as Record<string, unknown> | null
   const config = StreamRecoveryConfigSchema.safeParse(saved?.recovery)

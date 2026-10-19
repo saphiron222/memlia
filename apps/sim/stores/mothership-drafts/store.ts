@@ -1,3 +1,4 @@
+// Modified by Memlia: preserve a restrictive local draft origin across storage; never an adoption ticket.
 import { create } from 'zustand'
 import { devtools, persist } from 'zustand/middleware'
 import type { FileAttachmentForApi } from '@/app/workspace/[workspaceId]/home/types'
@@ -5,10 +6,19 @@ import type { ChatContext } from '@/stores/panel'
 
 export interface DraftPayload {
   text: string
+  /** Only true is valid. Persisted input is untrusted; every other present value blocks submission. */
+  localOrigin?: unknown
   /** Committed URL query that an editable Search-tab draft belongs to. */
   searchQuery?: string
   fileAttachments?: FileAttachmentForApi[]
   contexts?: ChatContext[]
+}
+
+export function readDraftLocalOrigin(payload: unknown): 'none' | 'local' | 'invalid' {
+  if (!payload || typeof payload !== 'object' || !Object.hasOwn(payload, 'localOrigin'))
+    return 'none'
+  const descriptor = Object.getOwnPropertyDescriptor(payload, 'localOrigin')
+  return descriptor && 'value' in descriptor && descriptor.value === true ? 'local' : 'invalid'
 }
 
 /**
@@ -67,7 +77,12 @@ export const useMothershipDraftsStore = create<MothershipDraftsState>()(
               const { [key]: _, ...rest } = s.drafts
               return { drafts: rest }
             }
-            return { drafts: { ...s.drafts, [key]: payload } }
+            // JSON omits undefined fields: retain a malformed present restriction as null.
+            const stored =
+              Object.hasOwn(payload, 'localOrigin') && payload.localOrigin === undefined
+                ? { ...payload, localOrigin: null }
+                : payload
+            return { drafts: { ...s.drafts, [key]: stored } }
           }),
         migrateDraft: (fromKey, toKey) =>
           set((state) => {

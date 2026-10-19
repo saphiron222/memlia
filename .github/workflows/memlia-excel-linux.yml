@@ -1,0 +1,89 @@
+# Copyright 2026 Memlia. All rights reserved.
+name: Packaging Excel Linux — installation et procédure natives
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/memlia-excel-linux.yml
+      - packages/memlia-contracts/**
+      - runtimes/excel/**
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/memlia-excel-linux.yml
+      - packages/memlia-contracts/**
+      - runtimes/excel/**
+permissions:
+  contents: read
+concurrency:
+  group: memlia-excel-linux-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  packaging:
+    # Private-runner quotas must be approved before enabling metered minutes.
+    if: github.event.repository.private == false && github.repository == 'saphiron222/memlia'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PIP_CONFIG_FILE: /dev/null
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+      PIP_NO_CACHE_DIR: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+      POLARS_MAX_THREADS: '1'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12.15'
+          architecture: x64
+      - name: Préparer uniquement les roues tierces verrouillées
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          wheels="$RUNNER_TEMP/memlia-excel-third-party"
+          mkdir "$wheels"
+          python -I -B -m pip --isolated --disable-pip-version-check download \
+            --index-url https://pypi.org/simple --no-cache-dir \
+            --only-binary=:all: --no-deps --require-hashes \
+            --dest "$wheels" -r runtimes/excel/requirements.lock
+          python -I -B -m venv "$RUNNER_TEMP/memlia-excel-test-tools"
+          "$RUNNER_TEMP/memlia-excel-test-tools/bin/python" -I -B -m pip \
+            --isolated --disable-pip-version-check install \
+            --no-index --no-cache-dir --no-deps --require-hashes \
+            --find-links "$wheels" -r runtimes/excel/requirements.lock
+      - name: Construire, contrôler et tester les deux packages locaux
+        shell: bash
+        env:
+          MEMLIA_TEST_WHEELHOUSE: ${{ runner.temp }}/memlia-excel-third-party
+        run: |
+          set -euo pipefail
+          # Reuses the existing native wheel integrity and installed-XLSX tests.
+          # No Memlia package is resolved from an index; forged wheels are never installed.
+          timeout --signal=TERM --kill-after=10s 10m \
+            "$RUNNER_TEMP/memlia-excel-test-tools/bin/python" -B \
+            runtimes/excel/tests/test_packaging.py -v
+      - name: Vérifier la recette sans daemon supplémentaire
+        shell: bash
+        env:
+          MEMLIA_TEST_WHEELHOUSE: ${{ runner.temp }}/memlia-excel-third-party
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=10s 2m \
+            "$RUNNER_TEMP/memlia-excel-test-tools/bin/python" -B -m unittest discover \
+            -s runtimes/excel/linux -p 'test_*.py' -v
+      - name: Qualifier réellement le worker isolé Linux AMD64
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          # Standard ephemeral public runner only; no registry login or image push.
+          # Native supervisor remains unregistered: this is its explicit CI recipe.
+          timeout --signal=TERM --kill-after=20s 12m \
+            "$RUNNER_TEMP/memlia-excel-test-tools/bin/python" -B \
+            runtimes/excel/linux/qualification.py \
+            --wheelhouse "$RUNNER_TEMP/memlia-excel-third-party" \
+            --output "$RUNNER_TEMP/memlia-excel-linux-recipe"
+      # No artifacts: wheels, logs and fictitious workbooks remain on this ephemeral VM.

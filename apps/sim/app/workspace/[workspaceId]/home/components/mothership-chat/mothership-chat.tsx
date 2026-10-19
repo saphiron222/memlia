@@ -1,3 +1,4 @@
+// Modified by Memlia: forward local capability presentation and synchronous submit refusal.
 'use client'
 
 import type { ComponentType } from 'react'
@@ -67,6 +68,7 @@ import type {
   WorkspaceResourceRef,
 } from '@/app/workspace/[workspaceId]/home/types'
 import { useOptionalWorkspacePermissionsContext } from '@/app/workspace/[workspaceId]/providers/workspace-permissions-provider'
+import type { LocalChatPresentation } from '@/hooks/queries/local-chat-capabilities'
 import { getWorkspaceFilesQueryOptions, workspaceFilesKeys } from '@/hooks/queries/workspace-files'
 import { useAutoScroll } from '@/hooks/use-auto-scroll'
 import type { ChatContext } from '@/stores/panel'
@@ -74,6 +76,7 @@ import { MothershipChatSkeleton } from './components/mothership-chat-skeleton'
 import { shouldShowAssistantMessageActions } from './message-actions-visibility'
 
 interface MothershipChatProps {
+  localChat?: LocalChatPresentation
   SearchConnectionComponent?: ComponentType<SearchIntegrationConnectionProps>
   workspaceId?: string
   composer?: ReactNode
@@ -85,7 +88,7 @@ interface MothershipChatProps {
     text: string,
     fileAttachments?: FileAttachmentForApi[],
     contexts?: ChatContext[]
-  ) => void
+  ) => void | boolean | Promise<void>
   onStopGeneration: () => void
   messageQueue: QueuedMessage[]
   editingQueuedId: string | null
@@ -355,6 +358,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
 })
 
 export function MothershipChat({
+  localChat,
   SearchConnectionComponent,
   workspaceId,
   composer,
@@ -982,6 +986,7 @@ export function MothershipChat({
                   key={draftScopeKey}
                   ref={userInputRef}
                   onSubmit={onSubmit}
+                  localChat={localChat}
                   isSending={isStreamActive}
                   onStopGeneration={onStopGeneration}
                   isInitialView={false}

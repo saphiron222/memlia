@@ -53,16 +53,31 @@ représente pas l’organisation d’un workspace partagé. Le port proposition 
 séparément l’organisation canonique du workspace à son enveloppe. La composition
 simulée ne qualifie pas les autorisations collaboratives de bout en bout.
 
-La branche locale n’appelle ni worker ni génération distante du titre. Elle ne
-persiste pas de configuration de reprise worker et refuse une telle admission.
-Le buffer actif reste natif ; une reprise du calcul après perte du contrôleur
-n’est pas implémentée. Il n’y a pas de fallback worker, de rebase automatique ou
-de garantie d’exécution exactement une fois.
+La branche locale n’appelle ni worker ni génération distante du titre. Son
+admission interne enregistre atomiquement avec le message un marqueur versionné
+`requestContext.localExecution` sans clé ni callback. Elle ne persiste pas de
+configuration de reprise worker. Un marqueur présent mais invalide, une
+configuration contradictoire ou une tentative de démarrage sans options locales
+sont refusés ; l’absence de marqueur conserve le comportement historique.
+
+Le reconnect autorisé peut relire le run et son buffer, sans reprendre son
+calcul, réserver de nouveau budget ou contacter un worker. Les scans natifs de
+reprise automatique ne sélectionnent pas ces runs sans configuration worker.
+Stop reste durable et conserve les droits natifs ; il signale le contrôleur
+local et ferme l’admission. Un contrôleur absent ou un état inconnu ne produit
+pas une confirmation de règlement. Même un contrôleur arrêté ne prouve pas
+qu’un effet déjà commencé a été annulé. Le marqueur est transmis avant la
+suppression du run aux routines de nettoyage. Le steering local est refusé
+avant tout contact worker ou ajout de message. Aucune reprise de calcul,
+rebase automatique ou garantie d’exécution exactement une fois n’est fournie.
 
 ## Vérifications et limites
 
 Les tests locaux composent lifecycle, handlers, porte de permission, writer SSE,
-ModelAdapter et boucles SDK natives. HTTP, persistance, attribution et frontière
+ModelAdapter et boucles SDK natives. Les tests de persistance du marqueur et de
+contrôle réutilisent les use cases avec doubles SQL, autorisations et réseau
+explicitement identifiés ; ils ne qualifient pas PostgreSQL ou un redémarrage
+réel du serveur. HTTP, persistance, attribution et frontière
 COMMIT sont des doublures explicitement identifiées dans ces tests. Les recettes
 PostgreSQL des ports restent distinctes et ne deviennent pas une recette HTTP
 ou navigateur par composition. Aucun fournisseur réel, écran, coût facturé,
@@ -74,3 +89,12 @@ un profil tarifaire explicites, puis à la clé native et à la destination perm
 Pièces jointes, messages riches, desktop et autres providers restent hors profil.
 La revue indépendante, les contrôles globaux et les évaluations réelles P05/P06
 restent requis ; ce README ne déclare pas le Chat complet.
+
+La route de relecture conserve le buffer natif et les états terminaux persistés. Une
+relecture qui exige le journal worker (`source=log` ou trou de buffer) échoue en
+503 pour le moteur local ; un marqueur présent inconnu refuse également la
+relecture. Le balayage des runs abandonnés exclut toute présence de
+`localExecution`, même NULL ou contradictoire avec une recovery worker, avant la
+reprise et le Stop distant. Les nouveaux cas de ce balayage sont préparés dans
+la suite d'intégration native PostgreSQL/Redis ; ils ne sont pas qualifiés par
+les tests unitaires de cette tranche.

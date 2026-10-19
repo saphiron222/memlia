@@ -112,6 +112,57 @@ facturation et réconciliation d'entitlements Cloud. `CRON_SECRET` est obligatoi
 avant résolution Compose. Son healthcheck prouve seulement la vie du processus,
 pas la réussite des appels : surveiller leurs erreurs. Pas de nouveau scheduler.
 
+## Configuration du Chat indépendant
+
+`MEMLIA_CHAT_POLICY_SOURCE` désigne un fichier JSON non secret, par chemin
+absolu dans la VM Linux. Préparer sa politique selon
+[`CHAT_POLICY.md`](../../apps/sim/lib/memlia/ai/CHAT_POLICY.md) et ses règles de
+modèle/tarif/fenêtre ; ce déploiement n'invente aucun prix ni budget actif.
+Les secrets fournisseurs restent injectés seulement dans leurs variables
+serveur existantes, jamais dans ce JSON ni une variable publique. Le profil
+local actuel accepte OpenAI ; les autres clés restent utiles aux blocs de
+workflows existants mais ne sélectionnent pas un autre moteur Chat local.
+
+Le web reçoit toujours `MEMLIA_CHAT_POLICY_FILE=/etc/memlia/chat-policy.json`
+et `COPILOT_TOOL_PERMISSIONS_ENABLED=true`. Le fichier est monté en lecture
+seule au premier emplacement, avec `bind.create_host_path=false`. Une source
+hôte manquante ne doit pas devenir un répertoire créé automatiquement. La
+variable source est obligatoire avant résolution Compose ; ni son contenu ni
+ses permissions ne sont vérifiés par `compose config`. Le chemin interne fixe
+sélectionne le backend local : absence, corruption ou refus de policy ne
+retombe pas sur le worker Sim. Aucune clé `COPILOT_API_KEY` n'est transmise.
+
+Préparer le fichier sous UID 0, sans écriture groupe/autres et sans lien,
+par exemple mode0444, lisible par UID/GID1001. Dans l'image finale, `/etc/memlia`
+et tous les parents du chemin interne doivent également appartenir à root,
+être traversables et ne pas être modifiables par l'identité web. Vérifier les
+permissions réelles après montage, y compris les ACL : `read_only` seul ne
+prouve pas ces propriétés. Le lecteur natif recontrôle la propriété, les
+modes, l'accès effectif, les métadonnées et la taille bornée à chaque lecture.
+Les services DB/cache/realtime/cron/migrations ne reçoivent ni fichier ni
+variable de policy. Aucun UID de config supposé changer l'ownership hôte
+n'est utilisé.
+
+Le flag de confirmations rend les routes natives disponibles ; il n'accorde
+aucune permission de workspace ou de workflow. Le driver local conserve son
+gate unitaire sans approbation automatique ni préférence permanente, lié aux
+opérations exactes et au CAS. Permissions, modèle courant, transcript,
+fenêtre monétaire, réservations et quotas restent vérifiés dans le backend.
+Une simple clé fournisseur ne suffit pas à rendre ce Chat opérationnel.
+
+Le crontab existant appelle toutes les30minutes la route authentifiée
+`/api/cron/cleanup-stale-executions`. Celle-ci enfile le job natif qui appelle
+`runCleanupStaleExecutions`, puis `sweepOrphanedRuns` pour les tours abandonnés.
+Aucun timer ou daemon supplémentaire n'est ajouté. Le dispatch, l'exécution
+réelle du job et son résultat doivent être vérifiés et supervisés dans la
+recette Compose ; le seul HTTP200 ne prouve pas la clôture. Le raccordement
+persistant général des jobs reste une condition bloquante décrite plus haut.
+
+Les tests de cette tranche résolvent réellement le modèle Compose sans daemon
+et exercent les absences de variables, la portée du montage, les valeurs fixes
+serveur et l'absence de credentials worker. Ils ne qualifient pas un montage
+Linux, un démarrage applicatif, un modèle, le cron en exécution ou Hyper-V.
+
 ## TLS du cabinet
 
 Le reverse proxy existant s'exécute sur la même VM et termine HTTPS ; il rejoint

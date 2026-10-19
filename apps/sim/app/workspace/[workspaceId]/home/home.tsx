@@ -1,4 +1,4 @@
-// Modified by Memlia in 2026. Upstream Apache-2.0 license and notices retained.
+// Modified by Memlia: offer explicit native workflow draft creation; never submit automatically.
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -7,6 +7,7 @@ import { createLogger } from '@sim/logger'
 import { useQueryClient } from '@tanstack/react-query'
 import { useParams } from 'next/navigation'
 import { usePostHog } from 'posthog-js/react'
+import { PermissionAccessBoundary } from '@/components/permissions/access-boundary'
 import { requestJson } from '@/lib/api/client/request'
 import { createWorkflowContract } from '@/lib/api/contracts'
 import {
@@ -33,7 +34,6 @@ import {
 } from '@/app/workspace/[workspaceId]/home/hooks/use-resource-panel'
 import { useRestoredChatEntry } from '@/app/workspace/[workspaceId]/home/hooks/use-restored-chat-entry'
 import { resolveWorkspaceResourceRef } from '@/app/workspace/[workspaceId]/home/resolve-resource-ref'
-import { PermissionAccessBoundary } from '@/components/permissions/access-boundary'
 import { useMarkMothershipChatRead } from '@/hooks/queries/mothership-chats'
 import { getWorkspaceFilesQueryOptions, useWorkspaceFiles } from '@/hooks/queries/workspace-files'
 import { useOAuthReturnRouter } from '@/hooks/use-oauth-return'
@@ -46,6 +46,7 @@ import {
   type UserInputHandle,
 } from './components'
 import { getMothershipUseChatOptions, useChat } from './hooks'
+import { useCreateWorkflowDraft } from './hooks/use-create-workflow-draft'
 import type {
   FileAttachmentForApi,
   MothershipResource,
@@ -171,6 +172,8 @@ function HomeContent({ chatId, userName, userId }: HomeProps) {
     isSending,
     isReconnecting,
     sendMessage,
+    trySubmitMessage,
+    localChat,
     stopGeneration,
     resolvedChatId,
     removeResource,
@@ -183,6 +186,17 @@ function HomeContent({ chatId, userName, userId }: HomeProps) {
     dispatchingHeadId,
     getCurrentRequestId,
   } = chat
+  const workflowDraft = useCreateWorkflowDraft({
+    workspaceId,
+    userId,
+    enabled:
+      !chatId &&
+      !resolvedChatId &&
+      !isSending &&
+      messages.length === 0 &&
+      selectedMode === 'agent' &&
+      chat.resources.length === 0,
+  })
   const panel = useChatResourcePanel(chat, controller, userId)
   const {
     isResourceCollapsed,
@@ -210,9 +224,11 @@ function HomeContent({ chatId, userName, userId }: HomeProps) {
   }, [workspaceId, getCurrentRequestId, stopGeneration])
 
   const handleSubmit = useCallback(
-    async (text: string, fileAttachments?: FileAttachmentForApi[], contexts?: ChatContext[]) => {
+    (text: string, fileAttachments?: FileAttachmentForApi[], contexts?: ChatContext[]) => {
       const trimmed = text.trim()
-      if (!trimmed && !(fileAttachments && fileAttachments.length > 0)) return
+      if (!trimmed && !(fileAttachments && fileAttachments.length > 0)) return false
+      if (!trySubmitMessage(trimmed || 'Analyze the attached file(s).', fileAttachments, contexts))
+        return false
 
       captureEvent(posthogRef.current, 'task_message_sent', {
         workspace_id: workspaceId,
@@ -226,9 +242,9 @@ function HomeContent({ chatId, userName, userId }: HomeProps) {
       }
 
       prepareResourceViewForAgentTurn()
-      sendMessage(trimmed || 'Analyze the attached file(s).', fileAttachments, contexts)
+      return true
     },
-    [workspaceId, chatId, prepareResourceViewForAgentTurn, sendMessage]
+    [workspaceId, chatId, prepareResourceViewForAgentTurn, trySubmitMessage]
   )
 
   /**
@@ -453,6 +469,8 @@ function HomeContent({ chatId, userName, userId }: HomeProps) {
                     defaultValue={initialPrompt}
                     draftScopeKey={draftScopeKey}
                     onSubmit={handleSubmit}
+                    localChat={localChat}
+                    workflowDraft={workflowDraft}
                     isSending={isSending}
                     onStopGeneration={handleStopGeneration}
                   />
@@ -484,6 +502,7 @@ function HomeContent({ chatId, userName, userId }: HomeProps) {
             isReconnecting={isReconnecting}
             isLoading={showChatSkeleton}
             onSubmit={handleSubmit}
+            localChat={localChat}
             onStopGeneration={handleStopGeneration}
             messageQueue={messageQueue}
             editingQueuedId={editingQueuedId}

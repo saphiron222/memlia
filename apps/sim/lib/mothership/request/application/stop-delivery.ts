@@ -1,3 +1,4 @@
+// Modified by Memlia: local runs never signal a worker or invent an effect cancellation.
 import { createLogger } from '@sim/logger'
 import { getErrorMessage } from '@sim/utils/errors'
 import { ringDesktopInbox } from '@/lib/desktop/executor/doorbell'
@@ -24,6 +25,8 @@ interface RunStopDelivery {
   settled: boolean
   /** The worker acknowledged the Stop as settled. */
   workerSettled: boolean
+  /** Observed controller abort plus released lock, not proof that an effect was undone. */
+  localControllerStopped?: boolean
 }
 
 interface RunStopDeliveryOptions {
@@ -42,26 +45,31 @@ export async function deliverRunStop(
   work: StoppedRunWork | Promise<StoppedRunWork>,
   options: RunStopDeliveryOptions = {}
 ): Promise<RunStopDelivery> {
-  const { streamId, userId, chatId } = run
+  const { id: runId, streamId, userId, chatId } = run
+  const executionKind = run.executionKind ?? 'worker'
+  const local = executionKind !== 'worker'
+  let controllerFired = false
   /** Admission is closed: the device re-reads its inbox and cancels what it is running. */
   if (run.desktopDeviceId) ringDesktopInbox(run.desktopDeviceId, 'cancel')
   /** Push delivers promptly; the worker also reconciles Sim's durable intent after an outage. */
-  const workerStop = requestExplicitStreamAbort({
-    streamId,
-    userId,
-    chatId,
-    timeoutMs: 6000,
-    mothershipBaseURL: options.mothershipBaseURL,
-  }).catch((error) => {
-    logger.warn('Stop saved; worker delivery awaits reconciliation', {
-      streamId,
-      error: getErrorMessage(error),
-    })
-    return { settled: false }
-  })
+  const workerStop = local
+    ? Promise.resolve({ settled: false })
+    : requestExplicitStreamAbort({
+        streamId,
+        userId,
+        chatId,
+        timeoutMs: 6000,
+        mothershipBaseURL: options.mothershipBaseURL,
+      }).catch((error) => {
+        logger.warn('Stop saved; worker delivery awaits reconciliation', {
+          streamId,
+          error: getErrorMessage(error),
+        })
+        return { settled: false }
+      })
   /** The Stop is durable already; a lost abort marker must not skip the cleanup below. */
   try {
-    await abortActiveStream(streamId)
+    controllerFired = (await abortActiveStream(streamId)) === true
   } catch (error) {
     logger.warn('Stopped stream abort marker could not be written', {
       streamId,
@@ -94,13 +102,19 @@ export async function deliverRunStop(
     logger.warn('Stopped stream did not settle; released its chat lock', { chatId, streamId })
   }
   /** A run with no controller left, or none to begin with, has nothing else to settle it. */
-  await settleStoppedRunWithoutController(run.id).catch((error) => {
+  await settleStoppedRunWithoutController(runId).catch((error) => {
     logger.warn('Stopped run without a controller could not be settled', {
       streamId,
       error: getErrorMessage(error),
     })
   })
-  return { settled, workerSettled: worker.settled }
+  return {
+    settled,
+    workerSettled: worker.settled,
+    ...(local
+      ? { localControllerStopped: executionKind === 'local' && controllerFired && settled }
+      : {}),
+  }
 }
 
 /**

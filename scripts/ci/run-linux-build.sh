@@ -206,6 +206,7 @@ PY
       metrics_extra+=(--experiment "$swap_variant" --timeout 6000)
     fi
   fi
+  if [[ "$label" == standalone ]]; then metrics_extra+=(--timeout 120); fi
   docker run --name "$name" --platform linux/amd64 --network "$prefix" \
     --user "$(id -u):$(id -g)" --read-only --cap-drop ALL --security-opt no-new-privileges:true \
     --memory 13g --memory-swap "$memory_swap" --cpus 4 --pids-limit 512 \
@@ -238,7 +239,7 @@ Path(sys.argv[1]).write_text(json.dumps(receipt,indent=2)+'\n')
 assert receipt['dockerExitCode']==0 and receipt['containerExitCode']==0 and not receipt['oomKilled'] and not receipt['running'] and receipt['receiptPresent']
 PY
 }
-phase test /work python3 scripts/ci/test-linux-build-metrics.py -v
+phase test /work sh -ec 'python3 scripts/ci/test-linux-build-metrics.py -v; python3 scripts/ci/test-linux-standalone-smoke.py -v'
 phase install /work sh -ec 'test "$(node --version)" = v24.22.0; test "$(bun --version)" = 1.4.2; sha256sum bun.lock > /scratch/lock.sha256; bun install --frozen-lockfile --ignore-scripts; sha256sum -c /scratch/lock.sha256'
 current_stage=toolchain
 docker run --rm --network none --user "$(id -u):$(id -g)" --read-only --cap-drop ALL \
@@ -298,24 +299,7 @@ if(r.productionBrowserSourceMaps!==false||r.serverSourceMaps!==false||r.enablePr
 else
   phase next /work/apps/sim env DEBUG=next:build:webpack-build DEBUG_COLORS=0 NODE_OPTIONS=--max-old-space-size=11264 node ../../node_modules/next/dist/bin/next build --webpack
 fi
-phase standalone /work/apps/sim python3 -c '
-from pathlib import Path
-import json,os
-root=Path(".next")
-assert (root/"BUILD_ID").read_text().strip()
-assert (root/"standalone/apps/sim/server.js").is_file()
-assert (root/"routes-manifest.json").is_file()
-assert (root/"prerender-manifest.json").is_file()
-assert (root/"static").is_dir()
-assert (root/"required-server-files.json").is_file()
-config=json.loads((root/"required-server-files.json").read_text())["config"]
-assert config["output"]=="standalone"
-if os.environ.get("MEMLIA_SWAP_VARIANT"):
-    assert config["productionBrowserSourceMaps"] is False
-    assert config["experimental"]["serverSourceMaps"] is False
-    assert config["enablePrerenderSourceMaps"] is False
-    assert config["experimental"]["cpus"]==2
-'
+phase standalone /work/apps/sim python3 /work/scripts/ci/linux-standalone-smoke.py /work/apps/sim /scratch /metrics/standalone-http.json
 standalone_verified=1
 current_stage=completed
 completed=1

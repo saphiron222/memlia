@@ -1,3 +1,4 @@
+// Modified by Memlia: add a bounded authorized text reader for local Chat.
 import { type Principal, resolvePrincipalSubjectUserId } from '@sim/auth/principal'
 import { db } from '@sim/db'
 import { copilotChats, copilotMessages } from '@sim/db/schema'
@@ -521,6 +522,59 @@ export async function getAccessibleCopilotChatWithTextMessages(
     .where(and(eq(copilotMessages.chatId, chatId), isNull(copilotMessages.deletedAt)))
     .orderBy(...TRANSCRIPT_ORDER)
   return { ...chat, messages: rows.map((row) => row.content) }
+}
+
+export async function loadBoundedCopilotChatText(
+  chatId: string,
+  userId: string,
+  workflowId: string,
+  workspaceId: string
+): Promise<Array<{ id: string; role: string; content: unknown }> | null> {
+  const available = async () => {
+    const chat = await getAccessibleCopilotChatAuth(chatId, userId)
+    if (
+      !chat ||
+      chat.id !== chatId ||
+      chat.userId !== userId ||
+      chat.organizationId !== null ||
+      chat.workflowId !== workflowId ||
+      (chat.workspaceId !== null && chat.workspaceId !== workspaceId)
+    )
+      return false
+    const workflow = await authorizeChatWorkflowRead(chatId, userId, workflowId)
+    return workflow?.id === workflowId && workflow.workspaceId === workspaceId
+  }
+  if (!(await available())) return null
+  const live = and(eq(copilotMessages.chatId, chatId), isNull(copilotMessages.deletedAt))
+  // Refuse long transcripts before touching any message JSONB. No hidden window/truncation.
+  const ids = await db
+    .select({ id: copilotMessages.id })
+    .from(copilotMessages)
+    .where(live)
+    .orderBy(...TRANSCRIPT_ORDER)
+    .limit(129)
+  if (ids.length > 128) throw new Error('Authorized transcript unavailable.')
+  // Logical size requires TOAST work in PostgreSQL; CASE bounds returned JSON at this read,
+  // even when a row grows between the ID scan and projection. Do not select raw content.
+  const bounded = sql<unknown>`case when ${copilotMessages.role} in ('user', 'assistant')
+    and octet_length(${copilotMessages.content}::text) <= 65536
+    then ${textMessageContent(['id', 'role', 'content', 'origin'])} else null end`
+  const rows = await db
+    .select({
+      rowId: copilotMessages.id,
+      id: copilotMessages.messageId,
+      role: copilotMessages.role,
+      content: bounded,
+    })
+    .from(copilotMessages)
+    .crossJoinLateral(detoastedMessageContent)
+    .where(live)
+    .orderBy(...TRANSCRIPT_ORDER)
+    .limit(129)
+  if (rows.length !== ids.length || rows.some((row, index) => row.rowId !== ids[index].id))
+    throw new Error('Authorized transcript unavailable.')
+  if (!(await available())) return null
+  return rows.map(({ id, role, content }) => ({ id, role, content }))
 }
 
 /**

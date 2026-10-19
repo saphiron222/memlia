@@ -6,12 +6,26 @@ import { workflowIdParamsSchema } from '@/lib/api/contracts/workflows'
 import { getModelSunsetStatus, getProviderModels } from '@/providers/models'
 import type { runCatalogProvider } from '../chat/provider-binding'
 
+const localBackend = z
+  .object({
+    kind: z.literal('memlia_local_chat'),
+    version: z.literal(1),
+    budgetWindow: z
+      .object({
+        id: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
+        version: z.number().int().positive().max(2147483647),
+      })
+      .strict(),
+  })
+  .strict()
+
 const configuration = z
   .object({
     enabled: z.literal(true),
     provider: z.enum(['openai', 'anthropic']),
     model: z.string().min(1).max(256),
     destination: z.literal('official'),
+    localBackend: localBackend.optional(),
     data: z
       .object({
         conversation: z.literal(true),
@@ -33,6 +47,7 @@ export function parseChatInstallationPolicy(raw: unknown) {
     const parsed = configuration.safeParse(raw)
     if (
       !parsed.success ||
+      (parsed.data.localBackend !== undefined && parsed.data.provider !== 'openai') ||
       !getProviderModels(parsed.data.provider).includes(parsed.data.model) ||
       getModelSunsetStatus(parsed.data.model) === 'deprecated'
     )
@@ -40,6 +55,14 @@ export function parseChatInstallationPolicy(raw: unknown) {
     return Object.freeze({
       ...parsed.data,
       data: Object.freeze(parsed.data.data),
+      ...(parsed.data.localBackend === undefined
+        ? {}
+        : {
+            localBackend: Object.freeze({
+              ...parsed.data.localBackend,
+              budgetWindow: Object.freeze(parsed.data.localBackend.budgetWindow),
+            }),
+          }),
       kind: 'configuration_decision' as const,
       activation: 'blocked' as const,
     })
@@ -69,7 +92,14 @@ export function selectWorkflowReadPolicy(
 
 /** Inspect descriptors before Zod can evaluate a configuration object's accessors. */
 function plainConfiguration(value: unknown) {
-  return plainRecord(value) && plainRecord(Object.getOwnPropertyDescriptor(value, 'data')?.value)
+  if (!plainRecord(value) || !plainRecord(Object.getOwnPropertyDescriptor(value, 'data')?.value))
+    return false
+  const backend = Object.getOwnPropertyDescriptor(value, 'localBackend')
+  return (
+    backend === undefined ||
+    (plainRecord(backend.value) &&
+      plainRecord(Object.getOwnPropertyDescriptor(backend.value, 'budgetWindow')?.value))
+  )
 }
 function plainRecord(value: unknown): value is Record<string, unknown> {
   if (!isPlainRecord(value)) return false

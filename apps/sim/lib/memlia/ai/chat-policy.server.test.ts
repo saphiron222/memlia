@@ -234,3 +234,108 @@ it('accepts plain JSON records without requiring a prototype or altering selecte
   expect(decision.data.workflow).toBe('catalogue_only')
   expect(decision.activation).toBe('blocked')
 })
+
+// A wrong backend/window selection would let the HTTP composer choose a worker
+// or budget that the installation administrator did not explicitly select.
+function localConfiguration() {
+  return {
+    ...configuration(),
+    localBackend: {
+      kind: 'memlia_local_chat',
+      version: 1,
+      budgetWindow: { id: 'cabinet_chat_v1', version: 7 },
+    },
+  }
+}
+it('captures the exact local backend and window without authorizing a transport', () => {
+  const input = localConfiguration()
+  input.data.workflow = 'summary_only'
+  const result = parseChatInstallationPolicy(input)
+  expect(result).toEqual({
+    ...input,
+    kind: 'configuration_decision',
+    activation: 'blocked',
+  })
+  expect(selectWorkflowReadPolicy(result, 'server-workflow')).toEqual({
+    workflowId: 'server-workflow',
+    policy: 'summary_only',
+  })
+  input.localBackend.budgetWindow.id = 'later_window'
+  input.localBackend.budgetWindow.version = 99
+  expect(result.localBackend).toEqual({
+    kind: 'memlia_local_chat',
+    version: 1,
+    budgetWindow: { id: 'cabinet_chat_v1', version: 7 },
+  })
+  expect(Object.isFrozen(result.localBackend)).toBe(true)
+  expect(Object.isFrozen(result.localBackend!.budgetWindow)).toBe(true)
+})
+it.each([
+  undefined,
+  null,
+  {},
+  { kind: 'worker', version: 1, budgetWindow: { id: 'window', version: 1 } },
+  { kind: 'memlia_local_chat', version: 2, budgetWindow: { id: 'window', version: 1 } },
+  { kind: 'memlia_local_chat', version: 1 },
+  { kind: 'memlia_local_chat', version: 1, budgetWindow: null },
+  { kind: 'memlia_local_chat', version: 1, budgetWindow: { id: '', version: 1 } },
+  { kind: 'memlia_local_chat', version: 1, budgetWindow: { id: ' window', version: 1 } },
+  { kind: 'memlia_local_chat', version: 1, budgetWindow: { id: 'w'.repeat(129), version: 1 } },
+  ...[0, -1, 1.5, '1', 2147483648].map((version) => ({
+    kind: 'memlia_local_chat',
+    version: 1,
+    budgetWindow: { id: 'window', version },
+  })),
+  {
+    kind: 'memlia_local_chat',
+    version: 1,
+    budgetWindow: { id: 'window', version: 1, userId: 'foreign' },
+  },
+  {
+    kind: 'memlia_local_chat',
+    version: 1,
+    budgetWindow: { id: 'window', version: 1 },
+    apiKey: 'FICTITIOUS_KEY',
+  },
+])('rejects a present malformed local backend instead of falling back (%#)', (localBackend) => {
+  expect(() => parseChatInstallationPolicy({ ...configuration(), localBackend })).toThrowError(
+    new Error('Chat installation policy is unavailable.')
+  )
+})
+it('does not select the unsupported Anthropic physical cost path as a local backend', () => {
+  expect(() =>
+    parseChatInstallationPolicy({
+      ...localConfiguration(),
+      provider: 'anthropic',
+      model: models.anthropic,
+    })
+  ).toThrowError(new Error('Chat installation policy is unavailable.'))
+})
+it('refuses nested backend accessors and hidden authority without evaluating them', () => {
+  let reads = 0
+  for (const level of ['localBackend', 'budgetWindow'] as const) {
+    const input = localConfiguration()
+    const target = level === 'localBackend' ? input.localBackend : input.localBackend.budgetWindow
+    Object.defineProperty(target, level === 'localBackend' ? 'kind' : 'id', {
+      enumerable: true,
+      get() {
+        reads++
+        throw new Error('FICTITIOUS_PRIVATE_GETTER')
+      },
+    })
+    expect(() => parseChatInstallationPolicy(input)).toThrowError(
+      new Error('Chat installation policy is unavailable.')
+    )
+  }
+  for (const decorate of [
+    (value: object) => Object.defineProperty(value, 'apiKey', { value: 'FICTITIOUS_PRIVATE' }),
+    (value: object) => Object.assign(value, { [Symbol('authority')]: 'FICTITIOUS_PRIVATE' }),
+  ]) {
+    const input = localConfiguration()
+    decorate(input.localBackend.budgetWindow)
+    expect(() => parseChatInstallationPolicy(input)).toThrowError(
+      new Error('Chat installation policy is unavailable.')
+    )
+  }
+  expect(reads).toBe(0)
+})

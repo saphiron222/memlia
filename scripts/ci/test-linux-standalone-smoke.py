@@ -1,0 +1,241 @@
+#!/usr/bin/env python3
+# Copyright 2026 Memlia. All rights reserved.
+import json
+from pathlib import Path
+import subprocess
+import unittest
+
+HERE = Path(__file__).resolve().parent
+
+class WiringTests(unittest.TestCase):
+    def calls(self, scope):
+        source = (HERE/'run-linux-build.sh').read_text()
+        block = source[source.index('run_product_phases() {'):source.index('\nrun_product_phases\n')]
+        script = 'set -e\nscope="$1"\nphase() { python3 -c "import json,sys; print(json.dumps(sys.argv[1:]))" "$@"; }\n'+block+'\nrun_product_phases\n'
+        result = subprocess.run(['bash','-c',script,'fixture',scope], capture_output=True,text=True,timeout=10)
+        self.assertEqual(result.returncode,0,result.stderr)
+        return [json.loads(row) for row in result.stdout.splitlines()]
+
+    def test_full_build_reaches_the_real_http_probe_after_next(self):
+        calls = self.calls('build')
+        standalone = next(call for call in calls if call[0]=='standalone')
+        self.assertIn('/work/scripts/ci/linux-standalone-smoke.py',standalone)
+        self.assertLess(next(i for i,c in enumerate(calls) if c[0]=='next'),calls.index(standalone))
+
+    def test_validation_only_never_starts_the_http_server(self):
+        self.assertFalse(any(call[0] in ('next','standalone') for call in self.calls('validation')))
+
+
+# Infrastructure boundaries: real owned child/HTTP; procfs ownership only on Linux.
+import importlib.util
+import os
+import signal
+import socket
+import sys
+import tempfile
+import time
+from unittest.mock import patch
+spec = importlib.util.spec_from_file_location('smoke', HERE/'linux-standalone-smoke.py')
+smoke = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(smoke)
+
+SERVER = r'''
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+import sys,time
+port,mode,record=int(sys.argv[1]),sys.argv[2],Path(sys.argv[3])
+class Handler(BaseHTTPRequestHandler):
+ def do_GET(self):
+  with record.open('a') as f:f.write(self.path+'\n')
+  status=200;kind='application/json';body=b'{"status":"ok"}'
+  if self.path=='/login':
+   kind='text/html';body=b'<html><script src="/_next/static/one.js"></script><link href="/_next/static/two.css"></html>'
+   if mode=='fonts':body=body.replace(b'<html>',b'<html><link href="/_next/static/media/font.woff2">')
+   if mode=='redirect':status=302
+   if mode=='oversize':body=b'x'*1048577
+   if mode=='traversal':body=b'<html><script src="/_next/static/../one.js"></script><link href="/_next/static/two.css"></html>'
+  elif self.path.startswith('/_next/static/'):
+   kind='text/css' if self.path.endswith('.css') else 'application/javascript';body=b'fictitious'
+   if mode=='empty':body=b''
+  if mode=='health-invalid' and self.path=='/api/health':body=b'{"status":"bad"}'
+  self.send_response(status);self.send_header('Content-Type',kind);self.send_header('Content-Length',str(len(body)));self.send_header('Location','https://invalid.example/PRIVATE_CANARY');self.end_headers()
+  try:self.wfile.write(body)
+  except BrokenPipeError:pass
+ def log_message(self,*args):pass
+print('PRIVATE_CANARY',flush=True)
+HTTPServer(('127.0.0.1',port),Handler).serve_forever()
+'''
+
+class HttpTests(unittest.TestCase):
+    def run_fixture(self, mode='good', ownership=True, native=False):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);server=root/'server.py';record=root/'requests'
+            server.write_text(SERVER)
+            with socket.socket() as listener:
+                listener.bind(('127.0.0.1',0));port=listener.getsockname()[1]
+            observed=[]
+            def portable_listener(pid, target):
+                observed.append(pid)
+                if not ownership:return False
+                try:
+                    with socket.create_connection(('127.0.0.1',target),timeout=.05):return True
+                except OSError:return False
+            with patch.object(smoke,'owned_listener',wraps=smoke.owned_listener if native else portable_listener) as listener_probe:
+                result=smoke.smoke([sys.executable,str(server),str(port),mode,str(record)],root,
+                                   {'PATH':os.environ.get('PATH','/usr/bin:/bin')},port,timeout=9)
+            observed.extend(call.args[0] for call in listener_probe.call_args_list)
+            requests=record.read_text().splitlines() if record.exists() else []
+            for pid in set(observed):
+                with self.assertRaises(ProcessLookupError):os.kill(pid,0)
+            self.assertTrue(result['cleanup'])
+            self.assertNotIn('PRIVATE_CANARY',json.dumps(result))
+            return result,requests
+
+    def test_real_loopback_health_login_and_two_assets_with_owned_child_cleanup(self):
+        result,requests=self.run_fixture()
+        self.assertEqual(result['status'],'passed')
+        self.assertEqual(requests,['/api/health','/login','/_next/static/one.js','/_next/static/two.css'])
+        self.assertEqual(result['assets'],2)
+        self.assertFalse(result['databaseQualified'])
+        self.assertFalse(result['authenticationQualified'])
+
+    def test_font_preloads_do_not_replace_the_two_javascript_or_css_assets(self):
+        result,requests=self.run_fixture('fonts')
+        self.assertEqual(result['status'],'passed')
+        self.assertEqual(requests,['/api/health','/login','/_next/static/one.js','/_next/static/two.css'])
+
+    def test_http_failures_never_become_passed_because_cleanup_succeeds(self):
+        for mode in ('redirect','oversize','empty','health-invalid','traversal'):
+            with self.subTest(mode=mode):
+                result,requests=self.run_fixture(mode)
+                self.assertEqual(result['status'],'failed')
+                self.assertFalse(any('PRIVATE' in request or '/../' in request for request in requests))
+
+    def test_foreign_listener_is_never_probed(self):
+        result,requests=self.run_fixture(ownership=False)
+        self.assertEqual(result['status'],'failed')
+        self.assertEqual(requests,[])
+
+    def test_real_interruption_during_cleanup_is_not_a_pass(self):
+        original_popen = smoke.subprocess.Popen
+        children=[]
+        def spawn(*args, **kwargs):
+            child=original_popen(*args, **kwargs);children.append(child)
+            terminate=child.terminate
+            def interrupt_then_terminate():
+                os.kill(os.getpid(),signal.SIGTERM)
+                terminate()
+            child.terminate=interrupt_then_terminate
+            return child
+        def interrupt(_signum,_frame):raise KeyboardInterrupt()
+        previous=signal.signal(signal.SIGTERM,interrupt)
+        try:
+            with patch.object(smoke.subprocess,'Popen',side_effect=spawn):
+                try:result,_=self.run_fixture()
+                except KeyboardInterrupt:self.fail('cleanup interruption escaped without owned cleanup')
+            self.assertEqual(result['status'],'failed')
+            self.assertEqual(result['reason'],'interrupted')
+        finally:
+            signal.signal(signal.SIGTERM,previous)
+            for child in children:
+                if child.poll() is None:child.kill()
+                child.wait(timeout=3)
+
+    def test_real_nonzero_child_and_timeout_fail_with_owned_cleanup(self):
+        for program,reason in [('raise SystemExit(3)','server_exited'),('import time; time.sleep(30)','timeout')]:
+            with self.subTest(reason=reason), tempfile.TemporaryDirectory() as temporary:
+                with patch.object(smoke,'owned_listener',return_value=False):
+                    result=smoke.smoke([sys.executable,'-c',program],Path(temporary),{},12345,timeout=9)
+                self.assertEqual(result['status'],'failed');self.assertEqual(result['reason'],reason)
+                self.assertTrue(result['cleanup'])
+
+    def test_stubborn_owned_child_is_killed_and_waited_without_reclassifying_timeout(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch.object(smoke,'owned_listener',return_value=False) as observe:
+                result=smoke.smoke([sys.executable,'-c','import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); time.sleep(30)'],Path(temporary),{},12345,timeout=9)
+            self.assertEqual(result['status'],'failed');self.assertEqual(result['reason'],'timeout')
+            self.assertTrue(result['forcedStop']);self.assertTrue(result['cleanup'])
+            for pid in {call.args[0] for call in observe.call_args_list}:
+                with self.assertRaises(ProcessLookupError):os.kill(pid,0)
+
+    @unittest.skipUnless(sys.platform=='linux','Linux procfs ownership required; no emulation qualification')
+    def test_linux_real_child_socket_inode_ownership(self):
+        result,_=self.run_fixture(native=True)
+        self.assertEqual(result['status'],'passed')
+
+class ArtifactTests(unittest.TestCase):
+    def test_preserves_all_original_artifact_and_effective_config_requirements(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            app=Path(temporary);root=app/'.next';(root/'standalone/apps/sim').mkdir(parents=True);(root/'static').mkdir()
+            names=('BUILD_ID','standalone/apps/sim/server.js','routes-manifest.json','prerender-manifest.json')
+            for name in names:(root/name).write_text('fixture')
+            config={'output':'standalone','productionBrowserSourceMaps':False,'experimental':{'serverSourceMaps':False,'cpus':2},'enablePrerenderSourceMaps':False}
+            manifest=root/'required-server-files.json';manifest.write_text(json.dumps({'config':config}))
+            smoke.verify_artifacts(app,True)
+            for name in names:
+                path=root/name;saved=path.read_bytes();path.unlink()
+                with self.assertRaises((smoke.Refused,FileNotFoundError)):smoke.verify_artifacts(app,True)
+                path.write_bytes(saved)
+            (root/'BUILD_ID').write_text(' ')
+            with self.assertRaises(smoke.Refused):smoke.verify_artifacts(app,True)
+            (root/'BUILD_ID').write_text('fixture')
+            for field in ('productionBrowserSourceMaps','enablePrerenderSourceMaps','serverSourceMaps','cpus','output'):
+                changed=json.loads(json.dumps(config));target=changed['experimental'] if field in ('serverSourceMaps','cpus') else changed
+                target[field]='export' if field=='output' else 4 if field=='cpus' else True
+                manifest.write_text(json.dumps({'config':changed}))
+                with self.assertRaises(smoke.Refused):smoke.verify_artifacts(app,True)
+            # As before, non-swap mode imposes output but does not add new map requirements.
+            manifest.write_text(json.dumps({'config':{'output':'standalone'}}));smoke.verify_artifacts(app,False)
+
+class StagingTests(unittest.TestCase):
+    def test_never_follow_symlink_outside_source_or_absolute_link(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);source=root/'source';source.mkdir();outside=root/'outside';outside.write_text('FICTITIOUS')
+            for target in ('../outside',str(outside)):
+                link=source/'link';link.symlink_to(target)
+                with self.assertRaises(smoke.Refused):smoke.copy_owned_tree(source,root/'target')
+                self.assertFalse((root/'target').exists());link.unlink()
+            self.assertEqual(outside.read_text(),'FICTITIOUS')
+
+    def test_rejects_a_source_root_symlink(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary); outside=root/'outside';outside.mkdir();(outside/'sentinel').write_text('owned fixture')
+            source=root/'source';source.symlink_to(outside,target_is_directory=True)
+            with self.assertRaises(smoke.Refused):smoke.copy_owned_tree(source,root/'target')
+            self.assertFalse((root/'target').exists())
+
+    def test_staging_refuses_symlinked_output_ancestor(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);app=root/'app';app.mkdir();outside=root/'outside';outside.mkdir()
+            (outside/'standalone').mkdir();(outside/'standalone/sentinel').write_text('owned fixture')
+            (outside/'static').mkdir();(app/'public').mkdir()
+            (app/'.next').symlink_to(outside,target_is_directory=True)
+            stage=root/'stage';stage.mkdir()
+            with self.assertRaises(smoke.Refused):smoke.stage_artifacts(app,stage)
+            self.assertFalse((stage/'sentinel').exists())
+
+    def test_staging_never_overwrites_a_linked_destination(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);source=root/'source';source.mkdir();(source/'sentinel').write_text('new')
+            outside=root/'outside';outside.mkdir();(outside/'sentinel').write_text('preserved')
+            target=root/'target';target.symlink_to(outside,target_is_directory=True)
+            with self.assertRaises(smoke.Refused):smoke.copy_owned_tree(source,target)
+            self.assertEqual((outside/'sentinel').read_text(),'preserved')
+
+    def test_preserves_internal_relative_link_without_source_dependency(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);source=root/'source';source.mkdir();(source/'real').write_text('fixture');(source/'link').symlink_to('real')
+            smoke.copy_owned_tree(source,root/'target')
+            self.assertTrue((root/'target/link').is_symlink())
+            self.assertEqual((root/'target/link').resolve(),(root/'target/real').resolve())
+
+    def test_runtime_excludes_migration_and_provider_secrets(self):
+        source={key:'fictitious' for key in ('BETTER_AUTH_SECRET','ENCRYPTION_KEY','INTERNAL_API_SECRET','BETTER_AUTH_URL','NEXT_PUBLIC_APP_URL','NEXT_PUBLIC_SOCKET_URL')}
+        source.update(DATABASE_URL='postgresql://memlia_build:fixture@database:5432/memlia_build',HOME='/scratch',TMPDIR='/scratch/tmp',MIGRATION_DATABASE_URL='PRIVATE_OWNER',OPENAI_API_KEY='PRIVATE_PROVIDER')
+        result=smoke.runtime_env(source,12345)
+        self.assertNotIn('MIGRATION_DATABASE_URL',result);self.assertNotIn('OPENAI_API_KEY',result)
+        self.assertEqual(result['HOSTNAME'],'127.0.0.1');self.assertEqual(result['NEXT_TELEMETRY_DISABLED'],'1')
+        source['DATABASE_URL']='postgresql://foreign:fixture@outside:5432/user_database'
+        with self.assertRaises(smoke.Refused):smoke.runtime_env(source,12345)
+
+if __name__ == '__main__': unittest.main()

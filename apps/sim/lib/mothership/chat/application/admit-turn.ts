@@ -1,3 +1,4 @@
+// Modified by Memlia: admit a local run atomically without worker recovery.
 import type { SessionPrincipal } from '@sim/auth/principal'
 import { copilotChats, idempotencyKey } from '@sim/db/schema'
 import { createLogger } from '@sim/logger'
@@ -22,7 +23,12 @@ import {
 } from '@/lib/mothership/chat/persisted-message'
 import { publishChatStatusChanged } from '@/lib/mothership/chat-status'
 import type { MothershipEffort } from '@/lib/mothership/model-options'
-import { StreamRecoveryConfigSchema } from '@/lib/mothership/request/lifecycle/recovery-config'
+import {
+  classifyRunExecution,
+  LOCAL_CHAT_EXECUTION,
+  LocalChatAdmissionSchema,
+  StreamRecoveryConfigSchema,
+} from '@/lib/mothership/request/lifecycle/recovery-config'
 import {
   assertChatStreamLease,
   type ChatStreamLease,
@@ -34,7 +40,9 @@ interface AdmitTurnInput {
   executionId: string
   requestId: string
   message: UserMessageParams
-  recovery: z.input<typeof StreamRecoveryConfigSchema>
+  recovery?: z.input<typeof StreamRecoveryConfigSchema>
+  /** Server-only local intent; mutually exclusive with worker recovery. */
+  local?: z.input<typeof LocalChatAdmissionSchema>
   lease: ChatStreamLease
   sendClaim: { normalizedKey: string; claimToken: string }
   notifyWorkspaceStatus: boolean
@@ -79,8 +87,14 @@ export const admitChatTurn = defineAuthorizedChatUseCase({
   authorizationOptions: {},
   async execute({ principal, context, input }) {
     const { userId, workspaceId, organizationId, chatId } = context
-    const recovery = StreamRecoveryConfigSchema.parse(input.recovery)
-    const request = recovery.request
+    const hasLocal = Object.hasOwn(input, 'local')
+    if (hasLocal && (Object.hasOwn(input, 'recovery') || input.desktopDeviceId))
+      throw new OrchestrationError('validation', 'Local Chat is unavailable.')
+    const local = hasLocal ? LocalChatAdmissionSchema.parse(input.local) : undefined
+    const recovery = local ? undefined : StreamRecoveryConfigSchema.parse(input.recovery)
+    const request = local ? { ...local.request, organizationId: undefined } : recovery!.request
+    if (local && (!workspaceId || organizationId || request.workflowId !== context.workflowId))
+      throw new OrchestrationError('validation', 'Local Chat is unavailable.')
     if (
       request.userId !== userId ||
       request.workspaceId !== workspaceId ||
@@ -92,6 +106,17 @@ export const admitChatTurn = defineAuthorizedChatUseCase({
     ) {
       throw new OrchestrationError('validation', 'Turn identity does not match its chat')
     }
+    if (local) {
+      if (Object.keys(input.message).some((key) => !['id', 'content', 'requestMode'].includes(key)))
+        throw new OrchestrationError('validation', 'Local Chat is unavailable.')
+      input = {
+        ...input,
+        local,
+        message: { id: request.messageId, content: request.message, requestMode: 'agent' },
+        lease: { ...input.lease },
+        sendClaim: { ...input.sendClaim },
+      }
+    }
     if (organizationId) {
       if (request.mode === 'agent' || request.mode === 'plan')
         await authorizeOrganizationChat.execute({
@@ -101,7 +126,9 @@ export const admitChatTurn = defineAuthorizedChatUseCase({
       else await requireOrganizationSearchAvailable(organizationId)
     }
     await assertChatStreamLease(input.lease)
-    const desktopDeviceId = await turnDesktopDevice(principal, workspaceId, input.desktopDeviceId)
+    const desktopDeviceId = local
+      ? null
+      : await turnDesktopDevice(principal, workspaceId, input.desktopDeviceId)
     const turnConfig = sql`COALESCE(${copilotChats.config}, '{}'::jsonb) || jsonb_build_object('conversationMode', ${request.mode ?? 'agent'}::text)`
     return withRunAdmissionLock(userId, request.messageId, async (tx) => {
       const [chat] = await tx
@@ -147,7 +174,7 @@ export const admitChatTurn = defineAuthorizedChatUseCase({
         requestContext: {
           requestId: input.requestId,
           controllerToken: input.lease.value,
-          recovery,
+          ...(local ? { localExecution: LOCAL_CHAT_EXECUTION } : { recovery }),
         },
       })
       const [claim] = await tx
@@ -172,7 +199,7 @@ export const admitChatTurn = defineAuthorizedChatUseCase({
       return run
     })
   },
-  async afterSuccess({ context, input }) {
+  async afterSuccess({ context, input, result }) {
     if (!input.notifyWorkspaceStatus) return
     try {
       publishChatStatusChanged(
@@ -184,7 +211,10 @@ export const admitChatTurn = defineAuthorizedChatUseCase({
         {
           chatId: context.chatId,
           type: 'started',
-          streamId: input.message.id,
+          streamId:
+            classifyRunExecution(result.requestContext) === 'local'
+              ? result.streamId
+              : input.message.id,
         }
       )
     } catch (error) {

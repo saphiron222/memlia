@@ -1,3 +1,4 @@
+// Modified by Memlia: qualify the additive bounded local transcript reader.
 import { dbChainMockFns, resetDbChainMock, schemaMock, workflowAuthzMockFns } from '@sim/testing'
 import { createSessionPrincipal } from '@sim/testing/factories/principal.factory'
 import {
@@ -5,8 +6,9 @@ import {
   mothershipOrganizationChatsMockFns,
 } from '@sim/testing/mocks/mothership-organization-chats.mock'
 import { permissionsMock } from '@sim/testing/mocks/permissions.mock'
-import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { OrchestrationError } from '@/lib/core/orchestration/types'
+import { loadAuthorizedChatTranscript } from '@/lib/memlia/chat/authorized-transcript.server'
 import { createTrustedOrganizationCopilotPrincipal } from '@/lib/mothership/auth/application-delegation'
 
 const {
@@ -31,6 +33,7 @@ import {
   getAccessibleCopilotChatAuth,
   getAccessibleCopilotChatForCancellation,
   getAccessibleCopilotChatWithMessages,
+  loadBoundedCopilotChatText,
   resolveOrCreateChat,
 } from '@/lib/mothership/chat/lifecycle'
 
@@ -59,6 +62,175 @@ const asstMsg = {
   content: 'Hello',
   timestamp: '2026-01-01T00:00:01.000Z',
 }
+
+describe('bounded authorized text reader (DB/authz boundaries doubled)', () => {
+  const scoped = { ...chatRow, mode: 'agent', workflowId: 'wf', workspaceId: 'ws' }
+  const projected = { rowId: 'row-1', id: 'message-1', role: 'user', content: userMsg }
+  function reads(first = scoped, last = scoped) {
+    dbChainMockFns.limit
+      .mockResolvedValueOnce([first])
+      .mockResolvedValueOnce([{ id: 'row-1' }])
+      .mockResolvedValueOnce([projected])
+      .mockResolvedValueOnce([last])
+  }
+  beforeEach(() => {
+    resetDbChainMock()
+    mockAuthorizeWorkflow.mockReset()
+    mockAuthorizeWorkflow.mockResolvedValue({
+      allowed: true,
+      workflow: { id: 'wf', workspaceId: 'ws' },
+    })
+    permissionsMock.checkWorkspaceAccess.mockResolvedValue({ exists: true, hasAccess: true })
+  })
+  afterEach(() => mockAuthorizeWorkflow.mockReset())
+  it('returns only bounded text rows after native ownership and canonical workflow checks', async () => {
+    reads()
+    expect(await loadBoundedCopilotChatText(CHAT_ID, USER_ID, 'wf', 'ws')).toEqual([
+      { id: 'message-1', role: 'user', content: userMsg },
+    ])
+    expect(dbChainMockFns.limit.mock.calls.map(([value]) => value)).toEqual([1, 129, 129, 1])
+    expect(mockAuthorizeWorkflow).toHaveBeenCalledWith({
+      workflowId: 'wf',
+      userId: USER_ID,
+      action: 'read',
+    })
+  })
+  it.each([
+    { userId: 'foreign' },
+    { id: 'foreign' },
+    { organizationId: 'org' },
+    { workflowId: null },
+    { workflowId: 'foreign' },
+    { workspaceId: 'foreign' },
+  ])('refuses incompatible owner/scope before selecting messages: %j', async (change) => {
+    dbChainMockFns.limit.mockResolvedValueOnce([{ ...scoped, ...change }])
+    expect(await loadBoundedCopilotChatText(CHAT_ID, USER_ID, 'wf', 'ws')).toBeNull()
+    expect(dbChainMockFns.limit).toHaveBeenCalledTimes(1)
+  })
+  it('refuses a canonical workspace mismatch despite an asserted chat workspace', async () => {
+    dbChainMockFns.limit.mockResolvedValueOnce([scoped])
+    mockAuthorizeWorkflow.mockResolvedValue({
+      allowed: true,
+      workflow: { id: 'wf', workspaceId: 'foreign' },
+    })
+    expect(await loadBoundedCopilotChatText(CHAT_ID, USER_ID, 'wf', 'ws')).toBeNull()
+    expect(dbChainMockFns.limit).toHaveBeenCalledTimes(1)
+  })
+  it('does not detoast messages after count overflow detected using IDs only', async () => {
+    dbChainMockFns.limit
+      .mockResolvedValueOnce([scoped])
+      .mockResolvedValueOnce(Array.from({ length: 129 }, (_, i) => ({ id: String(i) })))
+    await expect(loadBoundedCopilotChatText(CHAT_ID, USER_ID, 'wf', 'ws')).rejects.toThrow(
+      'Authorized transcript unavailable.'
+    )
+    expect(dbChainMockFns.select).toHaveBeenCalledTimes(2)
+    expect(dbChainMockFns.select.mock.calls[1][0]).toEqual({ id: schemaMock.copilotMessages.id })
+  })
+  it('refuses changed row identities between the count read and projected snapshot', async () => {
+    dbChainMockFns.limit
+      .mockResolvedValueOnce([scoped])
+      .mockResolvedValueOnce([{ id: 'row-1' }])
+      .mockResolvedValueOnce([{ ...projected, rowId: 'replacement' }])
+    await expect(loadBoundedCopilotChatText(CHAT_ID, USER_ID, 'wf', 'ws')).rejects.toThrow(
+      'Authorized transcript unavailable.'
+    )
+  })
+  it('rechecks ownership after reading and refuses a transfer', async () => {
+    reads(scoped, { ...scoped, userId: 'foreign' })
+    expect(await loadBoundedCopilotChatText(CHAT_ID, USER_ID, 'wf', 'ws')).toBeNull()
+  })
+  it('refuses read permission revoked during the projection', async () => {
+    reads()
+    mockAuthorizeWorkflow
+      .mockResolvedValueOnce({ allowed: true, workflow: { id: 'wf', workspaceId: 'ws' } })
+      .mockResolvedValueOnce({ allowed: true, workflow: { id: 'wf', workspaceId: 'ws' } })
+      .mockResolvedValue({ allowed: false })
+    expect(await loadBoundedCopilotChatText(CHAT_ID, USER_ID, 'wf', 'ws')).toBeNull()
+  })
+
+  it('composes the real text reader and adapter without tool data or a duplicate current turn', async () => {
+    const current = { id: 'message-1', content: 'current text' }
+    dbChainMockFns.limit
+      .mockResolvedValueOnce([scoped])
+      .mockResolvedValueOnce([{ id: 'row-1' }])
+      .mockResolvedValueOnce([
+        { ...projected, content: { ...current, role: 'user', contentBlocks: null } },
+      ])
+      .mockResolvedValueOnce([scoped])
+    expect(
+      await loadAuthorizedChatTranscript({
+        principal: { kind: 'session', userId: USER_ID, sessionId: 'session-1' },
+        chatId: CHAT_ID,
+        workspaceId: 'ws',
+        workflowId: 'wf',
+        currentMessage: current,
+      })
+    ).toEqual({ messages: [{ role: 'user', content: 'current text' }] })
+  })
+
+  it('closes an oversized SQL projection as refusal without returning a partial transcript', async () => {
+    dbChainMockFns.limit
+      .mockResolvedValueOnce([scoped])
+      .mockResolvedValueOnce([{ id: 'row-1' }])
+      .mockResolvedValueOnce([{ ...projected, content: null }])
+      .mockResolvedValueOnce([scoped])
+    await expect(
+      loadAuthorizedChatTranscript({
+        principal: { kind: 'session', userId: USER_ID, sessionId: 'session-1' },
+        chatId: CHAT_ID,
+        workspaceId: 'ws',
+        workflowId: 'wf',
+        currentMessage: { id: 'current', content: 'x' },
+      })
+    ).rejects.toThrow('Authorized transcript unavailable.')
+  })
+
+  it('generates native PostgreSQL queries with bounded projection, live rows and canonical order', async () => {
+    // Real Drizzle/schema/SQL construction; the proxy returns rows without a DB connection.
+    const native = await vi.importActual<typeof import('drizzle-orm')>('drizzle-orm')
+    const proxy =
+      await vi.importActual<typeof import('drizzle-orm/pg-proxy')>('drizzle-orm/pg-proxy')
+    const { databaseMock, drizzleOrmMock } = await import('@sim/testing/mocks/database.mock')
+    vi.resetModules()
+    vi.doMock('drizzle-orm', () => native)
+    try {
+      const schema = await vi.importActual<typeof import('@sim/db/schema')>('@sim/db/schema')
+      vi.doMock('@sim/db/schema', () => schema)
+      const statements: Array<{ sql: string; params: unknown[] }> = []
+      const nativeDb = proxy.drizzle(async (sql, params) => {
+        statements.push({ sql, params })
+        if (sql.includes('from "copilot_chats"'))
+          return { rows: [[CHAT_ID, 'agent', USER_ID, 'wf', 'ws', null, 'copilot']] }
+        if (sql.includes('octet_length')) return { rows: [['row-1', 'message-1', 'user', userMsg]] }
+        return { rows: [['row-1']] }
+      })
+      vi.doMock('@sim/db', () => ({ db: nativeDb }))
+      const reader = await import('@/lib/mothership/chat/lifecycle')
+      expect(await reader.loadBoundedCopilotChatText(CHAT_ID, USER_ID, 'wf', 'ws')).toEqual([
+        { id: 'message-1', role: 'user', content: userMsg },
+      ])
+      expect(statements).toHaveLength(4)
+      expect(statements[0].params).toContain(CHAT_ID)
+      expect(statements[0].params).toContain(USER_ID)
+      expect(statements[1].sql).not.toContain('"content"')
+      expect(statements[1].params.at(-1)).toBe(129)
+      const projectedSql = statements[2].sql
+      expect(projectedSql).toContain('octet_length("copilot_messages"."content"::text) <= 65536')
+      expect(projectedSql).toContain('else null end')
+      expect(projectedSql).toContain('"deleted_at" is null')
+      expect(projectedSql).toContain('"seq" asc nulls last')
+      expect(projectedSql).toContain('"created_at" asc')
+      expect(projectedSql).toContain('"id" asc')
+      expect(projectedSql).toContain('strict $.contentBlocks[*] ? (@.type == "text")')
+      expect(statements[2].params.at(-1)).toBe(129)
+    } finally {
+      vi.doMock('@sim/db', () => databaseMock)
+      vi.doMock('@sim/db/schema', () => schemaMock)
+      vi.doMock('drizzle-orm', () => drizzleOrmMock)
+      vi.resetModules()
+    }
+  })
+})
 
 describe('lifecycle copilot chat reads (cutover to copilot_messages)', () => {
   beforeEach(() => {

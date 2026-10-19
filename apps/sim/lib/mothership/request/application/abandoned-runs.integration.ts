@@ -1,3 +1,4 @@
+// Modified by Memlia: exclude every persisted local marker before worker takeover or Stop.
 import { deleteWorkspaceFixture, insertWorkspaceFixture } from '@sim/db/testing/workspace-fixtures'
 /**
  * Sim's own takeover of a Chat run whose controller died with no browser attached (a deploy
@@ -591,6 +592,62 @@ describe.runIf(Boolean(redisUrl))('taking over a run whose controller died', () 
       await db.update(copilotRuns).set({ status: 'cancelled' }).where(eq(copilotRuns.id, runId))
     }
   })
+
+  it.each([
+    {
+      marker: { kind: 'memlia_local_chat', version: 1, recovery: 'none' },
+      keepWorkerRecovery: false,
+      revoked: false,
+    },
+    {
+      marker: { kind: 'memlia_local_chat', version: 1, recovery: 'none' },
+      keepWorkerRecovery: true,
+      revoked: false,
+    },
+    { marker: null, keepWorkerRecovery: true, revoked: true },
+    {
+      marker: { kind: 'memlia_local_chat', version: 2, recovery: 'none' },
+      keepWorkerRecovery: true,
+      revoked: true,
+    },
+    { marker: { unknown: true }, keepWorkerRecovery: true, revoked: true },
+  ])(
+    'excludes local marker $marker before takeover even with revoked=$revoked',
+    async ({ marker, keepWorkerRecovery, revoked }) => {
+      const { runId, streamId, toolCallId, chatId } = await runAbandonedMidTool()
+      const original = await storedRun(runId)
+      const { recovery, ...context } = toRecord(original.requestContext)
+      await db
+        .update(copilotRuns)
+        .set({
+          requestContext: {
+            ...context,
+            ...(keepWorkerRecovery ? { recovery } : {}),
+            localExecution: marker,
+          },
+          updatedAt: sql`now() - interval '2 minutes'`,
+        })
+        .where(eq(copilotRuns.id, runId))
+      if (revoked) {
+        await db
+          .delete(permissions)
+          .where(and(eq(permissions.userId, userId), eq(permissions.entityId, workspaceId)))
+      }
+      const before = await storedRun(runId)
+      const toolBefore = await storedTool(toolCallId)
+      try {
+        expect((await findAbandonedRecoverableRuns(20)).map((run) => run.id)).not.toContain(runId)
+        await takeOverAbandonedRuns()
+        expect(await storedRun(runId)).toEqual(before)
+        expect(await storedTool(toolCallId)).toEqual(toolBefore)
+        expect(requestsFor(streamId, '/api/streams/explicit-abort')).toHaveLength(0)
+        expect(requestsFor(streamId, '/api/mothership')).toHaveLength(0)
+        expect(await redis().get(chatStreamLockKey(chatId))).toBeNull()
+      } finally {
+        await db.update(copilotRuns).set({ status: 'cancelled' }).where(eq(copilotRuns.id, runId))
+      }
+    }
+  )
 
   it('reaches an abandoned run behind live ones, examining a bounded window per scan', async () => {
     /** The lowest ids, so the scan meets the two live runs before the abandoned one. */
