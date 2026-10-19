@@ -171,13 +171,26 @@ class GuardCliTests(unittest.TestCase):
         for scenario in ('finish', 'budget'):
             with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as tmp:
                 pid_file, report = Path(tmp) / 'worker.pid', Path(tmp) / 'report.json'
+                observed_file = Path(tmp) / 'worker.observed'
+                worker_observed = False
                 worker = 'import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);time.sleep(20)'
                 code = ('import subprocess,sys,time; from pathlib import Path; '
                         f'p=subprocess.Popen([sys.executable,"-c",{worker!r}],start_new_session=True); '
-                        f'Path({str(pid_file)!r}).write_text(str(p.pid));time.sleep({5 if scenario == "budget" else 1})')
+                        f'Path({str(pid_file)!r}).write_text(str(p.pid));'
+                        'deadline=time.monotonic()+10\n'
+                        f'while not Path({str(observed_file)!r}).exists() and time.monotonic()<deadline: time.sleep(.01)\n'
+                        f'if not Path({str(observed_file)!r}).exists(): raise SystemExit(77)\n'
+                        f'time.sleep({5 if scenario == "budget" else 0})')
                 def measure(pid):
+                    nonlocal worker_observed
                     sample = guard.mac_snapshot(pid)
                     sample.update(pressureLevel=1, freePercent=70, swapBytes=0)
+                    if pid_file.exists():
+                        worker_pid = int(pid_file.read_text())
+                        if any(item['pid'] == worker_pid for item in sample['processes']):
+                            worker_observed = True
+                            # Release the leader only after native descendant capture.
+                            observed_file.touch()
                     if scenario == 'budget' and sample['processCount'] >= 2:
                         sample['footprintBytes'] = 8 * 1024**3
                     return sample
@@ -185,6 +198,7 @@ class GuardCliTests(unittest.TestCase):
                     result = guard.run_guard([sys.executable, '-c', code], report,
                                              measure=measure, interval=0.05)
                     worker_pid = int(pid_file.read_text())
+                    self.assertTrue(worker_observed, 'fixture must establish native observation')
                     self.assertEqual(130, result)
                     receipt = json.loads(report.read_text())
                     self.assertEqual('descendants-still-running' if scenario == 'finish' else
