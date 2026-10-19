@@ -96,7 +96,7 @@ import hashlib,json,os,platform,shutil,subprocess,sys
 from pathlib import Path
 mem = {k:int(v.split()[0])*1024 for k,v in (x.split(':',1) for x in Path('/proc/meminfo').read_text().splitlines())}
 root=Path(sys.argv[2]); disk=shutil.disk_usage(root)
-receipt={'sourceCommit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),'lockSha256':hashlib.sha256((root/'bun.lock').read_bytes()).hexdigest(),'architecture':platform.machine(),'kernel':platform.release(),'cpuCount':os.cpu_count(),'hostMemTotalBytes':mem['MemTotal'],'hostMemAvailableBytes':mem['MemAvailable'],'hostSwapTotalBytes':mem['SwapTotal'],'hostSwapUsedBytes':mem['SwapTotal']-mem['SwapFree'],'diskFreeBytes':disk.free,'buildCgroupLimitBytes':13*1024**3,'databaseLimitBytes':512*1024**2,'v8OldSpaceMiB':10240,'bundler':'webpack','webpackCacheProfile':'memory','nextWorkers':2,'runnerImageOS':os.environ.get('ImageOS'),'runnerImageVersion':os.environ.get('ImageVersion')}
+receipt={'sourceCommit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),'lockSha256':hashlib.sha256((root/'bun.lock').read_bytes()).hexdigest(),'architecture':platform.machine(),'kernel':platform.release(),'cpuCount':os.cpu_count(),'hostMemTotalBytes':mem['MemTotal'],'hostMemAvailableBytes':mem['MemAvailable'],'hostSwapTotalBytes':mem['SwapTotal'],'hostSwapUsedBytes':mem['SwapTotal']-mem['SwapFree'],'diskFreeBytes':disk.free,'buildCgroupLimitBytes':13*1024**3,'databaseLimitBytes':512*1024**2,'v8OldSpaceMiB':10240,'nextV8OldSpaceMiB':11264,'bundler':'webpack','webpackCacheProfile':'memory','nextWorkers':2,'runnerImageOS':os.environ.get('ImageOS'),'runnerImageVersion':os.environ.get('ImageVersion')}
 Path(sys.argv[1]).write_text(json.dumps(receipt,indent=2)+'\n')
 assert platform.machine()=='x86_64'
 assert mem['MemTotal']>=14*1024**3 and mem['MemAvailable']>=13*1024**3
@@ -228,9 +228,9 @@ if [[ "$scope" == validation ]]; then
   completed=1
   return
 fi
-# Preserve the controlled heap and worker; measure the documented memory cache profile.
+# One bounded Next-only heap experiment; the container and other phases stay unchanged.
 next_started=1
-phase next /work/apps/sim env DEBUG=next:build:webpack-build DEBUG_COLORS=0 node ../../node_modules/next/dist/bin/next build --webpack
+phase next /work/apps/sim env DEBUG=next:build:webpack-build DEBUG_COLORS=0 NODE_OPTIONS=--max-old-space-size=11264 node ../../node_modules/next/dist/bin/next build --webpack
 phase standalone /work/apps/sim python3 -c '
 from pathlib import Path
 import json

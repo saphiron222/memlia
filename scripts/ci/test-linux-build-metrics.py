@@ -542,8 +542,22 @@ class WebpackObservationTests(unittest.TestCase):
         calls = [json.loads(line) for line in result.stdout.splitlines()]
         call = next(c for c in calls if c[0] == 'next')
         self.assertEqual(call[2:], ['env','DEBUG=next:build:webpack-build','DEBUG_COLORS=0',
+                                    'NODE_OPTIONS=--max-old-space-size=11264',
                                     'node','../../node_modules/next/dist/bin/next','build','--webpack'])
         self.assertFalse(any('DEBUG=' in arg for c in calls if c[0] != 'next' for arg in c))
+        self.assertFalse(any('NODE_OPTIONS=' in arg for c in calls if c[0] != 'next' for arg in c))
+
+    def test_next_heap_receipt_matches_its_command_and_keeps_other_phases_at_ten(self):
+        # Parse the actual receipt without executing bootstrap or reading secrets.
+        import ast
+        source = (HERE / 'run-linux-build.sh').read_text()
+        line = next(line for line in source.splitlines() if line.startswith('receipt={'))
+        tree = ast.parse(line).body[0].value
+        fields = {key.value: value for key, value in zip(tree.keys, tree.values)}
+        self.assertEqual(ast.literal_eval(fields['v8OldSpaceMiB']), 10240)
+        self.assertEqual(ast.literal_eval(fields['nextV8OldSpaceMiB']), 11264)
+        # The normal environment is unchanged; only the Next phase overrides it.
+        self.assertIn("'NODE_OPTIONS':'--max-old-space-size=10240'", source)
 
 if __name__ == '__main__':
     unittest.main()

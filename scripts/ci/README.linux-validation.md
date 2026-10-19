@@ -84,7 +84,7 @@ check obligatoire build reste non satisfait. Aucune protection du dépôt n'est
 modifiée par ces fichiers.
 
 Le budget de chaque phase reste 13 Gio de cgroup sans swap supplémentaire, CPU4,
-heap10Gio ; la DB jetable reste à 512 Mio. Le bootstrap DB est conservé pour garder
+heap10Gio hors phase Next ; la DB jetable reste à 512 Mio. Le bootstrap DB est conservé pour garder
 l'environnement du témoin et ne migre pas de schéma métier. Cela ne prouve pas
 que toutes les phases utilisent la DB. Aucune conclusion sur un besoin de 24–32 Go
 ou une solution aux OOM de Next ne résulte de ce parcours.
@@ -168,11 +168,32 @@ Ces marqueurs restent de simples observations d'une sortie de processus : du cod
 peut imprimer le même texte. **Ils ne changent jamais le verdict**, le code de sortie,
 les contrôles de descendants/OOM/nettoyage ou les critères standalone. `complete`
 ne signifie que séquence de marqueurs complète, jamais build réussi. La phase
-validation ne lance toujours aucun Next build. Les limites restent heap 10 Gio,
-cgroup 13 Gio, swap du groupe 0 et CPU 4 ; aucun essai à 11 Gio n'est inclus.
+validation ne lance toujours aucun Next build. Le heap des étapes ordinaires reste
+à 10 Gio. L’essai Next seul à 11 Gio est décrit ci-dessous ; cgroup 13 Gio, swap du
+groupe 0 et CPU 4 restent inchangés.
 
 Les nouveaux tests utilisent de petits enfants réels, un fichier temporaire et une
 barrière stdin pour vérifier une écriture partielle avant la sortie. Les tests du
 reçu doublent seulement les lectures Linux /proc/cgroup et le signalement mémoire
 hôte sur les autres plateformes. Ils vérifient aussi les canaris, les bornes et
 l'indépendance du verdict ; ils ne constituent pas une nouvelle construction Linux.
+
+
+## Essai borné : heap de Next seul à 11 Gio
+
+Cette révision prépare un unique essai sur le même témoin applicatif Next16.4.2.
+Seule la commande de phase Next remplace `NODE_OPTIONS` par
+`--max-old-space-size=11264` ; typegen, types et autres phases conservent leur
+configuration de 10 Gio. Le reçu hôte conserve `v8OldSpaceMiB=10240` et ajoute
+`nextV8OldSpaceMiB=11264` pour rendre cette distinction explicite.
+
+Les limites du conteneur de build demeurent 13 Gio, sans swap du groupe, CPU4,
+et celles de la DB jetable restent 512 Mio. Cache, workers, source applicative,
+verrou et critères de réussite ne changent pas. Le garde local reste intact.
+
+La marge risque d’être faible : cette expérience peut déplacer l’échec V8 vers
+le cgroup. Ni 11 Gio de heap ni une réussite isolée ne constituent un besoin RAM
+qualifié ou un dimensionnement d’exploitation. Aucun résultat de build n’est
+encore mesuré par ce changement de configuration, et les tests du lanceur ne
+remplacent pas l’Action Linux. Après cet essai, aucune hausse automatique n’est
+prévue. Aucun runner payant, nouveau cache ou publication de journal brut.
