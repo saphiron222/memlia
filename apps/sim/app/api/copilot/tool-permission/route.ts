@@ -1,11 +1,23 @@
+// Modified by Memlia: bind one-shot workflow proposal decisions to persisted server authority.
+
+import type { SessionPrincipal } from '@sim/auth/principal'
 import { createLogger } from '@sim/logger'
 import { getErrorMessage } from '@sim/utils/errors'
 import { type NextRequest, NextResponse } from 'next/server'
-import { copilotToolPermissionContract } from '@/lib/api/contracts/copilot'
+import {
+  copilotToolPermissionContract,
+  copilotWorkflowProposalReviewContract,
+} from '@/lib/api/contracts/copilot'
 import { parseRequest, validationErrorResponse } from '@/lib/api/server'
 import { isCopilotToolPermissionsEnabled } from '@/lib/core/config/env-flags'
+import { isCrossSiteSessionRequest } from '@/lib/core/security/same-origin'
 import { withRouteHandler } from '@/lib/core/utils/with-route-handler'
 import { ringDesktopInbox } from '@/lib/desktop/executor/doorbell'
+import {
+  readWorkflowProposalReview,
+  recordWorkflowProposalDecision,
+  WORKFLOW_PROPOSAL_TOOL,
+} from '@/lib/memlia/chat/workflow-proposals.server'
 import {
   getAsyncToolCall,
   getRunSegment,
@@ -50,13 +62,36 @@ interface DecisionResult {
 async function applyDecision(
   toolCallId: string,
   decision: ToolPermissionDecision,
-  userId: string
+  userId: string,
+  principal: SessionPrincipal | undefined,
+  single: boolean,
+  expectedDigest?: string
 ): Promise<DecisionResult | null> {
   const existing = await getAsyncToolCall(toolCallId).catch((err) => {
     logger.warn('Failed to fetch async tool call', { toolCallId, error: getErrorMessage(err) })
     return null
   })
   if (!existing) return null
+  if (existing.toolName === WORKFLOW_PROPOSAL_TOOL) {
+    if (
+      !principal ||
+      principal.userId !== userId ||
+      !single ||
+      expectedDigest === undefined ||
+      (decision !== 'allow' && decision !== 'skip')
+    )
+      return null
+    const result = await recordWorkflowProposalDecision({
+      toolCallId,
+      principal,
+      decision,
+      single,
+      expectedDigest,
+    }).catch(() => null)
+    if (result?.applied)
+      publishToolPermissionDecision({ ...result, toolName: WORKFLOW_PROPOSAL_TOOL })
+    return result
+  }
 
   const run = await getRunSegment(existing.runId).catch((err) => {
     logger.warn('Failed to fetch run segment', {
@@ -162,8 +197,11 @@ export const POST = withRouteHandler((req: NextRequest) => {
           return createNotFoundResponse('Tool permissions are not enabled')
         }
 
-        const { userId: authenticatedUserId, isAuthenticated } =
-          await authenticateCopilotRequestSessionOnly()
+        const {
+          userId: authenticatedUserId,
+          isAuthenticated,
+          principal,
+        } = await authenticateCopilotRequestSessionOnly()
 
         if (!isAuthenticated || !authenticatedUserId) {
           return createUnauthorizedResponse()
@@ -184,14 +222,23 @@ export const POST = withRouteHandler((req: NextRequest) => {
         if (!parsed.success) return parsed.response
 
         const { decisions } = parsed.data.body
+        if (isCrossSiteSessionRequest(req))
+          return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
         span.setAttributes({
           [TraceAttr.UserId]: authenticatedUserId,
           [TraceAttr.CopilotAsyncToolIdsCount]: decisions.length,
         })
 
         const results: DecisionResult[] = []
-        for (const { toolCallId, decision } of decisions) {
-          const result = await applyDecision(toolCallId, decision, authenticatedUserId)
+        for (const { toolCallId, decision, expectedDigest } of decisions) {
+          const result = await applyDecision(
+            toolCallId,
+            decision,
+            authenticatedUserId,
+            principal?.kind === 'session' ? principal : undefined,
+            decisions.length === 1,
+            expectedDigest
+          )
           if (result) results.push(result)
         }
 
@@ -210,4 +257,34 @@ export const POST = withRouteHandler((req: NextRequest) => {
       }
     }
   )
+})
+
+/** Exact body review is private to the author session; no mutation or body logging. */
+export const GET = withRouteHandler(async (req: NextRequest) => {
+  const reply = (value: unknown, status: number) =>
+    NextResponse.json(value, { status, headers: { 'Cache-Control': 'private, no-store' } })
+  try {
+    if (!isCopilotToolPermissionsEnabled) return reply({ error: 'Proposal unavailable' }, 404)
+    const { userId, isAuthenticated, principal } = await authenticateCopilotRequestSessionOnly()
+    if (!isAuthenticated || !userId || principal?.kind !== 'session' || principal.userId !== userId)
+      return reply({ error: 'Unauthorized' }, 401)
+    if (isCrossSiteSessionRequest(req)) return reply({ error: 'Forbidden' }, 403)
+    const parsed = await parseRequest(
+      copilotWorkflowProposalReviewContract,
+      req,
+      {},
+      { validationErrorResponse: () => reply({ error: 'Invalid request' }, 400) }
+    )
+    if (!parsed.success) {
+      parsed.response.headers.set('Cache-Control', 'private, no-store')
+      return parsed.response
+    }
+    const review = await readWorkflowProposalReview({
+      toolCallId: parsed.data.query.toolCallId,
+      principal,
+    })
+    return reply(copilotWorkflowProposalReviewContract.response.schema.parse(review), 200)
+  } catch {
+    return reply({ error: 'Proposal unavailable' }, 404)
+  }
 })

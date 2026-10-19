@@ -1,3 +1,4 @@
+// Modified by Memlia: allow explicitly closed diagnostics without changing retry policy.
 /**
  * Retry policy for provider calls that no vendor SDK retries for us: the raw-fetch
  * Responses path and SDKs whose own retry is unusable.
@@ -50,6 +51,8 @@ export interface ProviderRetryOptions {
   /** Provider name for the retry log line. */
   label: string
   abortSignal?: AbortSignal
+  /** Trusted server option: omit provider-controlled failure fields from retry logs. */
+  closedDiagnostics?: boolean
   /** The delay an SDK error asks for, for SDKs that carry it in the error rather than headers. */
   retryAfterMs?: (error: unknown) => number | null
 }
@@ -129,15 +132,24 @@ async function waitBeforeRetry(
   attempt: number,
   retryAfterMs: number | null,
   failure: Record<string, unknown>,
-  { logger, label, abortSignal }: ProviderRetryOptions
+  { logger, label, abortSignal, closedDiagnostics }: ProviderRetryOptions
 ): Promise<void> {
   const delayMs = backoffWithJitter(attempt, retryAfterMs)
-  logger.warn(`${label} request failed; retrying`, {
-    ...failure,
-    attempt,
-    maxRetries: PROVIDER_MAX_RETRIES,
-    delayMs: Math.round(delayMs),
-  })
+  if (closedDiagnostics) {
+    logger.warn('Controlled provider request failed; retrying', {
+      code: 'CONTROLLED_PROVIDER_RETRY',
+      attempt,
+      maxRetries: PROVIDER_MAX_RETRIES,
+      delayMs: Math.round(delayMs),
+    })
+  } else {
+    logger.warn(`${label} request failed; retrying`, {
+      ...failure,
+      attempt,
+      maxRetries: PROVIDER_MAX_RETRIES,
+      delayMs: Math.round(delayMs),
+    })
+  }
   await interruptibleSleep(delayMs, abortSignal)
   abortSignal?.throwIfAborted()
 }

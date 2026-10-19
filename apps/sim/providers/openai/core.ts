@@ -1,4 +1,4 @@
-// Modified by Memlia: reserve controlled Responses attempts and reject their redirects.
+// Modified by Memlia: reserve controlled Responses attempts, reject redirects and close error logs.
 import { createHash } from 'node:crypto'
 import type { Logger } from '@sim/logger'
 import { getErrorMessage, toError } from '@sim/utils/errors'
@@ -27,9 +27,12 @@ import {
 } from '@/providers/openai/usage'
 import { fetchWithProviderRetry } from '@/providers/retry'
 import {
-  beforeProviderModelCall,
+  awaitProviderModelCall,
+  beginProviderModelAttempt,
+  completeProviderModelAttempt,
   executeProviderTool,
   getProviderRuntimeContext,
+  type ProviderModelAttempt,
 } from '@/providers/runtime-context'
 import { createStreamingExecution } from '@/providers/streaming-execution'
 import { isAbortError, parseToolArguments } from '@/providers/streaming-tool-loop-shared'
@@ -51,6 +54,7 @@ import {
   extractResponseText,
   extractResponseToolCalls,
   isMaxOutputTokensIncompleteResponse,
+  observeOpenAIUsage,
   parseResponsesUsage,
   type ResponsesInputItem,
   type ResponsesToolCall,
@@ -158,6 +162,7 @@ export async function executeResponsesProviderRequest(
 ): Promise<ProviderResponse | StreamingExecution> {
   const { logger } = config
   const fetchImpl = config.fetch ?? fetch
+  const closedDiagnostics = !!getProviderRuntimeContext()?.controlledRun
 
   logger.info(`Preparing ${config.providerLabel} request`, {
     model: request.model,
@@ -360,16 +365,22 @@ export async function executeResponsesProviderRequest(
       .map(([key, value]) => `${key}=${value}`)
     const context = [`phase=${phase}`, `elapsedMs=${elapsedMs}`, ...fields].join(' ')
 
-    logger.error(`${config.providerLabel} request failed in transport`, {
-      phase,
-      elapsedMs,
-      errorName: error.name,
-      model: config.modelName,
-      workflowId: request.workflowId,
-      blockId: request.blockId,
-      executionId: request.executionId,
-      ...detail,
-    })
+    if (closedDiagnostics) {
+      logger.error('Controlled OpenAI transport failed', {
+        code: 'OPENAI_CONTROLLED_TRANSPORT_FAILED',
+      })
+    } else {
+      logger.error(`${config.providerLabel} request failed in transport`, {
+        phase,
+        elapsedMs,
+        errorName: error.name,
+        model: config.modelName,
+        workflowId: request.workflowId,
+        blockId: request.blockId,
+        executionId: request.executionId,
+        ...detail,
+      })
+    }
 
     /**
      * A new Error rather than a mutation: the runtime raises these as `DOMException`,
@@ -445,6 +456,17 @@ export async function executeResponsesProviderRequest(
       : bodyRest
   }
 
+  const observationModel = request.model
+  const observeAttempts = !!getProviderRuntimeContext()?.controlledRun?.observeModelAttempt
+  if (observeAttempts && (!request.stream || config.providerId !== 'openai'))
+    throw new Error('Model observation requires OpenAI streaming.')
+  const attemptsByResponse = new WeakMap<Response, ProviderModelAttempt>()
+  const observeResponse = async (response: Response, terminal?: OpenAI.Responses.Response) => {
+    const reference = attemptsByResponse.get(response)
+    if (!reference) return
+    await completeProviderModelAttempt(reference, observeOpenAIUsage(observationModel, terminal))
+  }
+
   let reasoningSummariesUnavailable = false
 
   /**
@@ -462,21 +484,42 @@ export async function executeResponsesProviderRequest(
     startedAt: number
   ): Promise<Response> => {
     // Capture the trusted ALS policy before preparation awaits; keep it on every physical attempt.
-    const rejectRedirects = !!getProviderRuntimeContext()?.controlledRun
+    const rejectRedirects = closedDiagnostics
     const body = JSON.stringify(await prepareConversationGeneration(request, 'responses', payload))
     try {
       return await fetchWithProviderRetry(
-        () => {
-          const options = beforeProviderModelCall(abortSignal)
-          return fetchImpl(config.endpoint, {
-            method: 'POST',
-            headers: config.headers,
-            body,
-            signal: options?.signal,
-            ...(rejectRedirects ? { redirect: 'error' as const } : {}),
-          })
+        async () => {
+          const { options, reference } = observeAttempts
+            ? await beginProviderModelAttempt(abortSignal)
+            : { options: await awaitProviderModelCall(abortSignal), reference: undefined }
+          try {
+            options?.signal.throwIfAborted()
+            const response = await fetchImpl(config.endpoint, {
+              method: 'POST',
+              headers: config.headers,
+              body,
+              signal: options?.signal,
+              ...(rejectRedirects ? { redirect: 'error' as const } : {}),
+            })
+            if (reference) {
+              attemptsByResponse.set(response, reference)
+              if (!response.ok)
+                await completeProviderModelAttempt(reference, {
+                  kind: 'unknown',
+                  reason: 'http_error',
+                })
+            }
+            return response
+          } catch (error) {
+            if (reference)
+              await completeProviderModelAttempt(reference, {
+                kind: 'unknown',
+                reason: 'transport_error',
+              })
+            throw error
+          }
         },
-        { logger, label: config.providerLabel, abortSignal }
+        { logger, label: config.providerLabel, abortSignal, closedDiagnostics }
       )
     } catch (error) {
       throw annotateTransportFailure(error, 'awaiting-response-headers', startedAt)
@@ -590,6 +633,7 @@ export async function executeResponsesProviderRequest(
               ),
             logger,
             timeSegments,
+            observeResponse: observeAttempts ? observeResponse : undefined,
             onComplete: (result) => {
               output.content = result.content
               output.tokens = result.tokens
@@ -650,7 +694,8 @@ export async function executeResponsesProviderRequest(
               }
 
               finalizeTiming()
-            }
+            },
+            observeAttempts ? (terminal) => observeResponse(streamResponse, terminal) : undefined
           ),
       })
 
@@ -811,7 +856,11 @@ export async function executeResponsesProviderRequest(
             toolName,
             getErrorMessage(error, 'Tool execution failed')
           )
-          logger.error('Error processing tool call:', { error, toolName })
+          if (closedDiagnostics) {
+            logger.error('Controlled OpenAI tool failed', { code: 'OPENAI_CONTROLLED_TOOL_FAILED' })
+          } else {
+            logger.error('Error processing tool call:', { error, toolName })
+          }
 
           return {
             toolCall,
@@ -987,10 +1036,14 @@ export async function executeResponsesProviderRequest(
     const providerEndTimeISO = new Date(providerEndTime).toISOString()
     const totalDuration = providerEndTime - providerStartTime
 
-    logger.error(`Error in ${config.providerLabel} request:`, {
-      error,
-      duration: totalDuration,
-    })
+    if (closedDiagnostics) {
+      logger.error('Controlled OpenAI request failed', { code: 'OPENAI_CONTROLLED_REQUEST_FAILED' })
+    } else {
+      logger.error(`Error in ${config.providerLabel} request:`, {
+        error,
+        duration: totalDuration,
+      })
+    }
 
     if (isAbortError(error) || request.abortSignal?.aborted || isConversationContextError(error)) {
       throw error

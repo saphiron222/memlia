@@ -1,3 +1,4 @@
+// Modified by Memlia: correlate native response usage and close controlled error logs.
 import type { Logger } from '@sim/logger'
 import { getErrorMessage, toError } from '@sim/utils/errors'
 import { isRecordLike } from '@sim/utils/object'
@@ -62,6 +63,7 @@ export interface CreateOpenAIResponsesStreamingToolLoopOptions {
   createStream: CreateOpenAIResponsesStream
   logger: Logger
   timeSegments: TimeSegment[]
+  observeResponse?: (response: Response, terminal?: OpenAI.Responses.Response) => Promise<void>
   onComplete: (result: OpenAIStreamingToolLoopComplete) => void
 }
 
@@ -216,8 +218,9 @@ async function executeOpenAIToolCall(options: {
   controller: ReadableStreamDefaultController<AgentStreamEvent>
   openTools: Map<string, string>
   logger: Logger
+  closedDiagnostics: boolean
 }): Promise<OpenAIToolExecutionResult> {
-  const { toolCall, request, controller, openTools, logger } = options
+  const { toolCall, request, controller, openTools, logger, closedDiagnostics } = options
   const startTime = Date.now()
   let toolArgs: Record<string, unknown>
 
@@ -332,10 +335,14 @@ async function executeOpenAIToolCall(options: {
       toolCall.name,
       getErrorMessage(error, 'Tool execution failed')
     )
-    logger.error('Error processing OpenAI tool call:', {
-      error,
-      toolName: toolCall.name,
-    })
+    if (closedDiagnostics) {
+      logger.error('Controlled OpenAI tool failed', { code: 'OPENAI_CONTROLLED_TOOL_FAILED' })
+    } else {
+      logger.error('Error processing OpenAI tool call:', {
+        error,
+        toolName: toolCall.name,
+      })
+    }
     return completeToolExecution(
       controller,
       openTools,
@@ -367,6 +374,7 @@ export function createOpenAIResponsesStreamingToolLoopStream(
     logger,
     timeSegments,
     onComplete,
+    observeResponse,
   } = options
   const forcedTools = options.forcedTools ?? []
   const loopAbortController = new AbortController()
@@ -384,6 +392,7 @@ export function createOpenAIResponsesStreamingToolLoopStream(
     abortSignal: loopAbortController.signal,
   }
   const conversationContext = getConversationRequestContext(request)
+  const closedDiagnostics = !!conversationContext?.controlledRun
   if (conversationContext) bindConversationRequestContext(loopRequest, conversationContext)
 
   return new ReadableStream<AgentStreamEvent>({
@@ -438,12 +447,19 @@ export function createOpenAIResponsesStreamingToolLoopStream(
               },
               loopAbortController.signal
             )
-            const turn = await streamResponsesTurn(
-              streamResponse,
-              controller,
-              openTools,
-              loopAbortController.signal
-            )
+            let turn: OpenAIResponsesTurn
+            try {
+              turn = await streamResponsesTurn(
+                streamResponse,
+                controller,
+                openTools,
+                loopAbortController.signal
+              )
+              if (observeResponse) await observeResponse(streamResponse, turn.response)
+            } finally {
+              // The local attempt closes once, including failed or cancelled parsing.
+              if (observeResponse) await observeResponse(streamResponse)
+            }
             const modelEnd = Date.now()
             const modelDuration = modelEnd - modelStart
             const turnUsage = parseResponsesUsage(turn.response.usage)
@@ -452,11 +468,19 @@ export function createOpenAIResponsesStreamingToolLoopStream(
             const executableTools = toolsExecutable ? turn.toolCalls : []
 
             if (turn.toolCalls.length > 0 && !toolsExecutable) {
-              logger.warn('Skipping OpenAI tool execution', {
-                status: turn.response.status,
-                toolCount: turn.toolCalls.length,
-                reachedToolLimit,
-              })
+              if (closedDiagnostics) {
+                logger.warn('Controlled OpenAI tool execution skipped', {
+                  code: 'OPENAI_CONTROLLED_TOOL_SKIPPED',
+                  toolCount: turn.toolCalls.length,
+                  reachedToolLimit,
+                })
+              } else {
+                logger.warn('Skipping OpenAI tool execution', {
+                  status: turn.response.status,
+                  toolCount: turn.toolCalls.length,
+                  reachedToolLimit,
+                })
+              }
               settleOpenTools(controller, openTools, 'error')
             }
 
@@ -535,6 +559,7 @@ export function createOpenAIResponsesStreamingToolLoopStream(
                   controller,
                   openTools,
                   logger,
+                  closedDiagnostics,
                 })
               )
             )
@@ -611,11 +636,18 @@ export function createOpenAIResponsesStreamingToolLoopStream(
             aborted: loopAbortController.signal.aborted,
             consumerCancelled,
             error,
-            onUnexpectedError: (cause) =>
-              logger.error(`Error in ${providerLabel} streaming tool loop`, {
-                providerId,
-                error: cause,
-              }),
+            onUnexpectedError: (cause) => {
+              if (closedDiagnostics) {
+                logger.error('Controlled OpenAI streaming loop failed', {
+                  code: 'OPENAI_CONTROLLED_STREAM_FAILED',
+                })
+              } else {
+                logger.error(`Error in ${providerLabel} streaming tool loop`, {
+                  providerId,
+                  error: cause,
+                })
+              }
+            },
           })
         } finally {
           request.abortSignal?.removeEventListener('abort', abortFromRequest)
@@ -623,10 +655,16 @@ export function createOpenAIResponsesStreamingToolLoopStream(
       })().catch((error) => {
         // `start` cannot be async (the loop must not block the first pull), so
         // a throw escaping the IIFE would surface as an unhandled rejection.
-        logger.error(`Unhandled failure in ${providerLabel} streaming tool loop`, {
-          providerId,
-          error: toError(error).message,
-        })
+        if (closedDiagnostics) {
+          logger.error('Controlled OpenAI streaming callback failed', {
+            code: 'OPENAI_CONTROLLED_CALLBACK_FAILED',
+          })
+        } else {
+          logger.error(`Unhandled failure in ${providerLabel} streaming tool loop`, {
+            providerId,
+            error: toError(error).message,
+          })
+        }
       })
     },
     cancel(reason) {
