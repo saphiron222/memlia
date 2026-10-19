@@ -1,8 +1,15 @@
+// Modified by Memlia: route persisted workflow proposals through native one-shot confirmation.
+
 import { createLogger } from '@sim/logger'
 import { getErrorMessage, toError } from '@sim/utils/errors'
 import { withinDeadline } from '@/lib/core/utils/deadline'
 import { ringDesktopInbox } from '@/lib/desktop/executor/doorbell'
 import { getRunDesktopDeviceId } from '@/lib/desktop/executor/repository'
+import {
+  executeWorkflowProposal,
+  readWorkflowProposal,
+  WORKFLOW_PROPOSAL_TOOL,
+} from '@/lib/memlia/chat/workflow-proposals.server'
 import { AsyncToolCallOwnershipError } from '@/lib/mothership/async-runs/errors'
 import type {
   AsyncCompletionSignal,
@@ -252,6 +259,46 @@ export async function prePersistClientExecutableToolCall(
   if (!isToolCallStreamEvent(event)) return
 
   const data = event.payload
+  if (data.toolName === WORKFLOW_PROPOSAL_TOOL) {
+    const id = data.toolCallId
+    const runId = context.runId
+    const userId = execContext?.userId
+    if (
+      !runId ||
+      !userId ||
+      data.partial ||
+      data.replay ||
+      data.phase !== 'call' ||
+      data.executor !== 'sim' ||
+      data.status === TOOL_CALL_STATUS.generating ||
+      options?.interactive === false ||
+      !context.toolPermissions.enabled
+    )
+      throw new Error('proposal_unavailable')
+    const proposal = await readWorkflowProposal(id, runId, userId).catch(() => {
+      throw new Error('proposal_unavailable')
+    })
+    if (
+      event.payload !== data ||
+      event.payload.status === TOOL_CALL_STATUS.generating ||
+      data.toolCallId !== id ||
+      data.toolName !== WORKFLOW_PROPOSAL_TOOL ||
+      context.runId !== runId ||
+      execContext?.userId !== userId ||
+      data.partial ||
+      data.replay ||
+      data.phase !== 'call' ||
+      data.executor !== 'sim' ||
+      (options?.interactive as boolean | undefined) === false ||
+      !context.toolPermissions.enabled
+    )
+      throw new Error('proposal_unavailable')
+    // Never put the private body/session into SSE or the persisted chat block.
+    data.arguments = { ...proposal }
+    data.status = TOOL_AWAITING_APPROVAL_STATUS
+    data.deadlineMs = Math.max(0, Date.parse(proposal.expiresAt) - Date.now())
+    return
+  }
   const isGenerating = data.status === TOOL_CALL_STATUS.generating
   const isPartial = data.partial === true || isGenerating
   // Only a live, complete call can be held behind a prompt; drop the stamp on any other frame.
@@ -394,6 +441,14 @@ export async function handleToolEvent(
   options: OrchestratorOptions,
   scope: ToolScope
 ): Promise<void> {
+  if (
+    event.type === 'tool' &&
+    'toolName' in event.payload &&
+    event.payload.toolName === WORKFLOW_PROPOSAL_TOOL
+  ) {
+    if (!isToolCallStreamEvent(event) || scope !== 'main') throw new Error('proposal_unavailable')
+    await prePersistClientExecutableToolCall(event, context, options, execContext)
+  }
   const isSubagent = scope === 'subagent'
   const parentToolCallId = isSubagent ? getScopedParentToolCallId(event) : undefined
   const agentId = event.scope?.agentId ?? 'main'
@@ -685,7 +740,9 @@ async function handleCallPhase(
   // event exists only to draw the row. Dispatching it here would run the
   // tool a second time, racing the in-band execution on mutations.
   const willDispatch =
-    !isInternal && !inbandOwned && (staticSimExecuted || simExecutable || clientExecutable)
+    !isInternal &&
+    !inbandOwned &&
+    (toolName === WORKFLOW_PROPOSAL_TOOL || staticSimExecuted || simExecutable || clientExecutable)
   logger.info('Tool call routing decision', {
     toolCallId,
     toolName,
@@ -919,6 +976,50 @@ async function dispatchToolExecution(
   // wrap the whole thing in one pending promise that stays unsettled until the
   // tool has actually run. Null means nothing was dispatched.
   const startExecution = (): Promise<AsyncCompletionSignal> | null => {
+    if (toolName === WORKFLOW_PROPOSAL_TOOL) {
+      const runId = context.runId
+      const userId = execContext.userId
+      if (
+        !runId ||
+        !userId ||
+        options.interactive === false ||
+        !context.toolPermissions.enabled ||
+        options.autoExecuteTools === false
+      )
+        return null
+      return (async () => {
+        let result: Awaited<ReturnType<typeof executeWorkflowProposal>>
+        try {
+          result = await executeWorkflowProposal(toolCallId, runId, userId, options.abortSignal)
+        } catch {
+          result = { status: 'unknown' }
+        }
+        const success = result.status === 'applied'
+        const status = success
+          ? MothershipStreamV1ToolOutcome.success
+          : MothershipStreamV1ToolOutcome.error
+        setTerminalToolCallState(toolCall, {
+          status,
+          output: result,
+          ...(!success ? { error: 'proposal_outcome_unknown' } : {}),
+        })
+        markToolResultSeen(context, toolCallId)
+        await options.onEvent?.({
+          type: 'tool',
+          payload: {
+            toolCallId,
+            toolName,
+            executor: MothershipStreamV1ToolExecutor.sim,
+            mode: 'async',
+            phase: 'result',
+            success,
+            status,
+            output: result,
+          },
+        })
+        return { status, data: result }
+      })()
+    }
     if (options.interactive === false) {
       if (options.autoExecuteTools === false) return null
       if (abortPendingToolIfStreamDead(toolCall, toolCallId, options, context)) return null

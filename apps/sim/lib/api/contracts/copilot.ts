@@ -1,3 +1,5 @@
+// Modified by Memlia: exact proposal review and digest-bound one-shot consent.
+import { WorkflowProposalSchema } from '@memlia/contracts'
 import { z } from 'zod'
 import { persistedContentBlockSchema } from '@/lib/api/contracts/copilot-messages'
 import { workspaceSearchFiltersSchema } from '@/lib/api/contracts/knowledge/search'
@@ -85,6 +87,7 @@ export const copilotToolPermissionBodySchema = z.object({
       z.object({
         toolCallId: z.string().min(1, 'Tool call ID is required'),
         decision: copilotToolPermissionDecisionSchema,
+        expectedDigest: WorkflowProposalSchema.shape.digest.optional(),
       })
     )
     .min(1, 'At least one decision is required')
@@ -443,6 +446,24 @@ export const copilotConfirmContract = defineRouteContract({
       status: z.string(),
     }),
   },
+})
+
+export const WORKFLOW_PROPOSAL_TOOL_NAME = 'memlia_apply_workflow_proposal'
+export const workflowProposalReviewSchema = z.strictObject({
+  toolCallId: WorkflowProposalSchema.shape.proposalId,
+  workflowId: WorkflowProposalSchema.shape.workflowId,
+  workspaceId: WorkflowProposalSchema.shape.workspaceId,
+  expectedRevision: WorkflowProposalSchema.shape.expectedRevision,
+  issuedAt: WorkflowProposalSchema.shape.issuedAt,
+  expiresAt: WorkflowProposalSchema.shape.expiresAt,
+  digest: WorkflowProposalSchema.shape.digest,
+  body: z.string().max(10 * 1024 * 1024),
+})
+export const copilotWorkflowProposalReviewContract = defineRouteContract({
+  method: 'GET',
+  path: '/api/copilot/tool-permission',
+  query: z.strictObject({ toolCallId: WorkflowProposalSchema.shape.proposalId }),
+  response: { mode: 'json', schema: workflowProposalReviewSchema },
 })
 
 export const copilotToolPermissionContract = defineRouteContract({

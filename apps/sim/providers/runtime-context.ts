@@ -23,17 +23,38 @@ import type { ExecutionContext } from '@/executor/types'
 import { projectResolvedSecretModelContent } from '@/executor/utils/resolved-secret-content-projection'
 import type { ResolvedSecretTraceRegistry } from '@/executor/utils/resolved-secret-trace-registry'
 import { stripCloneSuffixes } from '@/executor/utils/subflow-node-id-codec'
+import type { ModelUsage } from '@/providers/cost-policy'
 import { getPreparedProviderToolInputProvenance } from '@/providers/tool-input-provenance'
 import type { ProviderId } from '@/providers/types'
 import { type ExecuteToolOptions, executeTool } from '@/tools'
 import { getToolParams } from '@/tools/metadata'
 import type { ToolResponse } from '@/tools/types'
 
+declare const modelAttemptBrand: unique symbol
+/** Local correlation only: no authority, cost or durable admission is established. */
+export type ProviderModelAttempt = Readonly<{ [modelAttemptBrand]: true }>
+export type ProviderModelObservation =
+  | Readonly<{
+      kind: 'unknown'
+      reason: 'not_sent' | 'transport_error' | 'http_error' | 'incomplete' | 'usage_unavailable'
+    }>
+  | Readonly<{
+      kind: 'usage'
+      usage: Readonly<ModelUsage>
+      cost: Readonly<{ kind: 'unavailable' } | { kind: 'list_price_estimate'; usd: number }>
+    }>
+
 export interface ProviderRuntimeContext {
   /** Optional trusted request controls; never populated from a provider/model payload. */
   controlledRun?: {
     signal: AbortSignal
     beforeModelCall(): void
+    /** Trusted server guard, awaited for each physical attempt; not a model argument. */
+    beforeModelTransport?(signal: AbortSignal, attempt?: ProviderModelAttempt): Promise<void>
+    observeModelAttempt?(
+      attempt: ProviderModelAttempt,
+      observation: ProviderModelObservation
+    ): Promise<void>
     executeTool(
       toolId: string,
       params: Record<string, unknown>
@@ -85,6 +106,97 @@ export function beforeProviderModelCall(signal?: AbortSignal) {
   return {
     maxRetries: 0,
     signal: signal ? AbortSignal.any([signal, controls.signal]) : controls.signal,
+  }
+}
+
+/** Preserve the synchronous counter, then await the optional server transport guard. */
+export async function awaitProviderModelCall(signal?: AbortSignal) {
+  return waitForProviderModelCall(signal)
+}
+
+async function waitForProviderModelCall(signal?: AbortSignal, attempt?: ProviderModelAttempt) {
+  const guard = providerRuntimeContext.getStore()?.controlledRun?.beforeModelTransport
+  const options = beforeProviderModelCall(signal)
+  if (!guard || !options) return options
+  const capturedSignal = options.signal
+  capturedSignal.throwIfAborted()
+  await new Promise<void>((resolve, reject) => {
+    const onAbort = () => reject(capturedSignal.reason)
+    capturedSignal.addEventListener('abort', onAbort, { once: true })
+    // Invoke only after installing cancellation; consume late rejections as well.
+    Promise.resolve()
+      .then(() => {
+        capturedSignal.throwIfAborted()
+        return attempt ? guard(capturedSignal, attempt) : guard(capturedSignal)
+      })
+      .then(resolve, () => reject(new Error('Server model transport guard refused.')))
+      .finally(() => capturedSignal.removeEventListener('abort', onAbort))
+  })
+  capturedSignal.throwIfAborted()
+  return options
+}
+
+const modelAttempts = new WeakMap<
+  ProviderModelAttempt,
+  {
+    closed: boolean
+    observe: NonNullable<
+      NonNullable<ProviderRuntimeContext['controlledRun']>['observeModelAttempt']
+    >
+  }
+>()
+
+/** Capture the observer and correlation before the existing asynchronous guard. */
+export async function beginProviderModelAttempt(signal?: AbortSignal) {
+  const observe = providerRuntimeContext.getStore()?.controlledRun?.observeModelAttempt
+  if (!observe) return { options: await awaitProviderModelCall(signal), reference: undefined }
+  const reference = Object.freeze(Object.create(null)) as ProviderModelAttempt
+  modelAttempts.set(reference, { closed: false, observe })
+  try {
+    return { options: await waitForProviderModelCall(signal, reference), reference }
+  } catch (error) {
+    await completeProviderModelAttempt(reference, { kind: 'unknown', reason: 'not_sent' })
+    throw error
+  }
+}
+
+/** Close before invoking external code: late, foreign and duplicate references cannot re-observe. */
+export async function completeProviderModelAttempt(
+  reference: unknown,
+  observation: ProviderModelObservation
+): Promise<boolean> {
+  const entry = modelAttempts.get(reference as ProviderModelAttempt)
+  if (!entry || entry.closed) return false
+  entry.closed = true
+  // Observations originate at native parser boundaries, not from model tool arguments.
+  const snapshot: ProviderModelObservation =
+    observation.kind === 'unknown'
+      ? Object.freeze({ kind: 'unknown', reason: observation.reason })
+      : Object.freeze({
+          kind: 'usage',
+          usage: Object.freeze({
+            input: observation.usage.input,
+            output: observation.usage.output,
+            ...(observation.usage.cacheRead === undefined
+              ? {}
+              : { cacheRead: observation.usage.cacheRead }),
+            ...(observation.usage.cacheWrites === undefined
+              ? {}
+              : {
+                  cacheWrites: observation.usage.cacheWrites.map((write) =>
+                    Object.freeze({ ...write })
+                  ),
+                }),
+          }),
+          cost: Object.freeze({ ...observation.cost }),
+        })
+  if (snapshot.kind === 'usage' && snapshot.usage.cacheWrites)
+    Object.freeze(snapshot.usage.cacheWrites)
+  try {
+    await entry.observe(reference as ProviderModelAttempt, snapshot)
+    return true
+  } catch {
+    throw new Error('Server model observation failed.')
   }
 }
 

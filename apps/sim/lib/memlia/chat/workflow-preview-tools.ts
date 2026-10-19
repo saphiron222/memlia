@@ -1,4 +1,5 @@
 // Copyright (c) 2026 Memlia. All rights reserved.
+
 import {
   v2ApplyWorkflowOperationsBodySchema,
   v2WorkflowSkippedItemTypeSchema,
@@ -11,18 +12,26 @@ import { WorkflowOperationsNotAppliedError } from '@/lib/workflows/application/o
 import type { WorkflowLintReport } from '@/lib/workflows/editing/lint'
 import type { SkippedItem, ValidationError } from '@/lib/workflows/editing/types'
 import { MAX_IMPORT_BODY_BYTES } from '@/lib/workflows/operations/import-workflow'
+import { createWorkflowProposal } from './workflow-proposals.server'
 
 type PreviewContext = {
   principal: Parameters<typeof applyWorkflowOperations.execute>[0]['principal']
   workspaceId: string
   workflowId: string
+  /** Set only by the local authenticated run owner; never a model argument. */
+  proposalRunId?: string
 }
 export const workflowPreviewInputs = Object.freeze({
   preview_workflow_operations: v2ApplyWorkflowOperationsBodySchema,
 })
 
 /** Evaluates an owned batch with the native engine; never authorizes or persists an apply. */
-export function createWorkflowPreviewTools({ principal, workspaceId, workflowId }: PreviewContext) {
+export function createWorkflowPreviewTools({
+  principal,
+  workspaceId,
+  workflowId,
+  proposalRunId,
+}: PreviewContext) {
   const ownedPrincipal = structuredClone(principal)
   async function evaluate(params: unknown, signal?: AbortSignal) {
     const captured = stringifyBoundedJson(params, MAX_IMPORT_BODY_BYTES, { strict: true })
@@ -103,6 +112,20 @@ export function createWorkflowPreviewTools({ principal, workspaceId, workflowId 
     }
   }
   return {
+    /** Separate server seam: the existing model-facing preview dispatcher never gains writes. */
+    async propose(params: unknown, signal?: AbortSignal) {
+      if (!proposalRunId || ownedPrincipal.kind !== 'session') return failure('tool_not_allowed')
+      try {
+        const proposal = await createWorkflowProposal(
+          { principal: ownedPrincipal, runId: proposalRunId, workspaceId, workflowId },
+          params,
+          signal
+        )
+        return { ok: true as const, proposal, persisted: false as const }
+      } catch {
+        return failure(signal?.aborted ? 'cancelled' : 'unavailable')
+      }
+    },
     async dispatch(toolId: string, params: unknown, signal?: AbortSignal) {
       try {
         signal?.throwIfAborted()

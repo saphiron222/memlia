@@ -36,7 +36,7 @@ import {
   supportsNativeStructuredOutputs,
   supportsTemperature,
 } from '@/providers/models'
-import { beforeProviderModelCall, executeProviderTool } from '@/providers/runtime-context'
+import { awaitProviderModelCall, executeProviderTool } from '@/providers/runtime-context'
 import { createStreamingExecution } from '@/providers/streaming-execution'
 import { isAbortError } from '@/providers/streaming-tool-loop-shared'
 import { adaptAnthropicToolSchema } from '@/providers/tool-schema-adapter'
@@ -261,7 +261,8 @@ async function createMessage(
   payload: AnthropicPayload,
   abortSignal?: AbortSignal
 ): Promise<Anthropic.Messages.Message> {
-  const options = beforeProviderModelCall(abortSignal)
+  const options = await awaitProviderModelCall(abortSignal)
+  options?.signal.throwIfAborted()
   if (payload.max_tokens > ANTHROPIC_SDK_NON_STREAMING_MAX_TOKENS && !payload.stream) {
     const stream = anthropic.messages.stream(
       payload as Anthropic.Messages.MessageStreamParams,
@@ -542,10 +543,9 @@ export async function executeAnthropicProviderRequest(
       ...payload,
       stream: true,
     } as Anthropic.Messages.MessageCreateParamsStreaming)
-    const streamResponse = await anthropic.messages.create(
-      prepared,
-      beforeProviderModelCall(request.abortSignal)
-    )
+    const options = await awaitProviderModelCall(request.abortSignal)
+    options?.signal.throwIfAborted()
+    const streamResponse = await anthropic.messages.create(prepared, options)
 
     const streamingResult = createStreamingExecution({
       model: request.model,

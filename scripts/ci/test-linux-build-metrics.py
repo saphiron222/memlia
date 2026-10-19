@@ -1,4 +1,5 @@
 # Copyright 2026 Memlia. All rights reserved.
+import errno
 import importlib.util
 import json
 import os
@@ -719,6 +720,212 @@ class ProcessObservationTests(unittest.TestCase):
             if child.poll() is None:child.kill()
             child.wait(timeout=5)
             child.stdin.close();child.stdout.close()
+
+class PassiveDrainTests(unittest.TestCase):
+    def run_owned(self, *, release=False, timeout=5, signal_stage=None, oom=False,
+                  inventory_error=False, command_code=0, late_empty=False):
+        # Real leader and waiting process, but a portable, dedicated cgroup double.
+        # Linux additionally uses the real procfs identity/observation readers.
+        import signal
+        import threading
+        import time
+        waiting=subprocess.Popen([sys.executable,'-c',
+            'import sys; print("ready",flush=True); sys.stdin.readline()'],
+            stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True)
+        timer=None
+        seen=[]
+        cleanup_live=[]
+        original_observe=metrics.observe_processes
+        original_identities=metrics.identities
+        try:
+            self.assertEqual(waiting.stdout.readline().strip(),'ready')
+            with tempfile.TemporaryDirectory() as temporary:
+                root=Path(temporary)
+                args=SimpleNamespace(cgroup=str(root),report=str(root/'receipt.json'),phase='test',
+                    timeout=timeout,command=[sys.executable,'-c',f'raise SystemExit({command_code})'])
+                reads=0
+                def reading(_root):
+                    nonlocal reads
+                    reads+=1
+                    if inventory_error and 'after_command' in seen:
+                        raise OSError('PRIVATE_CANARY')
+                    pids=[os.getpid()]
+                    if reads>1 and waiting.poll() is None:pids.append(waiting.pid)
+                    return {'pids':pids,'limitBytes':1024,'swapBytes':0,
+                            'events':{'oom_kill':int(oom and 'after_command' in seen)}}
+                def identities(pids):
+                    if sys.platform=='linux':return original_identities(pids)
+                    return {pid:456 for pid in pids if pid!=os.getpid() and waiting.poll() is None}
+                def observe(owned,stage):
+                    nonlocal timer
+                    seen.append(stage)
+                    if stage=='after_command' and release:
+                        def finish():
+                            if waiting.poll() is None:
+                                waiting.stdin.write('finish\n');waiting.stdin.flush()
+                        timer=threading.Timer(.1,finish);timer.start()
+                    if stage==signal_stage:os.kill(os.getpid(),signal.SIGTERM)
+                    if sys.platform=='linux':return original_observe(owned,stage)
+                    return {'stage':stage,'total':len(owned),'truncated':False,'identities':[]}
+                def cleanup(_root,_child,observations=None):
+                    cleanup_live.append(waiting.poll() is None)
+                    if signal_stage=='cleanup':os.kill(os.getpid(),signal.SIGTERM)
+                    if waiting.poll() is None:waiting.terminate()
+                    waiting.wait(timeout=5)
+                    observations.append(observe({},'after_cleanup'))
+                    return [],[]
+                began=time.monotonic()
+                offset=0
+                def sleep(seconds):
+                    nonlocal offset
+                    if late_empty and 'after_command' in seen and not offset:
+                        waiting.stdin.write('finish\n');waiting.stdin.flush()
+                        waiting.wait(timeout=5)
+                        offset=3  # Deterministic scheduler stall beyond the 2s deadline.
+                    else:time.sleep(seconds)
+                with patch.object(metrics,'cgroup_read',side_effect=reading), \
+                     patch.object(metrics,'time',SimpleNamespace(monotonic=lambda:time.monotonic()+offset,sleep=sleep)), \
+                     patch.object(metrics,'host_memory',return_value={'availableBytes':1024,'swapUsedBytes':0}), \
+                     patch.object(metrics,'sample_processes',return_value=(0,0)), \
+                     patch.object(metrics,'identities',side_effect=identities), \
+                     patch.object(metrics,'observe_processes',side_effect=observe), \
+                     patch.object(metrics,'terminate_owned',side_effect=cleanup):
+                    code=metrics.run(args)
+                receipt=json.loads((root/'receipt.json').read_text())
+                elapsed=time.monotonic()-began
+                if timer is not None:timer.join(timeout=2)
+                return code,receipt,waiting.poll(),cleanup_live,elapsed
+        finally:
+            if timer is not None:timer.cancel();timer.join(timeout=2)
+            if waiting.poll() is None:waiting.terminate()
+            waiting.wait(timeout=5)
+            waiting.stdin.close();waiting.stdout.close()
+
+    def test_natural_drain_waits_after_observation_without_signalling(self):
+        code,receipt,child_code,cleanup_live,_=self.run_owned(release=True)
+        self.assertEqual(code,0)
+        self.assertEqual(child_code,0)
+        self.assertEqual(cleanup_live,[False])
+        self.assertEqual(receipt['descendantsAfterCommand'],1)
+        self.assertEqual(receipt['descendantsAfterDrain'],0)
+        self.assertEqual(receipt['drainOutcome'],'empty')
+        self.assertEqual(receipt['processObservations'][1]['stage'],'after_drain')
+
+    def test_persistent_descendant_fails_even_when_cleanup_is_zero(self):
+        code,receipt,_,cleanup_live,elapsed=self.run_owned()
+        self.assertEqual(code,1)
+        self.assertEqual(receipt['descendantsAfterCommand'],1)
+        self.assertEqual(receipt['descendantsAfterDrain'],1)
+        self.assertEqual(receipt['descendantsAfterCleanup'],0)
+        self.assertEqual(receipt['drainOutcome'],'grace_expired')
+        self.assertEqual(cleanup_live,[True])
+        self.assertGreaterEqual(receipt['drainSeconds'],2)
+        self.assertLess(elapsed,4)
+
+    def test_global_deadline_does_not_restart_after_command(self):
+        code,receipt,_,_,elapsed=self.run_owned(timeout=.45)
+        self.assertEqual(code,1)
+        self.assertIn('timeout',receipt['errors'])
+        self.assertLess(elapsed,1.5)
+
+    def test_empty_first_observed_after_grace_deadline_is_not_success(self):
+        code,receipt,child_code,_,_=self.run_owned(late_empty=True)
+        self.assertEqual(child_code,0)
+        self.assertEqual(code,1)
+        self.assertEqual(receipt['drainOutcome'],'grace_expired')
+
+    def test_interruption_after_command_and_during_cleanup_cannot_pass(self):
+        for stage in ('after_command','after_drain','cleanup'):
+            with self.subTest(stage=stage):
+                code,receipt,_,_,_=self.run_owned(release=stage=='cleanup',signal_stage=stage)
+                self.assertEqual(code,1)
+                self.assertIn('interrupted',receipt['errors'])
+
+    def test_oom_after_command_remains_a_failure_after_natural_drain(self):
+        code,receipt,child_code,_,_=self.run_owned(release=True,oom=True)
+        self.assertEqual(code,1)
+        self.assertEqual(child_code,0)
+        self.assertEqual(receipt['descendantsAfterDrain'],0)
+        self.assertEqual(receipt['cgroup']['eventsDelta']['oom_kill'],1)
+
+    def test_inventory_failure_and_nonzero_command_never_pass(self):
+        for options in ({'inventory_error':True},{'command_code':3}):
+            with self.subTest(options=options):
+                code,receipt,_,_,_=self.run_owned(**options)
+                self.assertEqual(code,1)
+                self.assertNotIn('PRIVATE_CANARY',json.dumps(receipt))
+
+    def test_cleanup_reused_identity_never_signals_another_process(self):
+        # Portable procfs/cgroup doubles, real unrelated witness kept alive.
+        witness=subprocess.Popen([sys.executable,'-c','import sys; sys.stdin.readline()'],
+                                 stdin=subprocess.PIPE)
+        try:
+            record=ProcessObservationTests().record(pid=witness.pid,start=999)
+            calls=iter([{witness.pid:456},{},{},{},{}])
+            with patch.object(metrics,'cgroup_read',return_value={'pids':[witness.pid]}), \
+                 patch.object(metrics,'identities',side_effect=lambda _:next(calls)), \
+                 patch.object(Path,'read_text',return_value=record), \
+                 patch.object(os,'kill') as sent:
+                remaining,errors=metrics.terminate_owned(Path('/unused'))
+            self.assertEqual(remaining,[])
+            self.assertEqual(errors,[])
+            sent.assert_not_called()
+            self.assertIsNone(witness.poll())
+        finally:
+            witness.stdin.close()
+            witness.wait(timeout=5)
+
+class ProcfsExitRaceTests(unittest.TestCase):
+    @staticmethod
+    def stat(start):
+        return '900002 (owned worker) ' + ' '.join(['S'] + ['0'] * 18 + [str(start)])
+
+    def test_identity_esrch_does_not_fabricate_identity_or_retry(self):
+        with patch.object(Path, 'read_text', side_effect=[
+                ProcessLookupError(errno.ESRCH, 'fixture'), self.stat(42)]) as read:
+            self.assertEqual(metrics.identities([900001, 900002]), {900002: 42})
+        self.assertEqual(read.call_count, 2)
+
+    def test_sample_esrch_preserves_other_process_measurements_without_retry(self):
+        with patch.object(Path, 'read_text', side_effect=[
+                'VmRSS: 3 kB\nVmHWM: 9 kB\n',
+                ProcessLookupError(errno.ESRCH, 'fixture'),
+                'VmRSS: 5 kB\nVmHWM: 7 kB\n']) as read:
+            self.assertEqual(metrics.sample_processes([900001, 900002, 900003]),
+                             (8 * 1024, 9 * 1024))
+        self.assertEqual(read.call_count, 3)
+
+    def test_non_esrch_errors_remain_fatal_at_both_read_boundaries(self):
+        for function in (metrics.identities, metrics.sample_processes):
+            for error in (PermissionError(errno.EACCES, 'fixture'),
+                          OSError(errno.EIO, 'fixture'),
+                          ProcessLookupError(errno.EIO, 'fixture'),
+                          ProcessLookupError(), OSError('fixture')):
+                with self.subTest(function=function.__name__, error=type(error).__name__,
+                                  errno=error.errno):
+                    with patch.object(Path, 'read_text', side_effect=error) as read:
+                        with self.assertRaises(type(error)) as raised:
+                            function([900001])
+                        self.assertIs(raised.exception, error)
+                    self.assertEqual(read.call_count, 1)
+
+    def test_malformed_identity_and_measurements_remain_fatal(self):
+        for function, value in ((metrics.identities, 'not a stat record'),
+                                (metrics.sample_processes, 'VmRSS: unknown kB')):
+            with self.subTest(function=function.__name__):
+                with patch.object(Path, 'read_text', return_value=value):
+                    with self.assertRaises(ValueError):
+                        function([900001])
+
+    def test_legacy_enoent_and_new_identity_are_not_replaced_with_cached_values(self):
+        with patch.object(Path, 'read_text', side_effect=[
+                self.stat(42), FileNotFoundError(), self.stat(43)]):
+            self.assertEqual(metrics.identities([900002]), {900002: 42})
+            self.assertEqual(metrics.identities([900002]), {})
+            self.assertEqual(metrics.identities([900002]), {900002: 43})
+        with patch.object(Path, 'read_text', side_effect=FileNotFoundError()):
+            self.assertEqual(metrics.sample_processes([900001]), (0, 0))
+
 
 if __name__ == '__main__':
     unittest.main()

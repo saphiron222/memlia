@@ -1,3 +1,4 @@
+// Modified by Memlia: optional server-owned local Chat branch without worker fallback.
 import type { Context } from '@opentelemetry/api'
 import { createLogger } from '@sim/logger'
 import type { PermissionType } from '@sim/platform-authz/workspace'
@@ -16,6 +17,11 @@ import {
 } from '@/lib/billing/core/attribution'
 import { env } from '@/lib/core/config/env'
 import { isCopilotToolPermissionsEnabled, isHosted } from '@/lib/core/config/env-flags'
+import {
+  captureLocalChatOptions,
+  type LocalChatOptions,
+  runLocalChat,
+} from '@/lib/memlia/chat/local-driver.server'
 import { withFileOwnerContext } from '@/lib/mothership/application/file-owner-context'
 import { SIM_TOOL_EXECUTION_LEASE_SECONDS } from '@/lib/mothership/async-runs/execution-lease'
 import type { AsyncCompletionSignal } from '@/lib/mothership/async-runs/lifecycle'
@@ -283,6 +289,8 @@ function resultContent(context: StreamingContext, options: CopilotLifecycleOptio
 }
 
 export interface CopilotLifecycleOptions extends OrchestratorOptions {
+  /** Server-only composition, absent by default; never read from requestPayload. */
+  localChat?: LocalChatOptions
   /** Internal benchmark runner policy, independent of browser and model payloads. */
   benchmark?: 'plan' | 'tool-free' | 'distill' | 'reconstruct' | 'resolve'
   copilotResourceAdmission?: CopilotResourceAdmission
@@ -394,7 +402,26 @@ export async function runCopilotLifecycle(
     runId,
     goRoute = '/api/copilot',
   } = options
+  const localChat =
+    options.localChat === undefined ? undefined : captureLocalChatOptions(options.localChat)
   const isContinuation = Boolean(options.recovery) || goRoute === '/api/tools/resume'
+  if (
+    localChat &&
+    (isContinuation ||
+      options.interactive !== true ||
+      !runId ||
+      !chatId ||
+      userId !== localChat.principal.userId ||
+      workspaceId !== localChat.workspaceId ||
+      workflowId !== localChat.workflow?.workflowId)
+  )
+    throw new Error('Local Chat is unavailable.')
+  if (localChat)
+    options = {
+      ...options,
+      localChat,
+      executionContext: options.executionContext ? { ...options.executionContext } : undefined,
+    }
   const payloadMode = nonBlankString(requestPayload.mode)
   const requestMode = options.recovery
     ? payloadMode
@@ -444,6 +471,7 @@ export async function runCopilotLifecycle(
   try {
     const lifecycleOptions: CopilotLifecycleOptions = {
       ...options,
+      localChat,
       executionId: resolvedExecutionId,
       runId: resolvedRunId,
       ...(options.executionContext
@@ -594,6 +622,8 @@ export async function runCopilotLifecycle(
           lifecycleOptions,
           'scope' in admission ? admission.scope : undefined
         )
+      } else if (localChat) {
+        await runLocalChat(localChat, context, execContext, lifecycleOptions)
       } else {
         if (!isContinuation && hostedBillingRequest)
           await lifecycleOptions.onBillingAdmission?.(hostedBillingRequest)

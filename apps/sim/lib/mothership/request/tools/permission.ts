@@ -1,6 +1,12 @@
+// Modified by Memlia: require one-shot confirmation for server-owned workflow proposals.
+
 import { createLogger } from '@sim/logger'
 import { TERMINAL_TOOL_NAME } from '@sim/terminal-protocol'
 import { getErrorMessage } from '@sim/utils/errors'
+import {
+  WORKFLOW_PROPOSAL_TOOL,
+  WORKFLOW_PROPOSAL_TTL_MS,
+} from '@/lib/memlia/chat/workflow-proposals.server'
 import type { AsyncCompletionSignal } from '@/lib/mothership/async-runs/lifecycle'
 import { PERMISSION_WAIT_TIMEOUT_MS } from '@/lib/mothership/constants'
 import {
@@ -76,6 +82,7 @@ export function toolCallNeedsApproval(
   /** The call's arguments, for a tool whose gate depends on what it is doing. */
   args?: Record<string, unknown>
 ): boolean {
+  if (toolName === WORKFLOW_PROPOSAL_TOOL) return true
   if (!context.toolPermissions.enabled) return false
   if (options.interactive === false) return false
 
@@ -219,6 +226,7 @@ export function runGatedToolExecution(
    */
   canPrompt = true
 ): Promise<AsyncCompletionSignal> {
+  const proposal = toolName === WORKFLOW_PROPOSAL_TOOL
   toolCall.status = 'awaiting_approval'
 
   return withCopilotSpan(
@@ -229,7 +237,10 @@ export function runGatedToolExecution(
       ...(context.runId ? { [TraceAttr.RunId]: context.runId } : {}),
     },
     async (span): Promise<AsyncCompletionSignal> => {
-      if (!canPrompt) {
+      if (
+        !canPrompt ||
+        (proposal && (!context.toolPermissions.enabled || options.interactive === false))
+      ) {
         // Fail closed. Running it would defeat the point of the flag, and
         // waiting would hang the turn on a prompt that is never drawn.
         logger.error('Gated tool has no visible row to prompt on; refusing to run it', {
@@ -259,13 +270,17 @@ export function runGatedToolExecution(
         : await waitForToolPermissionDecision(
             toolCallId,
             capToToolDeadline(
-              PERMISSION_WAIT_TIMEOUT_MS,
+              proposal ? WORKFLOW_PROPOSAL_TTL_MS : PERMISSION_WAIT_TIMEOUT_MS,
               lastToolStartAt(toolCall.deadlineAt),
               Date.now()
             ),
             options.abortSignal
           )
-      const decision = toolStartWindowClosed(toolCall.deadlineAt, Date.now()) ? null : answer
+      const decision =
+        toolStartWindowClosed(toolCall.deadlineAt, Date.now()) ||
+        (proposal && options.abortSignal?.aborted)
+          ? null
+          : answer
 
       if (!decision) {
         // Timed out or the turn was stopped. Fail the call rather than running
@@ -298,6 +313,7 @@ export function runGatedToolExecution(
       span.setAttribute(TraceAttr.CopilotAsyncToolPermissionDecision, decision.decision)
 
       if (
+        !proposal &&
         decisionSuppressesFuturePrompts(decision.decision) &&
         context.toolPermissions.autoAllowPermitted
       ) {
@@ -319,7 +335,10 @@ export function runGatedToolExecution(
         context.toolPermissions.autoAllowed.add(toolName)
       }
 
-      if (!decisionAllowsExecution(decision.decision)) {
+      if (
+        !decisionAllowsExecution(decision.decision) ||
+        (proposal && decision.decision !== 'allow')
+      ) {
         const output = skipOutput(toolName)
         setTerminalToolCallState(toolCall, {
           status: MothershipStreamV1ToolOutcome.skipped,

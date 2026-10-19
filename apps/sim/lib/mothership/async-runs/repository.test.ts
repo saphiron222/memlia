@@ -1,3 +1,4 @@
+// Modified by Memlia: qualify optional envelope and expiry fence on native decisions.
 import {
   copilotAsyncToolCalls,
   copilotChats,
@@ -12,7 +13,7 @@ import {
   queueTableRows,
   resetDbChainMock,
 } from '@sim/testing'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   areStreamToolExecutionsSettled,
   claimToolExecution,
@@ -24,6 +25,7 @@ import {
   getUnsettledStreamSandboxProcesses,
   markAsyncToolRunning,
   recordSimSandboxProcess,
+  recordToolPermissionDecision,
   requestRunStop,
   settleSimSandboxProcess,
   settleSimToolExecution,
@@ -540,5 +542,174 @@ describe('async tool repository single-row semantics', () => {
     await expect(
       upsertAsyncToolCall({ runId: 'current-run', toolCallId: 'call-race', toolName: 'glob' })
     ).rejects.toThrow('Async tool call belongs to another run')
+  })
+})
+
+function mockSqlFragments(condition: unknown): { strings: string[]; values: unknown[] }[] {
+  return flattenMockConditions(condition).flatMap((c) =>
+    Array.isArray(c.strings) &&
+    c.strings.every((s) => typeof s === 'string') &&
+    Array.isArray(c.values)
+      ? [{ strings: c.strings, values: c.values }]
+      : []
+  )
+}
+
+describe('proposal decision fence (native query builder, database doubled)', () => {
+  beforeEach(() => resetDbChainMock())
+  it('binds exact JSONB and database expiry in the same native decision UPDATE', async () => {
+    const args = '{"version":"fixture","body":"original"}'
+    const expiresAt = new Date('2026-10-19T12:10:00Z')
+    queueTableRows(copilotAsyncToolCalls, [{ toolCallId: 'call-a' }])
+    await recordToolPermissionDecision('call-a', 'allow', { expectedArgsJSONB: args, expiresAt })
+    const fragments = mockSqlFragments(dbChainMockFns.where.mock.calls.at(-1)?.[0])
+    expect(
+      fragments.some((c) => c.strings.join('?').includes('::jsonb') && c.values.includes(args))
+    ).toBe(true)
+    expect(
+      fragments.some(
+        (c) =>
+          c.strings.join('?').includes('clock_timestamp()') &&
+          c.values.includes(copilotAsyncToolCalls.executionDeadlineAt)
+      )
+    ).toBe(true)
+    expect(
+      hasMockCondition(
+        dbChainMockFns.where.mock.calls.at(-1)?.[0],
+        (c) =>
+          c.type === 'eq' &&
+          c.left === copilotAsyncToolCalls.executionDeadlineAt &&
+          c.right instanceof Date &&
+          c.right.getTime() === expiresAt.getTime()
+      )
+    ).toBe(true)
+    expect(
+      hasMockCondition(
+        dbChainMockFns.where.mock.calls.at(-1)?.[0],
+        (c) => c.type === 'isNull' && c.column === copilotAsyncToolCalls.executionStartedAt
+      )
+    ).toBe(true)
+  })
+  it('refuses malformed private fence before any UPDATE', async () => {
+    await expect(
+      recordToolPermissionDecision('call-a', 'allow', {
+        expectedArgsJSONB: 'not json',
+        expiresAt: new Date(Number.NaN),
+      })
+    ).rejects.toThrow('proposal_decision_fence_invalid')
+    expect(dbChainMockFns.update).not.toHaveBeenCalled()
+  })
+})
+
+// Evaluates only the emitted fence predicates with a deterministic SQL-builder
+// double. This is a query/race contract test, not PostgreSQL qualification.
+it.each(['unchanged', 'changed-args', 'expired'] as const)(
+  'keeps the decision atomic when the SQL boundary sees %s',
+  async (race) => {
+    resetDbChainMock()
+    const original = '{"body":"original"}'
+    const expiresAt = new Date('2026-10-19T12:10:00Z')
+    const row = { args: JSON.parse(original), permissionDecision: null as string | null }
+    dbChainMockFns.returning.mockImplementationOnce(async () => {
+      if (race === 'changed-args') row.args = { body: 'replaced' }
+      const now = race === 'expired' ? expiresAt.getTime() : expiresAt.getTime() - 1
+      const fragments = mockSqlFragments(dbChainMockFns.where.mock.calls.at(-1)?.[0])
+      const argsFence = fragments.find((c) => c.strings.join('?').includes('::jsonb'))
+      const clockFence = fragments.find((c) => c.strings.join('?').includes('clock_timestamp()'))
+      if (argsFence && typeof argsFence.values[1] !== 'string')
+        throw new Error('Invalid SQL test binding')
+      const argsMatch =
+        !argsFence ||
+        (typeof argsFence.values[1] === 'string' &&
+          JSON.stringify(row.args) === JSON.stringify(JSON.parse(argsFence.values[1])))
+      const timeMatch = !clockFence || now < expiresAt.getTime()
+      if (!argsMatch || !timeMatch) return []
+      row.permissionDecision = 'allow'
+      return [row]
+    })
+    queueTableRows(copilotAsyncToolCalls, [{ toolCallId: 'call-a' }])
+    const result = await recordToolPermissionDecision('call-a', 'allow', {
+      expectedArgsJSONB: original,
+      expiresAt,
+    })
+    expect(row.permissionDecision).toBe(race === 'unchanged' ? 'allow' : null)
+    expect(result === null).toBe(race !== 'unchanged')
+  }
+)
+
+describe('proposal decision lock boundary (database doubled)', () => {
+  beforeEach(() => resetDbChainMock())
+  const fence = () => ({
+    expectedArgsJSONB: '{"body":"original"}',
+    expiresAt: new Date('2026-10-19T12:10:00Z'),
+  })
+
+  it('does not evaluate the decision UPDATE until the row lock resolves', async () => {
+    let release!: (rows: unknown[]) => void
+    const locked = new Promise<unknown[]>((resolve) => {
+      release = resolve
+    })
+    dbChainMockFns.for.mockImplementationOnce(() => locked)
+    dbChainMockFns.returning.mockResolvedValueOnce([])
+    const pending = recordToolPermissionDecision('call-a', 'allow', fence())
+    try {
+      await vi.waitFor(() => expect(dbChainMockFns.for).toHaveBeenCalledWith('update'))
+      expect(dbChainMockFns.transaction).toHaveBeenCalledTimes(1)
+      expect(dbChainMockFns.update).not.toHaveBeenCalled()
+      expect(
+        hasMockCondition(
+          dbChainMockFns.where.mock.calls[0][0],
+          (c) =>
+            c.type === 'eq' && c.left === copilotAsyncToolCalls.toolCallId && c.right === 'call-a'
+        )
+      ).toBe(true)
+    } finally {
+      release([{ toolCallId: 'call-a' }])
+      await pending
+    }
+    expect(await pending).toBeNull()
+    expect(dbChainMockFns.update).toHaveBeenCalledTimes(1)
+    expect(
+      mockSqlFragments(dbChainMockFns.where.mock.calls.at(-1)?.[0]).some((c) =>
+        c.strings.join('?').includes('clock_timestamp()')
+      )
+    ).toBe(true)
+  })
+
+  it('does not decide if the row is absent after lock acquisition', async () => {
+    expect(await recordToolPermissionDecision('missing', 'allow', fence())).toBeNull()
+    expect(dbChainMockFns.update).not.toHaveBeenCalled()
+  })
+
+  it('does not write when row lock acquisition fails', async () => {
+    dbChainMockFns.for.mockRejectedValueOnce(new Error('fixture lock refusal'))
+    await expect(recordToolPermissionDecision('call-a', 'allow', fence())).rejects.toThrow(
+      'fixture lock refusal'
+    )
+    expect(dbChainMockFns.update).not.toHaveBeenCalled()
+  })
+
+  it('does not return a decision when transaction completion fails', async () => {
+    const implementation = dbChainMockFns.transaction.getMockImplementation()!
+    dbChainMockFns.transaction.mockImplementationOnce(async (...args: unknown[]) => {
+      await implementation(...args)
+      throw new Error('fixture commit unknown')
+    })
+    queueTableRows(copilotAsyncToolCalls, [{ toolCallId: 'call-a' }])
+    dbChainMockFns.returning.mockResolvedValueOnce([{ permissionDecision: 'allow' }])
+    await expect(recordToolPermissionDecision('call-a', 'allow', fence())).rejects.toThrow(
+      'fixture commit unknown'
+    )
+    expect(dbChainMockFns.update).toHaveBeenCalledTimes(1)
+  })
+
+  it('preserves the unfenced native path without a new transaction or lock', async () => {
+    dbChainMockFns.returning.mockResolvedValueOnce([{ permissionDecision: 'allow' }])
+    expect(await recordToolPermissionDecision('ordinary', 'allow')).toEqual({
+      permissionDecision: 'allow',
+    })
+    expect(dbChainMockFns.transaction).not.toHaveBeenCalled()
+    expect(dbChainMockFns.for).not.toHaveBeenCalled()
+    expect(dbChainMockFns.set.mock.calls[0][0].permissionDecidedAt).toBeInstanceOf(Date)
   })
 })

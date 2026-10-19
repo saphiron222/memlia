@@ -3,7 +3,7 @@ name: Expérience Linux avec swap — non qualifiée
 on:
   workflow_dispatch:
   push:
-    branches: [main, build/linux-swap-measurement]
+    branches: [build/linux-swap-measurement]
 permissions:
   contents: read
 concurrency:

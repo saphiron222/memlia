@@ -1,11 +1,14 @@
 // Copyright (c) 2026 Memlia. All rights reserved.
 
+import type { WorkflowProposal } from '@memlia/contracts'
 import { z } from 'zod'
 import { workflowIdParamsSchema } from '@/lib/api/contracts/workflows'
 import type { StreamingExecution } from '@/executor/types'
 import { anthropicProvider } from '@/providers/anthropic'
 import { openaiProvider } from '@/providers/openai'
 import {
+  type ProviderModelAttempt,
+  type ProviderModelObservation,
   type ProviderToolExecutionResult,
   runWithProviderRuntimeContext,
 } from '@/providers/runtime-context'
@@ -14,6 +17,7 @@ import type { ProviderRequest, ProviderToolConfig } from '@/providers/types'
 import { catalogToolInputs, createCatalogTools } from './catalog-tools'
 import { type ModelRunLimits, runModelAdapter } from './model-adapter'
 import { createWorkflowPreviewTools, workflowPreviewInputs } from './workflow-preview-tools'
+import { workflowProposalInputSchema } from './workflow-proposals.server'
 import { createWorkflowReadTools, workflowReadInputs } from './workflow-read-tools'
 
 const workflowBinding = z
@@ -30,6 +34,36 @@ const workflowInput = z.object({ request: workflowReadInputs.read_workflow }).st
 const workflowPreviewInput = z.object({ request: z.unknown() }).strict()
 const workflowBlockInput = z.object({ request: workflowReadInputs.read_workflow_block }).strict()
 
+export type WorkflowProposalBinding = {
+  runId: string
+  onProposal(
+    proposal: WorkflowProposal,
+    signal: AbortSignal
+  ): Promise<
+    { status: 'applied'; baseRevision: number; draftRevision: number } | { status: 'skipped' }
+  >
+}
+/** Server-only function and primitive capture; getters/model JSON confer no authority. */
+export function captureWorkflowProposalBinding(
+  value: WorkflowProposalBinding
+): WorkflowProposalBinding {
+  if (!value || Object.getPrototypeOf(value) !== Object.prototype)
+    throw new Error('Invalid server proposal binding.')
+  const d = Object.getOwnPropertyDescriptors(value)
+  if (
+    Reflect.ownKeys(value).length !== 2 ||
+    !d.runId ||
+    !d.onProposal ||
+    !('value' in d.runId) ||
+    !('value' in d.onProposal) ||
+    typeof d.runId.value !== 'string' ||
+    !/^[A-Za-z0-9_-]{1,128}$/.test(d.runId.value) ||
+    typeof d.onProposal.value !== 'function'
+  )
+    throw new Error('Invalid server proposal binding.')
+  return { runId: d.runId.value, onProposal: d.onProposal.value }
+}
+
 type CatalogProviderOptions = Parameters<typeof createCatalogTools>[0] & {
   provider: 'openai' | 'anthropic'
   request: Pick<
@@ -43,17 +77,37 @@ type CatalogProviderOptions = Parameters<typeof createCatalogTools>[0] & {
     | 'reasoningEffort'
     | 'thinkingLevel'
   >
+  /** Server-only hook, captured once; neither authorization nor pricing evidence. */
+  beforeModelTransport?(signal: AbortSignal, attempt?: ProviderModelAttempt): Promise<void>
+  observeModelAttempt?(
+    attempt: ProviderModelAttempt,
+    observation: ProviderModelObservation
+  ): Promise<void>
   limits?: Partial<ModelRunLimits>
   signal?: AbortSignal
   /** Explicit server policy only; absence never grants workflow reads. */
   workflow?: z.input<typeof workflowBinding>
+  proposal?: WorkflowProposalBinding
 }
 
 /** Server-only binding; no ambient workflow identity, tools or conversation compactor is inherited. */
 export function runCatalogProvider(options: CatalogProviderOptions) {
+  const beforeModelTransport = options.beforeModelTransport
+  const observeModelAttempt = options.observeModelAttempt
+  if (observeModelAttempt !== undefined) {
+    if (typeof observeModelAttempt !== 'function') throw new Error('Invalid server model observer.')
+    if (options.provider !== 'openai')
+      throw new Error('Model observation requires OpenAI streaming.')
+  }
+  if (beforeModelTransport !== undefined && typeof beforeModelTransport !== 'function')
+    throw new Error('Invalid server model transport guard.')
   const selection = workflowBinding.optional().safeParse(options.workflow)
   if (!selection.success) throw new Error('Invalid workflow read binding.')
   const workflow = selection.data
+  const proposal =
+    options.proposal === undefined ? undefined : captureWorkflowProposalBinding(options.proposal)
+  if (proposal && (!workflow?.previewOperations || options.principal.kind !== 'session'))
+    throw new Error('Invalid server proposal binding.')
   const provider =
     options.provider === 'openai'
       ? openaiProvider
@@ -76,6 +130,7 @@ export function runCatalogProvider(options: CatalogProviderOptions) {
         principal: options.principal,
         workspaceId: options.workspaceId,
         workflowId: workflow.workflowId,
+        proposalRunId: proposal?.runId,
       })
     : undefined
   const tools: ProviderToolConfig[] = Object.entries(catalogToolInputs).map(([id, schema]) => {
@@ -136,6 +191,46 @@ export function runCatalogProvider(options: CatalogProviderOptions) {
       },
     })
 
+  if (proposal)
+    tools.push({
+      id: 'propose_workflow_operations',
+      description:
+        'Propose the exact operations at the observed expectedRevision. The human must approve once; no execution or deployment. Never infer approval from model text.',
+      params: {},
+      parameters: {
+        type: 'object',
+        properties: { request: previewJsonInput(workflowProposalInputSchema) },
+        required: ['request'],
+      },
+    })
+
+  async function proposeWorkflow(params: unknown, signal: AbortSignal) {
+    const parsed = workflowPreviewInput.safeParse(params)
+    if (!parsed.success || !Object.hasOwn(parsed.data, 'request'))
+      return workflowFailure('invalid_input')
+    if (!proposal || !workflowPreview) return workflowFailure('forbidden')
+    const created = await workflowPreview.propose(parsed.data.request, signal)
+    if (!created.ok) return created
+    signal.throwIfAborted()
+    try {
+      const result = await proposal.onProposal(created.proposal, signal)
+      signal.throwIfAborted()
+      const checked = z
+        .discriminatedUnion('status', [
+          z.strictObject({ status: z.literal('skipped') }),
+          z.strictObject({
+            status: z.literal('applied'),
+            baseRevision: z.int().min(0).max(Number.MAX_SAFE_INTEGER),
+            draftRevision: z.int().min(0).max(Number.MAX_SAFE_INTEGER),
+          }),
+        ])
+        .parse(result)
+      return { ok: true as const, data: checked }
+    } catch {
+      throw new Error('Workflow proposal could not complete.')
+    }
+  }
+
   async function previewWorkflow(params: unknown, signal: AbortSignal) {
     const parsed = workflowPreviewInput.safeParse(params)
     if (!parsed.success || !Object.hasOwn(parsed.data, 'request'))
@@ -166,15 +261,19 @@ export function runCatalogProvider(options: CatalogProviderOptions) {
     async dispatch(toolId, params, signal) {
       // Added by Sim's native prepareToolExecution, never an authority input.
       const { _toolSchema: _schema, ...modelParams } = params
+      const proposalCall = Boolean(proposal) && toolId === 'propose_workflow_operations'
       const previewCall = Boolean(workflowPreview) && toolId === 'preview_workflow_operations'
       const workflowCall =
+        proposalCall ||
         previewCall ||
         (Boolean(workflowReads) && (toolId === 'read_workflow' || toolId === 'read_workflow_block'))
-      const result = previewCall
-        ? await previewWorkflow(modelParams, signal)
-        : workflowCall
-          ? await readWorkflow(toolId, modelParams, signal)
-          : await catalog.dispatch(toolId, modelParams, signal)
+      const result = proposalCall
+        ? await proposeWorkflow(modelParams, signal)
+        : previewCall
+          ? await previewWorkflow(modelParams, signal)
+          : workflowCall
+            ? await readWorkflow(toolId, modelParams, signal)
+            : await catalog.dispatch(toolId, modelParams, signal)
       const refusal = !result.ok
         ? {
             error: result.error,
@@ -191,7 +290,7 @@ export function runCatalogProvider(options: CatalogProviderOptions) {
       return { rawResponse: response, modelResponse }
     },
     start(controls) {
-      const context = { controlledRun: controls }
+      const context = { controlledRun: { ...controls, beforeModelTransport, observeModelAttempt } }
       const {
         model,
         apiKey,
@@ -257,8 +356,8 @@ function workflowFailure(code: 'invalid_input' | 'forbidden') {
 }
 
 /** Keep the native definitions with the body; SDK formatters discard root $defs. */
-function previewJsonInput() {
-  const native = jsonInput(workflowPreviewInputs.preview_workflow_operations)
+function previewJsonInput(schema: z.ZodType = workflowPreviewInputs.preview_workflow_operations) {
+  const native = jsonInput(schema)
   const pending: unknown[] = [native]
   while (pending.length) {
     const node = pending.pop()

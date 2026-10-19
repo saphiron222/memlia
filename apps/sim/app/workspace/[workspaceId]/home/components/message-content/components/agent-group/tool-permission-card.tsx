@@ -1,5 +1,7 @@
 'use client'
 
+// Modified by Memlia: isolated one-shot review of server-owned workflow proposals.
+
 import { useCallback, useEffect, useState } from 'react'
 import {
   ChevronDown,
@@ -22,9 +24,13 @@ import {
   ActivityTextColumn,
 } from '@/components/ui/activity-status'
 import { requestJson } from '@/lib/api/client/request'
-import { copilotToolPermissionContract } from '@/lib/api/contracts/copilot'
+import {
+  copilotToolPermissionContract,
+  WORKFLOW_PROPOSAL_TOOL_NAME,
+} from '@/lib/api/contracts/copilot'
 import { generalSettingsKeys } from '@/hooks/queries/current-user-data'
 import { useToolPermissionStore } from '@/stores/tool-permission/store'
+import { WorkflowProposalPermission } from './workflow-proposal-permission'
 
 const logger = createLogger('ToolPermissionCard')
 
@@ -75,7 +81,14 @@ function argsPreview(params: Record<string, unknown> | undefined): string | unde
  * Rendered as a chip cluster on one row so a gated call reads as the same kind
  * of transcript line as every other tool, just one you have to answer.
  */
-export function ToolPermissionCard({
+export function ToolPermissionCard(props: ToolPermissionCardProps) {
+  if (props.toolName === WORKFLOW_PROPOSAL_TOOL_NAME) {
+    return <WorkflowProposalPermission key={props.toolCallId} toolCallId={props.toolCallId} />
+  }
+  return <OrdinaryToolPermissionCard {...props} />
+}
+
+function OrdinaryToolPermissionCard({
   toolCallId,
   toolName,
   displayTitle,

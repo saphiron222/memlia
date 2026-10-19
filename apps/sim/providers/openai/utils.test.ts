@@ -1,3 +1,4 @@
+// Modified by Memlia: verify completeness before native per-response usage observation.
 import type OpenAI from 'openai'
 import { describe, expect, it, vi } from 'vitest'
 import { ResolvedSecretTraceRegistry } from '@/executor/utils/resolved-secret-trace-registry'
@@ -6,6 +7,7 @@ import {
   buildResponsesInputFromMessages,
   convertToolsToResponses,
   createReadableStreamFromResponses,
+  observeOpenAIUsage,
   parseResponsesUsage,
   toOpenAIModelUsage,
 } from '@/providers/openai/utils'
@@ -438,4 +440,53 @@ describe('createReadableStreamFromResponses', () => {
       'OpenAI Responses stream incomplete: content_filter'
     )
   })
+})
+
+describe('native per-attempt observation completeness', () => {
+  const valid = {
+    input_tokens: 1000,
+    output_tokens: 100,
+    total_tokens: 1100,
+    input_tokens_details: { cached_tokens: 600, cache_write_tokens: 200 },
+    output_tokens_details: { reasoning_tokens: 20 },
+  }
+  const terminal = (usage: unknown, status = 'completed') =>
+    ({ status, usage }) as OpenAI.Responses.Response
+  it('reuses the native cache buckets without aggregate allocation', () => {
+    const observation = observeOpenAIUsage('gpt-4.1', terminal(valid))
+    expect(observation).toMatchObject({
+      kind: 'usage',
+      usage: {
+        input: 200,
+        output: 100,
+        cacheRead: 600,
+        cacheWrites: [{ tokens: 200, inputRateMultiplier: 1.25 }],
+      },
+    })
+    if (observation.kind !== 'usage') throw new Error('expected native usage')
+    expect(observation.usage).toEqual(toOpenAIModelUsage(parseResponsesUsage(valid as never)!))
+  })
+  it.each([
+    { ...valid, input_tokens: Number.NaN },
+    { ...valid, total_tokens: 1101 },
+    { ...valid, input_tokens_details: { cached_tokens: null } },
+    { ...valid, input_tokens_details: { cached_tokens: 900, cache_write_tokens: 200 } },
+    { ...valid, input_tokens_details: [] },
+    { ...valid, output_tokens_details: { reasoning_tokens: 101 } },
+  ])('does not silently clamp or replace malformed counters: %j', (usage) => {
+    expect(observeOpenAIUsage('gpt-4.1', terminal(usage))).toEqual({
+      kind: 'unknown',
+      reason: 'usage_unavailable',
+    })
+  })
+  it.each(['failed', 'incomplete', undefined])(
+    'never calls a partial terminal known: %s',
+    (status) => {
+      const value = status === undefined ? undefined : terminal(valid, status)
+      expect(observeOpenAIUsage('gpt-4.1', value)).toEqual({
+        kind: 'unknown',
+        reason: 'incomplete',
+      })
+    }
+  )
 })

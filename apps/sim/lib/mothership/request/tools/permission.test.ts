@@ -1,3 +1,4 @@
+// Modified by Memlia: reserved workflow proposals require a single explicit approval.
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { TraceCollector } from '@/lib/mothership/request/trace'
 
@@ -502,4 +503,72 @@ describe('when the permission group withholds tool auto-approval', () => {
     expect(context.toolPermissions.autoAllowed.has('terminal')).toBe(false)
     expect(toolCallNeedsApproval('terminal', context, {}, false, { operation: 'run' })).toBe(true)
   })
+})
+
+describe('Memlia workflow proposals are never automatically approved', () => {
+  it('keeps its gate despite a stored global permission', () => {
+    const context = makeContext()
+    context.toolPermissions.autoAllowed.add('memlia_apply_workflow_proposal')
+    expect(toolCallNeedsApproval('memlia_apply_workflow_proposal', context, {})).toBe(true)
+  })
+  it('keeps a refusal gate when the interactive permission surface is disabled', () => {
+    const context = makeContext()
+    context.toolPermissions.enabled = false
+    expect(
+      toolCallNeedsApproval('memlia_apply_workflow_proposal', context, { interactive: false })
+    ).toBe(true)
+  })
+  it('refuses allow_chat instead of running an approved proposal', async () => {
+    const context = makeContext()
+    const call = makeToolCall()
+    call.name = 'memlia_apply_workflow_proposal'
+    const execute = vi.fn().mockResolvedValue({ status: 'success' })
+    waitForToolPermissionDecision.mockResolvedValue({ decision: 'allow_chat' })
+    await gate(context, call, execute, [])
+    expect(execute).not.toHaveBeenCalled()
+    expect(context.toolPermissions.autoAllowed.has(call.name)).toBe(false)
+  })
+})
+
+it('refuses a reserved proposal without an enabled interactive prompt before waiting or executing', async () => {
+  const context = makeContext()
+  context.toolPermissions.enabled = false
+  const call = makeToolCall()
+  call.name = 'memlia_apply_workflow_proposal'
+  const execute = vi.fn().mockResolvedValue({ status: 'success' })
+  await gate(context, call, execute, [])
+  expect(waitForToolPermissionDecision).not.toHaveBeenCalled()
+  expect(execute).not.toHaveBeenCalled()
+  expect(call.status).toBe('skipped')
+})
+it('caps a reserved approval wait at ten minutes even without a caller deadline', async () => {
+  const context = makeContext()
+  const call = makeToolCall()
+  call.name = 'memlia_apply_workflow_proposal'
+  waitForToolPermissionDecision.mockResolvedValue({ decision: 'skip' })
+  await gate(context, call, vi.fn(), [])
+  expect(waitForToolPermissionDecision.mock.calls[0]?.[1]).toBe(600000)
+})
+it('does not execute a reserved proposal when abort follows its approval answer', async () => {
+  const context = makeContext()
+  const call = makeToolCall()
+  call.name = 'memlia_apply_workflow_proposal'
+  const abort = new AbortController()
+  const execute = vi.fn().mockResolvedValue({ status: 'success' })
+  waitForToolPermissionDecision.mockImplementation(async () => {
+    abort.abort()
+    return { decision: 'allow' }
+  })
+  await runGatedToolExecution(
+    call,
+    call.id,
+    call.name,
+    call.params,
+    MothershipStreamV1ToolExecutor.sim,
+    context,
+    { abortSignal: abort.signal },
+    execute as () => Promise<never>
+  )
+  expect(execute).not.toHaveBeenCalled()
+  expect(call.status).toBe('cancelled')
 })

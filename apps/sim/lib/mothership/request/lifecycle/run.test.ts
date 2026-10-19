@@ -1,3 +1,4 @@
+// Modified by Memlia: qualify the optional server-owned local Chat branch.
 import { resetEnvFlagsMock, resetEnvironmentUtilsMock, setEnvFlags } from '@sim/testing'
 import { getMockLogger } from '@sim/testing/mocks/logger.mock'
 import {
@@ -31,6 +32,10 @@ import { executeRunCode } from '@/lib/mothership/tools/handlers/run-code'
 import { openResourceServerTool } from '@/lib/mothership/tools/server/open-resource'
 import { ResolvedSecretTraceRegistry } from '@/executor/utils/resolved-secret-trace-registry'
 
+const localProvider = vi.hoisted(() => vi.fn())
+vi.mock('@/lib/memlia/ai/budgeted-catalog-provider.server', () => ({
+  runBudgetedCatalogProvider: localProvider,
+}))
 const { mockMaterializeOrganizationSecrets } = vi.hoisted(() => ({
   mockMaterializeOrganizationSecrets: vi.fn(),
 }))
@@ -4298,5 +4303,111 @@ describe('runCopilotLifecycle', () => {
 
     expect(result.cancelled).toBe(true)
     expect(result.success).toBe(false)
+  })
+})
+
+describe('server-only local lifecycle branch', () => {
+  const local = () => ({
+    principal: {
+      kind: 'session' as const,
+      userId: 'user-local',
+      sessionId: 'private-local-session',
+    },
+    workspaceId: 'workspace-local',
+    workflow: {
+      workflowId: 'workflow-local',
+      policy: 'sanitized_details' as const,
+      previewOperations: true as const,
+    },
+    request: {
+      model: 'gpt-5.4',
+      apiKey: 'private-local-key',
+      messages: [{ role: 'user' as const, content: 'Fixture' }],
+    },
+    budget: { windowId: 'budget-local', windowVersion: 1, pricingProfile: {} as never },
+  })
+  const options = () => ({
+    userId: 'user-local',
+    workflowId: 'workflow-local',
+    workspaceId: 'workspace-local',
+    runId: 'run-local',
+    executionId: 'execution-local',
+    chatId: 'chat-local',
+    goRoute: '/api/mothership',
+    interactive: true,
+    executionContext: {
+      userId: 'user-local',
+      workflowId: 'workflow-local',
+      workspaceId: 'workspace-local',
+      runId: 'run-local',
+    },
+    localChat: local(),
+    onEvent: vi.fn(),
+  })
+  beforeEach(() => {
+    setEnvFlags({ isHosted: false, isCopilotToolPermissionsEnabled: true })
+    mockGetAutoAllowedTools.mockResolvedValue(new Set())
+    mockGetUserPermissionConfig.mockResolvedValue(null)
+    mockCheckAttributedUsageLimits.mockResolvedValue({ isExceeded: false })
+    localProvider.mockReset()
+    mockRunStreamLoop.mockClear()
+    mockRequestExplicitStreamAbort.mockClear()
+  })
+  it('uses native local events and result without worker/title or attachment egress', async () => {
+    localProvider.mockResolvedValue({
+      stream: new ReadableStream({
+        start(c) {
+          c.enqueue({ type: 'text_delta', text: 'Local answer.', turn: 'final' })
+          c.enqueue({ type: 'turn_end', turn: 'final' })
+          c.close()
+        },
+      }),
+    })
+    const o = options()
+    const result = await runCopilotLifecycle({ messageId: 'message-local', mode: 'agent' }, o)
+    expect(result.success).toBe(true)
+    expect(result.content).toBe('Local answer.')
+    expect(mockRunStreamLoop).not.toHaveBeenCalled()
+    expect(localProvider).toHaveBeenCalledOnce()
+    expect(JSON.stringify(o.onEvent.mock.calls)).not.toMatch(/private-local|budget-local/)
+  })
+  it('a local budget refusal is terminal, never a worker fallback', async () => {
+    localProvider.mockRejectedValue(new Error('PRIVATE_BUDGET_REFUSAL'))
+    const result = await runCopilotLifecycle(
+      { messageId: 'message-local', mode: 'agent' },
+      options()
+    )
+    expect(result.success).toBe(false)
+    expect(result.error).toBe('Local Chat is unavailable.')
+    expect(mockRunStreamLoop).not.toHaveBeenCalled()
+    expect(mockRequestExplicitStreamAbort).not.toHaveBeenCalled()
+  })
+  it('refuses an option identity different from the authenticated local principal even with a matching execution context', async () => {
+    localProvider.mockResolvedValue({
+      stream: new ReadableStream({
+        start(c) {
+          c.enqueue({ type: 'turn_end', turn: 'final' })
+          c.close()
+        },
+      }),
+    })
+    await expect(
+      runCopilotLifecycle(
+        { messageId: 'message-local', mode: 'agent' },
+        { ...options(), userId: 'different-user' }
+      )
+    ).rejects.toThrow('Local Chat is unavailable.')
+    expect(localProvider).not.toHaveBeenCalled()
+    expect(mockRunStreamLoop).not.toHaveBeenCalled()
+  })
+  it('refuses local continuation before any backend call', async () => {
+    await expect(
+      runCopilotLifecycle(
+        { messageId: 'message-local', mode: 'agent' },
+        { ...options(), recovery: { streamId: 'message-local', events: [], requestMode: 'agent' } }
+      )
+    ).rejects.toThrow('Local Chat is unavailable.')
+    expect(localProvider).not.toHaveBeenCalled()
+    expect(mockRunStreamLoop).not.toHaveBeenCalled()
   })
 })

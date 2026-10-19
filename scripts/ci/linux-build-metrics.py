@@ -7,6 +7,7 @@ file, never stdout/artifacts. PID 1 remains alive to read memory.peak after the
 child exits. This is not the macOS build guard and never controls other groups.
 """
 import argparse
+import errno
 import json
 import math
 import os
@@ -63,6 +64,9 @@ def identities(pids):
             found[pid] = proc_start(Path(f'/proc/{pid}/stat').read_text())
         except FileNotFoundError:
             pass
+        except ProcessLookupError as error:
+            if error.errno != errno.ESRCH:
+                raise
     return found
 
 
@@ -73,7 +77,7 @@ def observe_processes(owned, stage):
     state between that enumeration and this bounded stat read. Do not infer
     an historical worker identity or a successful cleanup from these samples.
     """
-    if stage not in ('after_command', 'before_term', 'before_kill', 'after_cleanup'):
+    if stage not in ('after_command', 'after_drain', 'before_term', 'before_kill', 'after_cleanup'):
         raise ValueError('observation-stage-refused')
     result = {'stage': stage, 'total': len(owned), 'truncated': len(owned) > 32,
               'identities': []}
@@ -116,6 +120,9 @@ def sample_processes(pids):
             high_water = max(high_water, int(fields.get('VmHWM', '0 kB').split()[0]) * 1024)
         except FileNotFoundError:
             pass
+        except ProcessLookupError as error:
+            if error.errno != errno.ESRCH:
+                raise
     return rss_sum, high_water
 
 
@@ -371,6 +378,8 @@ def run(args):
     interrupted = False
     scope_verified = False
     baseline = None
+    drain_started = None
+    drain_owned = {}
     def stop(signum, frame):
         nonlocal interrupted
         interrupted = True
@@ -420,11 +429,32 @@ def run(args):
                 if child.poll() is not None:
                     receipt['childExitCode'] = child.returncode
                     receipt['normalCompletion'] = True
-                    break
+                    if child.returncode != 0:
+                        break
+                    if drain_started is None:
+                        drain_started = time.monotonic()
+                        drain_owned = identities(cgroup_read(root)['pids'])
+                        receipt['descendantsAfterCommand'] = len(drain_owned)
+                        receipt['processObservations'] = [observe_processes(drain_owned, 'after_command')]
+                        receipt['drainLimitSeconds'] = 2
+                    else:
+                        drain_owned = identities(reading['pids'])
                 if interrupted or time.monotonic() - started >= args.timeout:
                     receipt['errors'].append('interrupted' if interrupted else 'timeout')
+                    if drain_started is not None:
+                        receipt['drainOutcome'] = 'interrupted' if interrupted else 'timeout'
                     break
-                time.sleep(0.25)
+                if drain_started is not None:
+                    if time.monotonic() >= drain_started + 2:
+                        receipt['drainOutcome'] = 'grace_expired'
+                        receipt['errors'].append('drain-timeout')
+                        break
+                    if not drain_owned:
+                        receipt['drainOutcome'] = 'empty'
+                        break
+                    time.sleep(min(0.05, max(0, min(drain_started + 2, started + args.timeout) - time.monotonic())))
+                else:
+                    time.sleep(0.25)
             webpack.drain(output, final=True)
             receipt['typeScriptDiagnostics'] = phase_typescript_locations(
                 args.phase, output, getattr(args, 'tracked_sources', None),
@@ -442,10 +472,17 @@ def run(args):
             receipt['errors'].append('interrupted')
         if scope_verified:
             try:
-                owned_after_command = identities(cgroup_read(root)['pids'])
-                survivors = list(owned_after_command)
-                receipt['descendantsAfterCommand'] = len(survivors)
-                receipt['processObservations'] = [observe_processes(owned_after_command, 'after_command')]
+                if drain_started is None:
+                    owned_after_command = identities(cgroup_read(root)['pids'])
+                    survivors = list(owned_after_command)
+                    receipt['descendantsAfterCommand'] = len(survivors)
+                    receipt['processObservations'] = [observe_processes(owned_after_command, 'after_command')]
+                else:
+                    survivors = list(drain_owned)
+                    receipt['descendantsAfterDrain'] = len(survivors)
+                    receipt['drainSeconds'] = round(time.monotonic() - drain_started, 3)
+                    receipt.setdefault('drainOutcome', 'observation_failed')
+                    receipt['processObservations'].append(observe_processes(drain_owned, 'after_drain'))
                 remaining, errors = terminate_owned(root, child, receipt['processObservations'])
                 receipt['descendantsAfterCleanup'] = len(remaining)
                 receipt['errors'].extend(errors)
@@ -466,12 +503,18 @@ def run(args):
                     receipt['swapObservation'] = after
                 receipt['cgroup'] = {key: value for key, value in final.items() if key != 'pids'}
                 receipt['cgroup']['eventsDelta'] = {key: value - baseline['events'].get(key, 0) for key, value in final['events'].items()}
+                if interrupted and 'interrupted' not in receipt['errors']:
+                    receipt['errors'].append('interrupted')
                 receipt['status'] = 'passed' if successful(receipt['childExitCode'], receipt['normalCompletion'], survivors, receipt['cgroup']['eventsDelta'], receipt['errors']) else 'failed'
             except BaseException as error:
                 receipt['errors'].append(type(error).__name__)
                 receipt['status'] = 'failed'
         receipt['webpackObservation'] = webpack.receipt()
         receipt['seconds'] = round(time.monotonic() - started, 3)
+        if interrupted:
+            if 'interrupted' not in receipt['errors']:
+                receipt['errors'].append('interrupted')
+            receipt['status'] = 'failed'
         report.parent.mkdir(parents=True, exist_ok=True)
         report.write_text(json.dumps(receipt, indent=2) + '\n')
         for sig, handler in previous.items():
