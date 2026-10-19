@@ -7,6 +7,7 @@ file, never stdout/artifacts. PID 1 remains alive to read memory.peak after the
 child exits. This is not the macOS build guard and never controls other groups.
 """
 import argparse
+import errno
 import json
 import math
 import os
@@ -63,6 +64,9 @@ def identities(pids):
             found[pid] = proc_start(Path(f'/proc/{pid}/stat').read_text())
         except FileNotFoundError:
             pass
+        except ProcessLookupError as error:
+            if error.errno != errno.ESRCH:
+                raise
     return found
 
 
@@ -116,6 +120,9 @@ def sample_processes(pids):
             high_water = max(high_water, int(fields.get('VmHWM', '0 kB').split()[0]) * 1024)
         except FileNotFoundError:
             pass
+        except ProcessLookupError as error:
+            if error.errno != errno.ESRCH:
+                raise
     return rss_sum, high_water
 
 

@@ -1,4 +1,5 @@
 # Copyright 2026 Memlia. All rights reserved.
+import errno
 import importlib.util
 import json
 import os
@@ -873,6 +874,58 @@ class PassiveDrainTests(unittest.TestCase):
         finally:
             witness.stdin.close()
             witness.wait(timeout=5)
+
+class ProcfsExitRaceTests(unittest.TestCase):
+    @staticmethod
+    def stat(start):
+        return '900002 (owned worker) ' + ' '.join(['S'] + ['0'] * 18 + [str(start)])
+
+    def test_identity_esrch_does_not_fabricate_identity_or_retry(self):
+        with patch.object(Path, 'read_text', side_effect=[
+                ProcessLookupError(errno.ESRCH, 'fixture'), self.stat(42)]) as read:
+            self.assertEqual(metrics.identities([900001, 900002]), {900002: 42})
+        self.assertEqual(read.call_count, 2)
+
+    def test_sample_esrch_preserves_other_process_measurements_without_retry(self):
+        with patch.object(Path, 'read_text', side_effect=[
+                'VmRSS: 3 kB\nVmHWM: 9 kB\n',
+                ProcessLookupError(errno.ESRCH, 'fixture'),
+                'VmRSS: 5 kB\nVmHWM: 7 kB\n']) as read:
+            self.assertEqual(metrics.sample_processes([900001, 900002, 900003]),
+                             (8 * 1024, 9 * 1024))
+        self.assertEqual(read.call_count, 3)
+
+    def test_non_esrch_errors_remain_fatal_at_both_read_boundaries(self):
+        for function in (metrics.identities, metrics.sample_processes):
+            for error in (PermissionError(errno.EACCES, 'fixture'),
+                          OSError(errno.EIO, 'fixture'),
+                          ProcessLookupError(errno.EIO, 'fixture'),
+                          ProcessLookupError(), OSError('fixture')):
+                with self.subTest(function=function.__name__, error=type(error).__name__,
+                                  errno=error.errno):
+                    with patch.object(Path, 'read_text', side_effect=error) as read:
+                        with self.assertRaises(type(error)) as raised:
+                            function([900001])
+                        self.assertIs(raised.exception, error)
+                    self.assertEqual(read.call_count, 1)
+
+    def test_malformed_identity_and_measurements_remain_fatal(self):
+        for function, value in ((metrics.identities, 'not a stat record'),
+                                (metrics.sample_processes, 'VmRSS: unknown kB')):
+            with self.subTest(function=function.__name__):
+                with patch.object(Path, 'read_text', return_value=value):
+                    with self.assertRaises(ValueError):
+                        function([900001])
+
+    def test_legacy_enoent_and_new_identity_are_not_replaced_with_cached_values(self):
+        with patch.object(Path, 'read_text', side_effect=[
+                self.stat(42), FileNotFoundError(), self.stat(43)]):
+            self.assertEqual(metrics.identities([900002]), {900002: 42})
+            self.assertEqual(metrics.identities([900002]), {})
+            self.assertEqual(metrics.identities([900002]), {900002: 43})
+        with patch.object(Path, 'read_text', side_effect=FileNotFoundError()):
+            self.assertEqual(metrics.sample_processes([900001]), (0, 0))
+
 
 if __name__ == '__main__':
     unittest.main()
