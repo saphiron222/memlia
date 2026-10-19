@@ -137,3 +137,42 @@ réel ; la lecture cgroup de ce test est une doublure explicitement déclarée. 
 ne qualifient pas un nouveau typecheck Linux complet ni un build Next. Les journaux
 bruts restent éphémères et sont détruits ; seules ces positions bornées sont ajoutées
 aux reçus publics.
+
+## Observations Webpack bornées
+
+La phase `next` seule ajoute `DEBUG=next:build:webpack-build` et `DEBUG_COLORS=0`
+à la commande native. Le superviseur lit le fichier privé par position indépendante,
+au plus 64 Kio par échantillon et 8 Mio au total, puis termine cette lecture bornée
+à la sortie de l'enfant. Il ne déplace pas la position d'écriture de l'enfant ni
+celle du lecteur de diagnostics TypeScript/OOM. Aucun second collecteur, snapshot,
+inspecteur, trace ou journal brut n'est publié.
+
+`webpackObservation` contient uniquement `enabled`, `events`, `sequenceValid`,
+`complete`, `truncated` et `readError`. Chaque événement contient un compilateur
+fixe `server`, `edge` ou `client`, un état `started` ou `finished` et, pour une fin,
+une durée entière `durationMs` entre 0 et 1 800 000. Seules les lignes complètes du
+format exact du logger Next 16.4.2 sans couleur sont reconnues ; date et texte ne
+sont pas recopiés. Les lignes de plus de 512 octets, les fragments finaux, les ANSI,
+les suffixes/messages ajoutés et les marqueurs inconnus ne produisent aucun événement.
+Une ligne trop longue est ignorée jusqu'à son saut de ligne, y compris si elle
+contient un suffixe ressemblant à un marqueur. Le reçu conserve au plus 16 événements.
+
+L'ordre attendu est début/fin serveur, début/fin edge, début/fin client. Un ordre
+inattendu ou un doublon rend `sequenceValid=false`. Une séquence partielle demeure
+`complete=false`; un plafond ou fragment perdu rend `truncated=true`. Un défaut de
+lecture rend `readError=true` sans publier de cause. Hors phase Next, la collecte
+est désactivée. Une absence de marqueur ne prouve pas qu'un compilateur n'a pas
+commencé ; le format pourrait avoir changé ou la lecture avoir été tronquée.
+
+Ces marqueurs restent de simples observations d'une sortie de processus : du code
+peut imprimer le même texte. **Ils ne changent jamais le verdict**, le code de sortie,
+les contrôles de descendants/OOM/nettoyage ou les critères standalone. `complete`
+ne signifie que séquence de marqueurs complète, jamais build réussi. La phase
+validation ne lance toujours aucun Next build. Les limites restent heap 10 Gio,
+cgroup 13 Gio, swap du groupe 0 et CPU 4 ; aucun essai à 11 Gio n'est inclus.
+
+Les nouveaux tests utilisent de petits enfants réels, un fichier temporaire et une
+barrière stdin pour vérifier une écriture partielle avant la sortie. Les tests du
+reçu doublent seulement les lectures Linux /proc/cgroup et le signalement mémoire
+hôte sur les autres plateformes. Ils vérifient aussi les canaris, les bornes et
+l'indépendance du verdict ; ils ne constituent pas une nouvelle construction Linux.

@@ -202,12 +202,112 @@ def phase_typescript_locations(phase, output, manifest, root, cwd):
         return empty
 
 
+
+class WebpackObservation:
+    """Bounded log observations, never an input to successful() or cleanup.
+
+    Next 16.4.2's compiled debug logger emits these exact non-coloured lines.
+    pread has a separate offset: reading must not move the child's shared file
+    position, overwrite its output, or disturb the existing TS/OOM tail reader.
+    """
+    BYTE_LIMIT = 8 * 1024 * 1024
+    CHUNK = 65536
+    LINE_LIMIT = 512
+    EVENT_LIMIT = 16
+    MARKER = re.compile(
+        rb'[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T'
+        rb'(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\.[0-9]{3}Z '
+        rb'next:build:webpack-build '
+        rb'(?:starting (server|edge-server|client) compiler|'
+        rb'(server|edge-server|client) compiler finished (0|[1-9][0-9]{0,6})ms)')
+    ORDER = [(compiler, event) for compiler in ('server', 'edge', 'client')
+             for event in ('started', 'finished')]
+
+    def __init__(self, enabled):
+        self.enabled = enabled
+        self.offset = 0
+        self.pending = b''
+        self.dropping = False
+        self.events = []
+        self.sequence_valid = True
+        self.truncated = False
+        self.read_error = False
+
+    def _line(self, line):
+        match = self.MARKER.fullmatch(line)
+        if not match:
+            return
+        started, finished, duration = match.groups()
+        compiler = {b'server':'server', b'edge-server':'edge', b'client':'client'}[started or finished]
+        event = 'started' if started else 'finished'
+        if duration is not None and int(duration) > 1800000:
+            return
+        if len(self.events) == self.EVENT_LIMIT:
+            self.truncated = True
+            return
+        index = len(self.events)
+        if index >= len(self.ORDER) or self.ORDER[index] != (compiler, event):
+            self.sequence_valid = False
+        record = {'compiler':compiler, 'event':event}
+        if duration is not None:
+            record['durationMs'] = int(duration)
+        self.events.append(record)
+
+    def _feed(self, data):
+        # Never retain an oversized line or recognize its valid-looking suffix.
+        parts = data.split(b'\n')
+        for index, part in enumerate(parts):
+            if not self.dropping:
+                if len(self.pending) + len(part) > self.LINE_LIMIT:
+                    self.pending = b''
+                    self.dropping = True
+                    self.truncated = True
+                else:
+                    self.pending += part
+            if index < len(parts) - 1:
+                if not self.dropping:
+                    self._line(self.pending)
+                self.pending = b''
+                self.dropping = False
+
+    def drain(self, output, final=False):
+        if not self.enabled or self.read_error:
+            return
+        try:
+            # One chunk per sample; final drain is still bounded by BYTE_LIMIT.
+            while self.offset < self.BYTE_LIMIT:
+                data = os.pread(output.fileno(), min(self.CHUNK, self.BYTE_LIMIT - self.offset), self.offset)
+                if not data:
+                    break
+                self.offset += len(data)
+                self._feed(data)
+                if not final:
+                    break
+            if os.fstat(output.fileno()).st_size > self.BYTE_LIMIT:
+                self.truncated = True
+            if final and (self.pending or self.dropping):
+                self.truncated = True
+                self.pending = b''
+                self.dropping = False
+        except (OSError, ValueError):
+            self.read_error = True
+            self.pending = b''
+
+    def receipt(self):
+        return {'enabled':self.enabled, 'events':list(self.events),
+                'sequenceValid':self.sequence_valid, 'truncated':self.truncated,
+                'readError':self.read_error,
+                'complete':(self.enabled and self.sequence_valid and not self.truncated
+                            and not self.read_error and len(self.events) == len(self.ORDER))}
+
+
 def run(args):
     root, report = Path(args.cgroup), Path(args.report)
     receipt = {'phase': args.phase, 'status': 'failed', 'normalCompletion': False,
                'childExitCode': None, 'samples': 0, 'peakProcessRssBytes': 0,
                'peakSampledGroupRssBytes': 0, 'peakSampledSwapBytes': 0, 'errors': [],
                'peakObservedHostSwapGrowthBytes': 0, 'minObservedHostAvailableBytes': None}
+    webpack = WebpackObservation(args.phase == 'next')
     started = time.monotonic()
     child = None
     interrupted = False
@@ -226,6 +326,7 @@ def run(args):
         with tempfile.TemporaryFile() as output:
             child = subprocess.Popen(args.command, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
             while True:
+                webpack.drain(output)
                 reading = cgroup_read(root)
                 host = host_memory()
                 receipt['minObservedHostAvailableBytes'] = min(receipt['minObservedHostAvailableBytes'] or host['availableBytes'], host['availableBytes'])
@@ -243,6 +344,7 @@ def run(args):
                     receipt['errors'].append('interrupted' if interrupted else 'timeout')
                     break
                 time.sleep(0.25)
+            webpack.drain(output, final=True)
             receipt['typeScriptDiagnostics'] = phase_typescript_locations(
                 args.phase, output, getattr(args, 'tracked_sources', None),
                 getattr(args, 'source_root', '/work'), Path.cwd())
@@ -277,6 +379,7 @@ def run(args):
             except BaseException as error:
                 receipt['errors'].append(type(error).__name__)
                 receipt['status'] = 'failed'
+        receipt['webpackObservation'] = webpack.receipt()
         receipt['seconds'] = round(time.monotonic() - started, 3)
         report.parent.mkdir(parents=True, exist_ok=True)
         report.write_text(json.dumps(receipt, indent=2) + '\n')

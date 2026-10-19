@@ -230,7 +230,7 @@ if [[ "$scope" == validation ]]; then
 fi
 # Preserve the controlled heap and worker; measure the documented memory cache profile.
 next_started=1
-phase next /work/apps/sim node ../../node_modules/next/dist/bin/next build --webpack
+phase next /work/apps/sim env DEBUG=next:build:webpack-build DEBUG_COLORS=0 node ../../node_modules/next/dist/bin/next build --webpack
 phase standalone /work/apps/sim python3 -c '
 from pathlib import Path
 import json
