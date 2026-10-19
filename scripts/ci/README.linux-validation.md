@@ -1,4 +1,4 @@
-# Validation Linux des types et bundles, sans build Next
+# Validation Linux : types, bundles et contrôle build requis
 
 Le workflow `memlia-linux-validation.yml` fournit le check **validate-linux**.
 Il valide sur le runner public standard Linux x64 les étapes préparatoires du
@@ -16,7 +16,17 @@ bash scripts/ci/run-linux-build.sh
 bash scripts/ci/run-linux-build.sh --validation-only
 ```
 
-Tout autre argument est refusé avant bootstrap. Le mode borné réutilise le même
+Le job obligatoire `build` utilise désormais le parcours complet explicitement
+sélectionné :
+
+```sh
+bash scripts/ci/run-linux-build.sh --swap turbopack
+```
+
+Le script sans argument conserve son parcours historique Webpack sans swap ajouté ;
+il n’est plus le profil choisi par ce job. Les variantes `--swap webpack` et
+`--swap turbopack-zram` restent des expériences distinctes. Tout argument hors des
+modes explicitement supportés est refusé avant bootstrap. Le mode borné réutilise le même
 bootstrap jetable, le superviseur, les cgroups, l'installation et le nettoyage.
 Il exécute dans l'ordre les tests du superviseur, l'installation gelée sans scripts
 lifecycle, les contrôles de versions/empreintes, l'inventaire CLI, `next typegen
@@ -78,13 +88,13 @@ revue/gates ; le déclenchement push évite d'exiger la présence préalable du 
 workflow sur la branche par défaut. Aucun événement de contribution privilégié,
 secret d'application ou permission d'écriture n'est utilisé.
 
-Le workflow de build et son check ne sont ni renommés, ni remplacés, ni conditionnés
-par ce mode. En l'absence d'une vraie construction réussie du même candidat, le
+Le check `build` n’est ni renommé, ni remplacé, ni satisfait par le mode
+`--validation-only`. En l'absence d'une vraie construction réussie du même candidat, le
 check obligatoire build reste non satisfait. Aucune protection du dépôt n'est
 modifiée par ces fichiers.
 
-Le budget de chaque phase reste 13 Gio de cgroup sans swap supplémentaire, CPU4,
-heap10Gio ; la DB jetable reste à 512 Mio. Le bootstrap DB est conservé pour garder
+Le mode `--validation-only` conserve 13 Gio de cgroup sans swap supplémentaire,
+CPU4 et heap10Gio ; la DB jetable reste à 512 Mio. Le bootstrap DB est conservé pour garder
 l'environnement du témoin et ne migre pas de schéma métier. Cela ne prouve pas
 que toutes les phases utilisent la DB. Aucune conclusion sur un besoin de 24–32 Go
 ou une solution aux OOM de Next ne résulte de ce parcours.
@@ -137,3 +147,59 @@ réel ; la lecture cgroup de ce test est une doublure explicitement déclarée. 
 ne qualifient pas un nouveau typecheck Linux complet ni un build Next. Les journaux
 bruts restent éphémères et sont détruits ; seules ces positions bornées sont ajoutées
 aux reçus publics.
+
+## Contrôle obligatoire `build` : Turbopack avec swap disque
+
+`memlia-linux-build.yml` conserve le job unique **build**, sans matrice ni
+`continue-on-error`. Il se déclenche sur une PR vers `main`, un push vers `main`
+ou la branche historique `build/linux-16gb-measurement`, et manuellement. Aucun
+filtre de fichiers ne supprime silencieusement le contrôle requis. Il est limité
+au dépôt public exact `saphiron222/memlia`, permissions `contents: read`, runner
+standard gratuit `ubuntu-24.04`, checkout du SHA de l’événement sans credentials
+persistés et `fetch-depth: 0`. Aucun événement `pull_request_target`, secret,
+permission d’écriture ou runner privé n’est utilisé.
+
+Sur `pull_request`, le checkout explicite de `github.sha` teste le commit de
+fusion temporaire de la PR, pas seulement sa tête. Une PR issue d’un fork garde
+les restrictions GitHub applicables (token en lecture, sans secrets, éventuelle
+approbation préalable). Le code de la PR s’exécute seulement dans la VM GitHub
+éphémère ; aucun runner persistant ou déploiement n’est attaché à ce job.
+
+Le job réemploie **sans modifier les scripts** le protocole de la variante
+`turbopack` du workflow expérimental `memlia-linux-swap-build.yml` : notices
+arbre/historique, tests superviseur et inventaire swap avant allocation, puis
+`bash scripts/ci/run-linux-build.sh --swap turbopack` avec `MEMLIA_PUBLIC_RUN=1`.
+Le bootstrap crée seulement son swapfile de 24 Gio possédé, conserve le swap
+préexistant et refuse capacité/identité/inventaire/privilège indisponibles. Prévol mémoire
+hôte ≥ 14 Gio, disponible ≥ 13 Gio ; volume temporaire ≥ 36 Gio avant allocation
+et volume de travail ≥ 12 Gio. Les contrôles de refus et cleanup restent ceux
+du protocole qualifié, sans réallocation ou suppression globale de swap/SDK/cache.
+
+Toutes les phases préparatoires restent obligatoires, puis Next **réel**
+Turbopack : cgroup RAM 13 Gio, RAM + swap 37 Gio (swap additionnel plafonné à
+24 Gio), 4 CPU, 512 PID, heap V8 11 Gio, 2 workers, source maps désactivées,
+sortie standalone. Le heap V8 ne borne pas la mémoire native de Turbopack. Les autres phases gardent leurs
+limites ; aucune augmentation de la RAM du cgroup ou relâchement OOM n’est ajoutée ici.
+Timeout du job de 120 min repris du protocole expérimental qualifié (ancien job
+45 min), superviseur hôte de 6 900 s et phase Next de 6 000 s inchangés ; garder
+la marge de cleanup.
+
+Les critères de réussite restent `scope=build`, Next exécuté, fichiers standalone
+vérifiés, fin normale **et** cleanup réussi. Les reçus quantitatifs fermés sont lus
+même après échec ; cette lecture `always()` ne transforme pas une commande non
+nulle en succès. Ni source/log brut, dépendance/cache, image, bundle, source map,
+heapdump ou artefact de release n’est uploadé.
+
+**Preuve historique distincte :** [measure (turbopack) du SHA e1](https://github.com/saphiron222/memlia/actions/runs/39290313655/job/118188973603)
+a terminé SUCCESS, Next 508,467 s, zéro OOM, avec les fichiers standalone et cleanup
+vérifiés. Cela qualifie ce protocole sur **ce SHA**, pas une nouvelle révision ou
+le job `build` modifié qui devra s’exécuter sur son propre candidat. Aucun ancien
+statut `measure(...)` n’est renommé en `build` ni reporté sur un autre commit.
+La protection de `main` n’est pas modifiée ; le vrai contrôle requis reste à passer.
+
+La phase Linux `standalone` vérifie **les fichiers et configurations**, elle ne
+lance aucun serveur HTTP : health/login/assets Linux, inventaire complet de
+licences/secrets d’un artefact redistribué, Docker Compose et Hyper-V restent hors
+de cette preuve. Une compilation réussie n’est pas une release commerciale.
+Le workflow expérimental et sa matrice restent inchangés et ne fournissent pas le
+check `build` ; aucune fusion ou publication n’est effectuée par ce patch.
