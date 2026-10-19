@@ -1,0 +1,23 @@
+[install]
+exact = true
+# Supply-chain gate: only install package versions published at least 7 days ago
+# (blocks freshly published, potentially compromised releases).
+minimumReleaseAge = 604800
+# Explicit framework pins must install before their release reaches the age threshold.
+# Modified by Memlia (2026): narrowly admit Next 16.4.2 security fixes and matching SWC.
+# Reassess these explicit exceptions at the next framework update; keep the global age gate.
+minimumReleaseAgeExcludes = [
+  "next",
+  "@next/env",
+  "@next/swc-darwin-arm64",
+  "@next/swc-darwin-x64",
+  "@next/swc-linux-arm64-gnu",
+  "@next/swc-linux-arm64-musl",
+  "@next/swc-linux-x64-gnu",
+  "@next/swc-linux-x64-musl",
+  "@next/swc-win32-arm64-msvc",
+  "@next/swc-win32-x64-msvc",
+]
+
+[run]
+env = { NEXT_PUBLIC_APP_URL = "http://localhost:3000" }

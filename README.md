@@ -1,7 +1,29 @@
 # Memlia
 
-Plateforme professionnelle d’automatisation pour les cabinets d’expertise comptable, en cours de développement.
+Plateforme d’automatisation IA pour les cabinets d’expertise comptable, en développement. Le serveur cible est une VM Linux avec Docker Compose ; un agent local supervisé est prévu pour les logiciels Windows et Excel. Le produit complet n’est pas encore qualifié pour une installation chez un client.
 
-Le produit réunira des workflows serveur, des automatisations Windows supervisées et des traitements Excel dans une interface commune. Le déploiement cible est une VM Linux dédiée avec Docker Compose et un agent local Windows.
+## Droits
 
-Ce dépôt initial ne contient aucun logiciel commercial prêt à installer. Le code tiers sera publié uniquement après vérification de ses droits et conservation de ses licences et notices. La licence des ajouts propres à Memlia sera indiquée séparément ; la visibilité publique du dépôt ne vaut pas attribution automatique d’une licence open source à ces ajouts.
+Le code Sim réutilisé conserve Apache-2.0 et les conditions propres à ses composants. Voir [licence amont](compliance/upstream/sim/LICENSE), [notice amont](compliance/upstream/sim/NOTICE) et [provenance et droits](RIGHTS.md). Les composants Enterprise exclus et les polices non admises sont absents de cette publication.
+
+**Les nouveaux développements propres à Memlia restent sous droits réservés.** La visibilité publique de développement ne leur attribue pas de licence libre. Aucune licence de marque Sim, OpenAdapt ou d’un fournisseur tiers n’est accordée.
+
+## État vérifié
+
+Le socle conserve l’interface et les moteurs Sim autorisés. Les sauvegardes complètes utilisent une révision attendue et un readback avant modification de l’historique Annuler/Rétablir ; les anciens remplacements complets par socket sont refusés. La représentation des snapshots refuse les pertes silencieuses. Le port de capacités Excel est une observation, sans activation d’exécution.
+
+Cette révision sépare la régénération native des IDs de workflow des stores navigateur :63tests ciblés passent après revue distincte, avec transformations natives inchangées. Trois annotations ciblent le traçage du runtime CLI déjà explicitement inclus et des commandes hôte :59tests natifs passent et les instructions sont identiques ; **leur efficacité dans le vrai build Next reste à mesurer**. Le lecteur Linux de politique administrateur Chat passe92tests et4sondes distinctes ; son activation reste bloquée. Les tests doublent explicitement les métadonnées Linux sur Mac et ne qualifient pas un montage réel.
+
+Le garde mémoire distingue désormais un worker devenu terminal entre son identification et sa mesure : après un échec de mesure et seulement si le PID est encore listé, il contrôle son état natif. Un processus encore actif ou un état non vérifiable restent bloquants ; aucune mesure n’est retentée. Les 34 tests du candidat passent sous ce même garde strict. Une fixture historique est adaptée au nouveau contrôle, sans modifier ses assertions. Les seuils, raisons d’arrêt, profils et mécanismes de nettoyage restent inchangés. La course est reproduite sur un enfant fictif possédé ; elle ne prouve pas la cause des interruptions historiques. Les diagnostics gardent des étapes et classes fermées, sans message, argument ou environnement. Le mode strict reste le défaut ; le [profil explicite de jalon Mac](scripts/dev/README.md) mesure aussi le swap et arrête sur disque, pression critique prolongée, délai ou observation indisponible.
+
+## Compilation Linux et mesures
+
+La [validation Linux de la révision précédente](https://github.com/saphiron222/memlia/actions/runs/39262750914) passe les types en67,190s ainsi que les bundles CLI/sandbox, sans lancer Next. Les types et le build complets de la présente source restent à exécuter. Un jalon Mac antérieur a compilé puis échoué pendant la collecte des routes sur un appel serveur d’une fonction client. Le jalon corrigé a passé les types et bundles puis a été interrompu pour une mesure système indisponible ; Next, les artefacts et le démarrage de cette source restent non validés. Les diagnostics ajoutés ne reconstituent pas rétrospectivement cette mesure manquante.
+
+Le [témoin Linux heap11](https://github.com/saphiron222/memlia/actions/runs/39246257403) a échoué V8 après764,174s avec un pic cgroup13957734400octets. Le runner public gratuit16Go n’est donc pas encore qualifié pour le build complet ; aucun besoin runtime cabinet ou minimum24–32Go n’est déduit.
+
+Les [trois expériences gratuites avec swap](README.linux-validation.md) gardent un code/verrou commun et une VM par variante : Webpack+disque, Turbopack+disque, Turbopack+zram+disque. La [première campagne](https://github.com/saphiron222/memlia/actions/runs/39263463140) a refusé ses trois prévols avant toute allocation ou compilation, sans mesure mémoire ni cause précise dans les reçus. L’inventaire corrigé lit procfs ; un test Linux arm64 réel passe sans modifier le swap. Cela ne qualifie ni l’allocation sur GitHub x64 ni le repli zram à saturation. Une nouvelle campagne attend les contrôles de publication et la validation Linux des types. Aucun runner payant.
+
+## Travaux ouverts
+
+Le Chat indépendant complet, son admission et son budget durable, l’UI finale Excel/OpenAdapt, le worker actif, les parcours multi-utilisateurs HTTP, les tests Windows interactifs, les images de production et les sauvegardes/restaurations restent en développement ou à qualifier. Les tests unitaires ne remplacent pas ces vérifications. Les rapports privés, secrets, données du laboratoire et artefacts bruts ne sont pas publiés.

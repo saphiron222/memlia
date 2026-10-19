@@ -1,0 +1,2 @@
+ALTER TABLE "workflow" ADD COLUMN "draft_revision" bigint DEFAULT 0 NOT NULL;--> statement-breakpoint
+ALTER TABLE "workflow" ADD CONSTRAINT "workflow_draft_revision_range" CHECK ("workflow"."draft_revision" BETWEEN 0 AND 9007199254740991);

@@ -1,0 +1,323 @@
+#!/usr/bin/env bash
+# Copyright 2026 Memlia. All rights reserved.
+# Product validation or full build, dedicated Docker cgroups, bounded metrics and TS locations.
+set -euo pipefail
+umask 077
+scope=build
+swap_variant=''
+if [[ "$#" != 0 ]]; then
+  if [[ "$#" == 1 && "$1" == --validation-only ]]; then
+    scope=validation
+  elif [[ "$#" == 2 && "$1" == --swap ]]; then
+    case "$2" in webpack|turbopack|turbopack-zram) swap_variant="$2";;
+      *) echo 'Unsupported validation mode' >&2; exit 2;; esac
+  else
+    echo 'Unsupported validation mode' >&2; exit 2
+  fi
+fi
+root="$(git rev-parse --show-toplevel)"
+: "${RUNNER_TEMP:?GitHub runner temporary directory required}"
+if [[ -n "$swap_variant" && "${MEMLIA_SWAP_HOST_READY:-}" != 1 ]]; then
+  exec python3 "$root/scripts/ci/linux-swap-host.py" "$swap_variant"
+fi
+metrics="$RUNNER_TEMP/memlia-metrics"
+[[ ! -e "$metrics" ]] || { echo 'Metrics directory already exists'; exit 1; }
+mkdir "$metrics"
+private="$(mktemp -d "$RUNNER_TEMP/memlia-build.XXXXXXXX")"
+mkdir "$private/tmp" "$private/tools"
+prefix="memlia-build-$(python3 -c 'import secrets; print(secrets.token_hex(6))')"
+image='node:24.22.0-bookworm@sha256:14078204b6bb268c107ceff6d3c43f45a888105e5c2b18b14c32b3409d93a1b0'
+postgres='pgvector/pgvector:pg17@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d'
+containers=()
+network_created=0
+completed=0
+next_started=0
+standalone_verified=0
+current_stage=bootstrap
+database_ready_exit_code=''
+database_init_exit_code=''
+cleanup() {
+  result=$?
+  trap - EXIT INT TERM
+  set +e
+  cleanup_ok=1
+  receipt_ok=1
+  for name in "${containers[@]}"; do
+    if docker inspect "$name" > /dev/null 2>&1; then
+      docker rm -fv "$name" > /dev/null 2>&1 || cleanup_ok=0
+    fi
+    remaining="$(docker ps -a --filter "name=^/${name}$" --format '{{.Names}}' 2>/dev/null)"
+    [[ $? == 0 && -z "$remaining" ]] || cleanup_ok=0
+  done
+  if [[ "$network_created" == 1 ]]; then
+    docker network rm "$prefix" > /dev/null 2>&1 || cleanup_ok=0
+  fi
+  if [[ "$private" == "$RUNNER_TEMP"/memlia-build.* ]]; then
+    rm -rf -- "$private" || cleanup_ok=0
+  else
+    cleanup_ok=0
+  fi
+  python3 - "$metrics/result.json" "$result" "$completed" "$cleanup_ok" \
+    "${current_stage:-bootstrap}" "${database_ready_exit_code:-}" "${database_init_exit_code:-}" \
+    "${scope:-build}" "${next_started:-0}" "${standalone_verified:-0}" <<'PY' || receipt_ok=0
+import json,sys
+from pathlib import Path
+def exit_code(value, optional=False):
+    if optional and value=='': return None
+    if not (value.isascii() and value.isdigit() and len(value)<=3 and int(value)<=255):
+        raise ValueError('Invalid bounded command exit code')
+    return int(value)
+code=exit_code(sys.argv[2]); completed,cleanup=map(int,sys.argv[3:5]); stage=sys.argv[5]
+allowed={'bootstrap','host','pull_node','pull_database','download_bun','verify_bun','extract_bun',
+         'prepare_database','create_network','start_database','database_readiness','database_initialization',
+         'phase_test','phase_install','toolchain','phase_inventory','phase_typegen','phase_typecheck',
+         'phase_cli','phase_sandbox','phase_config','phase_next','phase_standalone','completed','validation_completed'}
+scope=sys.argv[8]; next_started,standalone=map(int,sys.argv[9:11])
+assert stage in allowed and completed in (0,1) and cleanup in (0,1), 'Invalid fixed build diagnostic'
+assert scope in ('build','validation') and next_started in (0,1) and standalone in (0,1), 'Invalid validation diagnostic'
+normal=code==0 and completed and cleanup
+validation_passed=normal and scope=='validation' and stage=='validation_completed' and not next_started and not standalone
+build_passed=normal and scope=='build' and stage=='completed' and next_started and standalone
+status='validation_passed' if validation_passed else 'passed' if build_passed else 'failed'
+Path(sys.argv[1]).write_text(json.dumps({'exitCode':code,'stage':stage,
+    'databaseReadyExitCode':exit_code(sys.argv[6],True),'databaseInitExitCode':exit_code(sys.argv[7],True),
+    'normalCompletion':bool(completed),'cleanup':bool(cleanup),
+    'scope':scope,'nextStarted':bool(next_started),'standaloneVerified':bool(standalone),
+    'buildStatus':'passed' if build_passed else 'not_run' if not next_started else 'failed',
+    'status':status},indent=2)+'\n')
+if status=='failed': raise SystemExit(1)
+PY
+  # Only our fixed-schema JSON receipts are shown; no raw build logs/artifacts.
+  python3 - "$metrics" <<'PY' || receipt_ok=0
+import json,sys
+from pathlib import Path
+receipts = [json.loads(path.read_text()) for path in sorted(Path(sys.argv[1]).glob('*.json'))]
+for receipt in receipts:
+    print(json.dumps(receipt,sort_keys=True))
+PY
+  [[ "$completed" == 1 && "$cleanup_ok" == 1 && "$receipt_ok" == 1 && "$result" == 0 ]] || exit 1
+  exit 0
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+current_stage=host
+python3 - "$metrics/host.json" "$root" "$swap_variant" <<'PY'
+import hashlib,json,os,platform,shutil,subprocess,sys
+from pathlib import Path
+mem = {k:int(v.split()[0])*1024 for k,v in (x.split(':',1) for x in Path('/proc/meminfo').read_text().splitlines())}
+root=Path(sys.argv[2]); disk=shutil.disk_usage(root)
+receipt={'sourceCommit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),'lockSha256':hashlib.sha256((root/'bun.lock').read_bytes()).hexdigest(),'architecture':platform.machine(),'kernel':platform.release(),'cpuCount':os.cpu_count(),'hostMemTotalBytes':mem['MemTotal'],'hostMemAvailableBytes':mem['MemAvailable'],'hostSwapTotalBytes':mem['SwapTotal'],'hostSwapUsedBytes':mem['SwapTotal']-mem['SwapFree'],'diskFreeBytes':disk.free,'buildCgroupLimitBytes':13*1024**3,'databaseLimitBytes':512*1024**2,'v8OldSpaceMiB':10240,'nextV8OldSpaceMiB':11264,'bundler':'webpack','webpackCacheProfile':'memory','nextWorkers':2,'runnerImageOS':os.environ.get('ImageOS'),'runnerImageVersion':os.environ.get('ImageVersion')}
+if sys.argv[3]:
+    variant=sys.argv[3]
+    assert variant in ('webpack','turbopack','turbopack-zram')
+    import importlib.util
+    spec=importlib.util.spec_from_file_location('swap_host',root/'scripts/ci/linux-swap-host.py')
+    swap_host=importlib.util.module_from_spec(spec); spec.loader.exec_module(swap_host)
+    zram=os.environ.get('MEMLIA_ZRAM_DEVICE')
+    assert bool(zram)==(variant=='turbopack-zram')
+    swap_host.verify_active_swap(os.environ['RUNNER_TEMP'],os.environ['MEMLIA_SWAP_FILE'],zram)
+    receipt.update({'experiment':variant,'nextV8OldSpaceMiB':24576 if variant=='webpack' else 11264,
+                    'bundler':'webpack' if variant=='webpack' else 'turbopack',
+                    'webpackCacheProfile':'memory' if variant=='webpack' else 'not_applied',
+                    'nextSwapLimitBytes':24*1024**3,'nextMemoryAndSwapBytes':37*1024**3,
+                    'turbopackNativeMemoryBoundedByV8':False})
+Path(sys.argv[1]).write_text(json.dumps(receipt,indent=2)+'\n')
+assert platform.machine()=='x86_64'
+assert mem['MemTotal']>=14*1024**3 and mem['MemAvailable']>=13*1024**3
+assert disk.free>=8*1024**3
+assert not (root/'node_modules').exists() and not (root/'apps/sim/.next').exists() and not (root/'.turbo').exists()
+PY
+# No cache restore or global cache/SDK deletion on the runner.
+# Private inventory from the public commit, never printed or uploaded.
+python3 - "$root" "$private/tracked-sources.json" <<'PY'
+import importlib.util,sys
+from pathlib import Path
+module=Path(sys.argv[1])/'scripts/ci/linux-build-metrics.py'
+spec=importlib.util.spec_from_file_location('metrics',module)
+metrics=importlib.util.module_from_spec(spec); spec.loader.exec_module(metrics)
+try:
+    metrics.write_tracked_sources(Path(sys.argv[1]),Path(sys.argv[2]))
+except Exception:
+    raise SystemExit('Tracked source inventory unavailable')
+PY
+current_stage=pull_node
+docker pull --platform linux/amd64 "$image" > "$private/pull-node.log" 2>&1
+current_stage=pull_database
+docker pull --platform linux/amd64 "$postgres" > "$private/pull-db.log" 2>&1
+current_stage=download_bun
+curl --fail --location --silent --show-error --retry 2 --max-time 120 \
+  https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64.zip \
+  --output "$private/bun.zip" 2> "$private/download.log"
+current_stage=verify_bun
+printf '%s  %s\n' '36368faef7527875d5ffa52e53cd48021741f2a83eb6208a8dd64068d422a913' "$private/bun.zip" | sha256sum --check > "$private/checksum.log"
+current_stage=extract_bun
+unzip -q "$private/bun.zip" -d "$private/tools"
+current_stage=prepare_database
+python3 - "$private" <<'PY'
+from pathlib import Path
+import secrets,sys
+root=Path(sys.argv[1]); admin=secrets.token_hex(32); password=secrets.token_hex(32)
+(root/'postgres.env').write_text(f'POSTGRES_PASSWORD={admin}\nPOSTGRES_DB=memlia_build\n')
+values={'DATABASE_URL':f'postgresql://memlia_build:{password}@database:5432/memlia_build','MIGRATION_DATABASE_URL':f'postgresql://memlia_build:{password}@database:5432/memlia_build','BETTER_AUTH_SECRET':secrets.token_hex(32),'ENCRYPTION_KEY':secrets.token_hex(32),'INTERNAL_API_SECRET':secrets.token_hex(32),'BETTER_AUTH_URL':'http://localhost:3000','NEXT_PUBLIC_APP_URL':'http://localhost:3000','NEXT_PUBLIC_SOCKET_URL':'http://localhost:3002','DOCKER_BUILD':'true','MEMLIA_LOCAL_BUILD':'1','NODE_OPTIONS':'--max-old-space-size=10240','NEXT_TELEMETRY_DISABLED':'1','DO_NOT_TRACK':'1','SENTRY_DSN':'','NEXT_PUBLIC_SENTRY_DSN':'','HOME':'/scratch','TMPDIR':'/scratch/tmp','CI':'true'}
+(root/'build.env').write_text(''.join(f'{k}={v}\n' for k,v in values.items()))
+(root/'database.sql').write_text(f"CREATE ROLE memlia_build LOGIN PASSWORD '{password}' NOSUPERUSER NOCREATEDB NOCREATEROLE;\nALTER DATABASE memlia_build OWNER TO memlia_build;\nCREATE EXTENSION IF NOT EXISTS vector;\nALTER SCHEMA public OWNER TO memlia_build;\n")
+PY
+current_stage=create_network
+docker network create "$prefix" > "$private/network.log" 2>&1
+network_created=1
+containers+=("$prefix-database")
+current_stage=start_database
+docker run -d --name "$prefix-database" --network "$prefix" --network-alias database \
+  --memory 512m --memory-swap 512m --cpus 1 --env-file "$private/postgres.env" \
+  "$postgres" > "$private/database.log" 2>&1
+current_stage=database_readiness
+ready=0
+for attempt in {1..40}; do
+  if docker exec "$prefix-database" pg_isready -h 127.0.0.1 -p 5432 -t 1 -U postgres -d memlia_build > /dev/null 2>&1; then
+    database_ready_exit_code=0; ready=1; break
+  else
+    database_ready_exit_code=$?
+  fi
+  sleep 1
+done
+[[ "$ready" == 1 ]] || exit 1
+current_stage=database_initialization
+database_init_exit_code=0
+docker exec -i "$prefix-database" psql -v ON_ERROR_STOP=1 -U postgres -d memlia_build \
+  < "$private/database.sql" > "$private/database-init.log" 2>&1 || database_init_exit_code=$?
+[[ "$database_init_exit_code" == 0 ]] || exit "$database_init_exit_code"
+phase() {
+  local label="$1" cwd="$2"
+  current_stage="phase_$label"
+  shift 2
+  python3 - "$root" <<'PY'
+import shutil,sys
+assert shutil.disk_usage(sys.argv[1]).free >= 2*1024**3, 'disk reserve exhausted'
+PY
+  local name="$prefix-$label"
+  containers+=("$name")
+  local code=0
+  local memory_swap=13g
+  local metrics_extra=() env_extra=()
+  if [[ -n "${swap_variant:-}" ]]; then
+    env_extra+=(--env "MEMLIA_SWAP_VARIANT=$swap_variant")
+    if [[ "$label" == next ]]; then
+      memory_swap=37g
+      metrics_extra+=(--experiment "$swap_variant" --timeout 6000)
+    fi
+  fi
+  docker run --name "$name" --platform linux/amd64 --network "$prefix" \
+    --user "$(id -u):$(id -g)" --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+    --memory 13g --memory-swap "$memory_swap" --cpus 4 --pids-limit 512 \
+    --env-file "$private/build.env" "${env_extra[@]}" --env PATH=/tools/bun-linux-x64:/usr/local/bin:/usr/bin:/bin \
+    --mount "type=bind,source=$root,target=/work" \
+    --mount "type=bind,source=$private,target=/scratch" \
+    --mount "type=bind,source=$private/tools,target=/tools,readonly" \
+    --mount "type=bind,source=$private/tracked-sources.json,target=/scratch/tracked-sources.json,readonly" \
+    --mount "type=bind,source=$metrics,target=/metrics" --workdir "$cwd" \
+    "$image" python3 /work/scripts/ci/linux-build-metrics.py --phase "$label" \
+    --report "/metrics/$label.json" "${metrics_extra[@]}" --tracked-sources /scratch/tracked-sources.json --source-root /work -- "$@" > "$private/$label.log" 2>&1 || code=$?
+  if [[ -n "${swap_variant:-}" && "$label" == next ]]; then
+    docker inspect --format '{{json .HostConfig}}' "$name" > "$private/limits.json"
+    python3 - "$private/limits.json" "$metrics/next-limits.json" <<'PYLIMITS'
+import json,sys
+from pathlib import Path
+raw=json.loads(Path(sys.argv[1]).read_text())
+receipt={key:raw[key] for key in ('Memory','MemorySwap','NanoCpus','PidsLimit')}
+Path(sys.argv[2]).write_text(json.dumps(receipt,indent=2)+'\n')
+assert receipt=={'Memory':13*1024**3,'MemorySwap':37*1024**3,'NanoCpus':4000000000,'PidsLimit':512}
+PYLIMITS
+  fi
+  docker inspect --format '{{json .State}}' "$name" > "$private/state.json"
+  python3 - "$metrics/$label-container.json" "$private/state.json" "$code" "$metrics/$label.json" <<'PY'
+import json,sys
+from pathlib import Path
+state=json.loads(Path(sys.argv[2]).read_text())
+receipt={'dockerExitCode':int(sys.argv[3]),'containerExitCode':state['ExitCode'],'oomKilled':state['OOMKilled'],'running':state['Running'],'receiptPresent':Path(sys.argv[4]).is_file()}
+Path(sys.argv[1]).write_text(json.dumps(receipt,indent=2)+'\n')
+assert receipt['dockerExitCode']==0 and receipt['containerExitCode']==0 and not receipt['oomKilled'] and not receipt['running'] and receipt['receiptPresent']
+PY
+}
+phase test /work python3 scripts/ci/test-linux-build-metrics.py -v
+phase install /work sh -ec 'test "$(node --version)" = v24.22.0; test "$(bun --version)" = 1.4.2; sha256sum bun.lock > /scratch/lock.sha256; bun install --frozen-lockfile --ignore-scripts; sha256sum -c /scratch/lock.sha256'
+current_stage=toolchain
+docker run --rm --network none --user "$(id -u):$(id -g)" --read-only --cap-drop ALL \
+  --security-opt no-new-privileges:true --memory 256m --memory-swap 256m \
+  --mount "type=bind,source=$root,target=/work,readonly" \
+  --mount "type=bind,source=$private/tools,target=/tools,readonly" \
+  --mount "type=bind,source=$metrics,target=/metrics" "$image" python3 -c '
+import hashlib,json,re,subprocess
+from pathlib import Path
+node=Path("/usr/local/bin/node"); bun=Path("/tools/bun-linux-x64/bun")
+r={"node":subprocess.check_output([str(node),"--version"],text=True).strip(),"bun":subprocess.check_output([str(bun),"--version"],text=True).strip(),"nodeSha256":hashlib.sha256(node.read_bytes()).hexdigest(),"bunSha256":hashlib.sha256(bun.read_bytes()).hexdigest()}
+for name in ["next","typescript"]: r[name]=json.loads((Path("/work/node_modules")/name/"package.json").read_text())["version"]
+manifest=json.loads(Path("/work/apps/sim/package.json").read_text())
+overrides=json.loads(Path("/work/package.json").read_text())["overrides"]
+expected=manifest["dependencies"]["next"]
+assert isinstance(expected,str) and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+",expected), "Exact Next pin required"
+assert overrides["next"]==expected and r["next"]==expected, "Installed Next differs from versioned pin"
+r["expectedNext"]=expected
+Path("/metrics/toolchain.json").write_text(json.dumps(r,indent=2)+"\n")
+assert r["node"]=="v24.22.0" and r["bun"]=="1.4.2" and r["typescript"]=="7.0.2"
+' > "$private/toolchain.log" 2>&1
+run_product_phases() {
+phase inventory /work/apps/sim bun run ../../packages/sim-cli/scripts/print-command-inventory.ts
+if [[ "${swap_variant:-}" == turbopack* ]]; then
+  phase typegen /work/apps/sim node ../../node_modules/next/dist/bin/next typegen
+else
+  phase typegen /work/apps/sim node ../../node_modules/next/dist/bin/next typegen --webpack
+fi
+# The installed TypeScript launcher selects the Linux native compiler via execve.
+phase typecheck /work/apps/sim node ../../node_modules/typescript/bin/tsc --noEmit --singleThreaded --pretty false
+phase cli /work/apps/sim bun run build:cli-runtime
+phase sandbox /work/apps/sim bun run build:sandbox-bundles
+if [[ "$scope" == validation ]]; then
+  current_stage=validation_completed
+  completed=1
+  return
+fi
+# One bounded Next-only heap experiment; the container and other phases stay unchanged.
+next_started=1
+if [[ -n "${swap_variant:-}" ]]; then
+  phase config /work/apps/sim node -e '
+const fs=require("node:fs"); const load=require("next/dist/server/config").default;
+const bundler=process.env.MEMLIA_SWAP_VARIANT==="webpack"?"webpack":"turbopack";
+require("next/dist/lib/bundler").parseBundlerArgs(bundler==="webpack"?{webpack:true}:{turbopack:true});
+load(require("next/constants").PHASE_PRODUCTION_BUILD,process.cwd()).then(c=>{
+const r={bundler,productionBrowserSourceMaps:c.productionBrowserSourceMaps,serverSourceMaps:c.experimental.serverSourceMaps,
+ enablePrerenderSourceMaps:c.enablePrerenderSourceMaps,cpus:c.experimental.cpus,output:c.output,
+ webpackCallbackApplicable:process.env.MEMLIA_SWAP_VARIANT==="webpack"};
+fs.writeFileSync("/metrics/next-config.json",JSON.stringify(r)+"\n");
+if(r.productionBrowserSourceMaps!==false||r.serverSourceMaps!==false||r.enablePrerenderSourceMaps!==false||r.cpus!==2||r.output!=="standalone")process.exitCode=1;
+}).catch(()=>{process.exitCode=1});'
+  if [[ "$swap_variant" == webpack ]]; then
+    phase next /work/apps/sim env DEBUG=next:build:webpack-build DEBUG_COLORS=0 NODE_OPTIONS=--max-old-space-size=24576 node ../../node_modules/next/dist/bin/next build --webpack
+  else
+    phase next /work/apps/sim env NODE_OPTIONS=--max-old-space-size=11264 node ../../node_modules/next/dist/bin/next build --turbopack
+  fi
+else
+  phase next /work/apps/sim env DEBUG=next:build:webpack-build DEBUG_COLORS=0 NODE_OPTIONS=--max-old-space-size=11264 node ../../node_modules/next/dist/bin/next build --webpack
+fi
+phase standalone /work/apps/sim python3 -c '
+from pathlib import Path
+import json,os
+root=Path(".next")
+assert (root/"BUILD_ID").read_text().strip()
+assert (root/"standalone/apps/sim/server.js").is_file()
+assert (root/"routes-manifest.json").is_file()
+assert (root/"prerender-manifest.json").is_file()
+assert (root/"static").is_dir()
+assert (root/"required-server-files.json").is_file()
+config=json.loads((root/"required-server-files.json").read_text())["config"]
+assert config["output"]=="standalone"
+if os.environ.get("MEMLIA_SWAP_VARIANT"):
+    assert config["productionBrowserSourceMaps"] is False
+    assert config["experimental"]["serverSourceMaps"] is False
+    assert config["enablePrerenderSourceMaps"] is False
+    assert config["experimental"]["cpus"]==2
+'
+standalone_verified=1
+current_stage=completed
+completed=1
+}
+run_product_phases

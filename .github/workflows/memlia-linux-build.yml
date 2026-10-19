@@ -1,0 +1,55 @@
+# Copyright 2026 Memlia. All rights reserved.
+name: Mesure du build Linux 16 Go
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main, build/linux-16gb-measurement]
+permissions:
+  contents: read
+concurrency:
+  group: memlia-linux-build-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    if: github.event.repository.private == false && github.repository == 'saphiron222/memlia'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      MEMLIA_PUBLIC_RUN: '1'
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Vérifier la provenance et les contrôles portables
+        run: |
+          python3 scripts/ci/test_upstream_notices.py -v
+          python3 scripts/ci/check-upstream-notices.py --root .
+          python3 scripts/ci/check-upstream-notices.py --root . --history
+          python3 scripts/ci/test-linux-build-metrics.py -v
+          python3 scripts/ci/test-linux-swap-host.py -v
+      - name: Construire avec Turbopack et swap disque possédé
+        shell: bash
+        run: bash scripts/ci/run-linux-build.sh --swap turbopack
+      - name: Lire uniquement les reçus fermés
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json,os
+          from pathlib import Path
+          root=Path(os.environ['RUNNER_TEMP'])/'memlia-metrics'
+          names=['host','toolchain','result','next-config','next-limits']
+          for phase in ['test','install','inventory','typegen','typecheck','cli','sandbox','config','next','standalone']:
+              names.extend([phase,phase+'-container'])
+          for name in names:
+              path=root/(name+'.json')
+              if path.is_file():
+                  with path.open('rb') as stream: data=stream.read(131073)
+                  if len(data)>131072: raise SystemExit('Receipt exceeds publication bound')
+                  print(json.dumps(json.loads(data),sort_keys=True))
+          PY
+      # No artifacts: raw logs, .next, maps, heap dumps and dependencies stay on the ephemeral VM.

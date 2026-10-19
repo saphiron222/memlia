@@ -1,0 +1,15 @@
+{
+  "name": "sim",
+  "repository": "https://github.com/simstudioai/sim.git",
+  "sha": "c6cef5f87b6a1d1d01df89e7140bad9e9fd4c2e2",
+  "license_files": [
+    {
+      "path": "LICENSE",
+      "sha256": "b13f17c74ba17a5cc136e624fd6f78d75124f2b038a25f0b7eba48a1ca00c0ec"
+    },
+    {
+      "path": "NOTICE",
+      "sha256": "f7c2fd75ef8745b6f966111bbeb1b592649aaae081ed4d689bd3d6f8571786b7"
+    }
+  ]
+}
