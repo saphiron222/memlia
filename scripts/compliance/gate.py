@@ -72,22 +72,83 @@ def scan_imports(entries, root, policy=None):
             if key in admitted:
                 raise ValueError('duplicate loader review')
             admitted.add(key)
-    if not entries:
-        return []
     env = os.environ.copy()
     if env.get('MEMLIA_TYPESCRIPT_PATH'):
         parser = Path(env['MEMLIA_TYPESCRIPT_PATH']).resolve()
         if not parser.is_file() or parser.name != 'typescript.js':
             raise ValueError('invalid explicit TypeScript parser path')
         env['NODE_PATH'] = str(parser.parents[3])
-    result = subprocess.run(['node', str(HERE / 'imports.mjs')], env=env, input=json.dumps({'root': str(root), 'entries': entries}), text=True, capture_output=True)
-    if result.returncode:
-        # Do not print parser diagnostics containing source text.
-        raise ValueError('TypeScript parser unavailable or configuration invalid; publication blocked')
-    hashes = {entry['path']: digest(entry['content'].encode('utf-8')) for entry in entries}
-    return [issue for issue in json.loads(result.stdout)
+    # Own an immutable disk spool, not a second in-memory copy of the corpus.
+    # Keep final hashes globally: duplicate sourcemap paths historically use the
+    # last source hash for ALL findings at that path, not the current frame hash.
+    hashes, count = {}, 0
+    with tempfile.TemporaryFile(mode='w+t', encoding='utf-8') as spool:
+        for entry in entries:
+            hashes[entry['path']] = digest(entry['content'].encode('utf-8'))
+            spool.write(json.dumps({'index': count, 'entry': entry}) + '\n')
+            count += 1
+        if not count:
+            return []
+        spool.seek(0)
+        issues = read_import_stream(spool, root, count, env)
+    return [issue for issue in issues
             if issue['rule'] != 'unresolved-module-expression'
             or (issue['path'], hashes.get(issue['path']), issue.get('line')) not in admitted]
+
+def read_import_stream(spool, root, count, env):
+    process = subprocess.Popen(['node', str(HERE / 'imports.mjs'), '--stream'], env=env,
+                               stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                               stderr=subprocess.DEVNULL, text=True, encoding='utf-8')
+    issues = []
+    def response():
+        line = process.stdout.readline()
+        if not line:
+            raise ValueError('missing parser response')
+        return json.loads(line)
+    try:
+        process.stdin.write(json.dumps({'protocol': 'memlia-imports-v1',
+                                       'root': str(root), 'count': count}) + '\n')
+        for index, line in enumerate(spool):
+            entry = json.loads(line)['entry']
+            process.stdin.write(line)
+            process.stdin.flush()
+            result = response()
+            if (not isinstance(result, dict) or set(result) != {'index', 'issues'}
+                    or type(result['index']) is not int or result['index'] != index
+                    or not isinstance(result['issues'], list)):
+                raise ValueError('invalid parser response')
+            for issue in result['issues']:
+                if (not isinstance(issue, dict) or set(issue) != {'path', 'rule', 'line'}
+                        or issue['path'] != entry['path']
+                        or issue['rule'] not in ('parse-error', 'enterprise-import', 'unresolved-module-expression')
+                        or type(issue['line']) is not int or issue['line'] < 1):
+                    raise ValueError('invalid parser finding')
+                issues.append(issue)
+        process.stdin.write(json.dumps({'end': count}) + '\n')
+        process.stdin.close()
+        end = response()
+        if (not isinstance(end, dict) or set(end) != {'end'}
+                or type(end['end']) is not int or end['end'] != count
+                or process.stdout.read(1) or process.wait() != 0):
+            raise ValueError('incomplete parser stream')
+        return issues
+    except (ValueError, TypeError, KeyError, OSError) as error:
+        # Never echo source text or a partial admission after parser failure.
+        raise ValueError('TypeScript parser unavailable or configuration invalid; publication blocked') from error
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        for pipe in (process.stdin, process.stdout):
+            try:
+                pipe.close()
+            except OSError:
+                # A failed parser may have closed its input before a flush.
+                pass
 
 def validate_source(root, manifest):
     if git(root, 'remote', 'get-url', 'origin').decode().strip() != manifest['repository']:
@@ -109,36 +170,37 @@ def tree_entries(root, rev):
         yield raw_path.decode(), mode, kind, oid
 
 def inspect_contents(entries, root, policy):
-    issues, modules = [], []
-    for path, content in entries:
-        issues.extend({'path': path, 'rule': rule} for rule in scan_entry(path, content, policy))
-        if CODE.search(path):
-            try:
-                modules.append({'path': path, 'content': content.decode('utf-8')})
-            except UnicodeDecodeError:
-                issues.append({'path': path, 'rule': 'invalid-source-encoding'})
-        if path.endswith('.map'):
-            try:
-                sourcemap = json.loads(content)
-                if not isinstance(sourcemap, dict) or sourcemap.get('version') != 3 or 'sections' in sourcemap:
-                    raise ValueError('unsupported sourcemap structure')
-                sources = sourcemap.get('sources')
-                contents = sourcemap.get('sourcesContent')
-                source_root = sourcemap.get('sourceRoot', '')
-                if (not isinstance(sources, list) or not isinstance(contents, list)
-                        or not isinstance(sourcemap.get('mappings'), str)
-                        or not isinstance(source_root, str)
-                        or any(not isinstance(source, str) for source in sources)
-                        or len(sources) != len(contents) or any(not isinstance(c, str) for c in contents)):
-                    raise ValueError('missing map content')
-                for source, text in zip(sources, contents):
-                    mapped = f'{path}/sources/{source_root}/{source}'
-                    issues.extend({'path': mapped, 'rule': rule} for rule in scan_entry(mapped, text.encode(), policy))
-                    if CODE.search(source):
-                        modules.append({'path': mapped, 'content': text})
-            except (ValueError, TypeError, AttributeError):
-                issues.append({'path': path, 'rule': 'uninspected-sourcemap'})
-    issues.extend(scan_imports(modules, root, policy))
+    issues = []
+    def modules():
+        for path, content in entries:
+            issues.extend({'path': path, 'rule': rule} for rule in scan_entry(path, content, policy))
+            if CODE.search(path):
+                try:
+                    yield {'path': path, 'content': content.decode('utf-8')}
+                except UnicodeDecodeError:
+                    issues.append({'path': path, 'rule': 'invalid-source-encoding'})
+            if path.endswith('.map'):
+                try:
+                    sourcemap = json.loads(content)
+                    if not isinstance(sourcemap, dict) or sourcemap.get('version') != 3 or 'sections' in sourcemap:
+                        raise ValueError('unsupported sourcemap structure')
+                    sources = sourcemap.get('sources')
+                    contents = sourcemap.get('sourcesContent')
+                    source_root = sourcemap.get('sourceRoot', '')
+                    if (not isinstance(sources, list) or not isinstance(contents, list)
+                            or not isinstance(sourcemap.get('mappings'), str)
+                            or not isinstance(source_root, str)
+                            or any(not isinstance(source, str) for source in sources)
+                            or len(sources) != len(contents) or any(not isinstance(c, str) for c in contents)):
+                        raise ValueError('missing map content')
+                    for source, text in zip(sources, contents):
+                        mapped = f'{path}/sources/{source_root}/{source}'
+                        issues.extend({'path': mapped, 'rule': rule} for rule in scan_entry(mapped, text.encode(), policy))
+                        if CODE.search(source):
+                            yield {'path': mapped, 'content': text}
+                except (ValueError, TypeError, AttributeError):
+                    issues.append({'path': path, 'rule': 'uninspected-sourcemap'})
+    issues.extend(scan_imports(modules(), root, policy))
     return issues
 
 def scan_history(root, policy):
@@ -166,20 +228,21 @@ def scan_history(root, policy):
     # Parse each commit with ITS configuration, not today's aliases. Context changes matter
     # even when an importing blob is unchanged, so source parsing is not deduplicated.
     for commit in git(root, 'rev-list', '--all').decode().splitlines():
-        entries = []
         with tempfile.TemporaryDirectory(prefix='memlia-history-') as tmp, blob_reader(root) as read:
             snapshot = Path(tmp)
-            for path, mode, kind, oid in tree_entries(root, commit):
+            entries = list(tree_entries(root, commit))
+            for path, mode, kind, oid in entries:
                 if mode not in ('100644', '100755') or kind != 'blob':
                     issues.append({'path': path, 'rule': 'unsupported-git-mode', 'commit': commit})
                     continue
-                content = read(oid)
-                entries.append((path, content))
                 if path.endswith(('.json', '.jsonc')):
                     target = snapshot / path
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_bytes(content)
-            issues.extend(dict(issue, commit=commit) for issue in inspect_contents(entries, snapshot, policy))
+                    target.write_bytes(read(oid))
+            # Every historical config exists before parsing even the first module.
+            contents = ((path, read(oid)) for path, mode, kind, oid in entries
+                        if mode in ('100644', '100755') and kind == 'blob')
+            issues.extend(dict(issue, commit=commit) for issue in inspect_contents(contents, snapshot, policy))
     return issues
 
 def scan_tree(root, policy):
@@ -187,20 +250,22 @@ def scan_tree(root, policy):
         raise ValueError('tree root must be an existing directory')
     def traversal_error(error):
         raise error
-    entries, issues = [], []
-    for directory, dirs, files in os.walk(root, followlinks=False, onerror=traversal_error):
-        # Dependencies are audited as shipped artefacts, not implicitly licensed by this source gate.
-        dirs[:] = sorted(d for d in dirs if d not in ('.git', 'node_modules', '__pycache__'))
-        for name in list(dirs) + files:
-            file = Path(directory) / name
-            path = file.relative_to(root).as_posix()
-            if path == '.git':
-                continue
-            if file.is_symlink():
-                issues.append({'path': path, 'rule': 'unsupported-git-mode'})
-            elif file.is_file():
-                entries.append((path, file.read_bytes()))
-    return issues + inspect_contents(entries, root, policy)
+    issues = []
+    def entries():
+        for directory, dirs, files in os.walk(root, followlinks=False, onerror=traversal_error):
+            # Dependencies are audited as shipped artefacts, not implicitly licensed by this source gate.
+            dirs[:] = sorted(d for d in dirs if d not in ('.git', 'node_modules', '__pycache__'))
+            for name in list(dirs) + files:
+                file = Path(directory) / name
+                path = file.relative_to(root).as_posix()
+                if path == '.git':
+                    continue
+                if file.is_symlink():
+                    issues.append({'path': path, 'rule': 'unsupported-git-mode'})
+                elif file.is_file():
+                    yield path, file.read_bytes()
+    contents = inspect_contents(entries(), root, policy)
+    return issues + contents
 
 @contextmanager
 def blob_reader(root):

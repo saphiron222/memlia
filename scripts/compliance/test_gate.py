@@ -3,9 +3,11 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import select
 import subprocess
 import tempfile
 import unittest
+import weakref
 
 HERE = Path(__file__).parent
 spec = importlib.util.spec_from_file_location('gate', HERE / 'gate.py')
@@ -461,6 +463,194 @@ class SourceTests(unittest.TestCase):
         self.git('commit', '-qm', 'link')
         issues = gate.scan_history(self.root, {'allowed_license_sha256': [gate.digest(b'approved terms')]})
         self.assertTrue(any(x['rule'] == 'unsupported-git-mode' for x in issues))
+
+class StreamingImportTests(unittest.TestCase):
+    """Real parser/pipe tests; no compiler Programme, network or large corpus."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.env = os.environ.copy()
+        if self.env.get('MEMLIA_TYPESCRIPT_PATH'):
+            parser = Path(self.env['MEMLIA_TYPESCRIPT_PATH']).resolve()
+            self.env['NODE_PATH'] = str(parser.parents[3])
+        self.command = ['node', str(HERE / 'imports.mjs')]
+
+    def native(self, entries):
+        result = subprocess.run(self.command, input=json.dumps({
+            'root': str(self.root), 'entries': entries}), text=True,
+            capture_output=True, env=self.env, timeout=15)
+        self.assertEqual(0, result.returncode)
+        return json.loads(result.stdout)
+
+    def header(self, count):
+        return {'protocol': 'memlia-imports-v1', 'root': str(self.root), 'count': count}
+
+    def frames(self, entries):
+        return [self.header(len(entries)), *[
+            {'index': index, 'entry': entry} for index, entry in enumerate(entries)
+        ], {'end': len(entries)}]
+
+    def exchange(self, frames):
+        return subprocess.run(self.command + ['--stream'],
+                              input=''.join(json.dumps(frame) + '\n' for frame in frames),
+                              text=True, capture_output=True, env=self.env, timeout=15)
+
+    def test_stream_matches_legacy_in_order_including_last_enterprise_import(self):
+        (self.root / 'tsconfig.json').write_text(json.dumps({
+            'compilerOptions': {'baseUrl': '.', 'paths': {'restricted/*': ['ee/*']}}}))
+        entries = [
+            {'path': 'first.ts', 'content': '\n'.join([
+                "import a from '@/ee/a';", "import type {B} from 'restricted/b';",
+                "export {c} from './ee/c';", "type D = import('@/ee/d').D;",
+                "import e = require('@/ee/e');", "require.resolve('@/ee/f');",
+                "import('@/e' + 'e/g');", "require(`@/${'ee'}/h`);"])},
+            {'path': 'unknown.ts', 'content': 'import(target);'},
+            {'path': 'broken.ts', 'content': "import { from 'broken'"},
+            {'path': 'safe.ts', 'content': '// import("@/ee/prose")\nexport {};'},
+            {'path': 'last.ts', 'content': "\nexport * from '@/ee/last';"},
+        ]
+        expected = self.native(entries)
+        self.assertEqual(8, sum(i['path'] == 'first.ts' for i in expected))
+        self.assertEqual({'path': 'last.ts', 'rule': 'enterprise-import', 'line': 2}, expected[-1])
+        result = self.exchange(self.frames(entries))
+        self.assertEqual(0, result.returncode, 'stream must inspect every module')
+        responses = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertEqual({'end': len(entries)}, responses.pop())
+        self.assertEqual(list(range(len(entries))), [r['index'] for r in responses])
+        self.assertEqual(expected, [issue for r in responses for issue in r['issues']])
+
+    def test_stream_responds_before_eof_without_buffering_the_whole_corpus(self):
+        child = subprocess.Popen(self.command + ['--stream'], env=self.env,
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, text=True)
+        try:
+            child.stdin.write(json.dumps(self.header(2)) + '\n')
+            child.stdin.write(json.dumps({'index': 0, 'entry': {
+                'path': 'first.ts', 'content': 'export {};'}}) + '\n')
+            child.stdin.flush()
+            ready, _, _ = select.select([child.stdout], [], [], 10)
+            self.assertTrue(ready, 'first result must not await the next module or EOF')
+            self.assertEqual({'index': 0, 'issues': []}, json.loads(child.stdout.readline()))
+            child.stdin.write(json.dumps({'index': 1, 'entry': {
+                'path': 'last.ts', 'content': "import '@/ee/last';"}}) + '\n')
+            child.stdin.write(json.dumps({'end': 2}) + '\n')
+            child.stdin.close()
+            child.stdin = None
+            stdout, _ = child.communicate(timeout=10)
+            self.assertEqual(0, child.returncode)
+            self.assertEqual([
+                {'index': 1, 'issues': [{'path': 'last.ts', 'rule': 'enterprise-import', 'line': 1}]},
+                {'end': 2}], [json.loads(line) for line in stdout.splitlines()])
+        finally:
+            if child.poll() is None:
+                child.terminate()
+                try:
+                    child.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait(timeout=2)
+            for pipe in (child.stdin, child.stdout, child.stderr):
+                if pipe is not None:
+                    pipe.close()
+
+    def test_stream_empty_context_has_an_explicit_successful_end(self):
+        result = self.exchange(self.frames([]))
+        self.assertEqual(0, result.returncode)
+        self.assertEqual([{'end': 0}], [json.loads(line) for line in result.stdout.splitlines()])
+
+    def test_stream_refuses_omissions_extra_frames_and_wrong_sequence(self):
+        one = {'index': 0, 'entry': {'path': 'a.ts', 'content': 'export {};'}}
+        cases = [
+            [self.header(1)], [self.header(1), one],
+            [self.header(2), one, {'end': 2}],
+            [self.header(1), one, {'end': 0}],
+            [self.header(1), one, one, {'end': 1}],
+            [self.header(1), {**one, 'index': 1}, {'end': 1}],
+            [self.header(1), one, {'end': 1}, one],
+            [self.header(-1), {'end': -1}],
+            [self.header(True), one, {'end': 1}],
+        ]
+        for frames in cases:
+            with self.subTest(frames=frames):
+                self.assertNotEqual(0, self.exchange(frames).returncode)
+
+    def test_stream_refuses_truncated_json_and_unexpected_parser_exit(self):
+        for suffix in ['{"index":0', '{"end":']:
+            result = subprocess.run(self.command + ['--stream'],
+                                    input=json.dumps(self.header(1)) + '\n' + suffix,
+                                    text=True, capture_output=True, env=self.env, timeout=15)
+            self.assertNotEqual(0, result.returncode)
+        # A real parser configuration failure after a successful first response
+        # must not turn its partial output into a complete admission.
+        broken = self.root / 'broken'
+        broken.mkdir()
+        (broken / 'tsconfig.json').write_text('{"compilerOptions": {"target": "not-a-target"}}')
+        entries = [{'path': 'safe.ts', 'content': 'export {};'},
+                   {'path': 'broken/last.ts', 'content': 'export {};'}]
+        self.assertNotEqual(0, self.exchange(self.frames(entries)).returncode)
+        with self.assertRaises(ValueError):
+            gate.scan_imports(entries, self.root)
+
+    def test_inspection_does_not_retain_all_decoded_module_strings(self):
+        # Instrument only ownership of the genuine decoded source strings.
+        # Retaining the old corpus list makes live references grow with input.
+        references = []
+        live = []
+        class ObservedText(str):
+            pass
+        class ObservedBytes(bytes):
+            def decode(self, *args, **kwargs):
+                text = ObservedText(super().decode(*args, **kwargs))
+                references.append(weakref.ref(text))
+                live.append(sum(ref() is not None for ref in references))
+                return text
+        entries = ((f'module-{i}.ts', ObservedBytes(f'export const n = {i};'.encode()))
+                   for i in range(12))
+        self.assertEqual([], gate.inspect_contents(entries, self.root, {}))
+        self.assertLessEqual(max(live), 3, 'decoded sources must not accumulate with corpus size')
+
+    def test_sourcemap_duplicates_keep_last_hash_classification_and_issue_order(self):
+        first = 'import(firstTarget);'
+        last = 'import(lastTarget);'
+        mapped = 'bundle.js.map/sources/embedded/duplicate.ts'
+        source_map = {'version': 3, 'sources': ['duplicate.ts', 'duplicate.ts'],
+                      'sourceRoot': 'embedded', 'sourcesContent': [first, last], 'mappings': ''}
+        entries = [('last.ts', b"import '@/ee/last';"),
+                   ('unknown/LICENSE', b'not admitted'),
+                   ('bundle.js.map', json.dumps(source_map).encode())]
+        review = {'reviewed_dynamic_imports': [{'path': mapped, 'sha256': gate.digest(last.encode()),
+                  'lines': [1], 'reason': 'Fictional duplicate-path compatibility fixture.'}]}
+        # The existing global path->last-hash rule admits BOTH same-path results.
+        self.assertEqual([
+            {'path': 'unknown/LICENSE', 'rule': 'unreviewed-license'},
+            {'path': 'last.ts', 'rule': 'enterprise-import', 'line': 1},
+        ], gate.inspect_contents(iter(entries), self.root, review))
+        review['reviewed_dynamic_imports'][0]['sha256'] = gate.digest(first.encode())
+        result = gate.inspect_contents(iter(entries), self.root, review)
+        self.assertEqual([{'path': mapped, 'rule': 'unresolved-module-expression', 'line': 1}] * 2,
+                         result[-2:])
+
+    def test_unchanged_import_is_rechecked_under_each_historical_alias(self):
+        def git(*args):
+            return subprocess.check_output(['git', '-C', str(self.root), *args],
+                                           stderr=subprocess.DEVNULL).decode().strip()
+        git('init', '-q')
+        git('config', 'user.email', 'fixture@example.invalid')
+        git('config', 'user.name', 'Fictional fixture')
+        (self.root / 'a.ts').write_text("import x from 'private/module';")
+        config = self.root / 'tsconfig.json'
+        config.write_text(json.dumps({'compilerOptions': {'paths': {'private/*': ['./ee/*']}}}))
+        git('add', '.')
+        git('commit', '-qm', 'historical restricted alias')
+        restricted = git('rev-parse', 'HEAD')
+        config.write_text(json.dumps({'compilerOptions': {'paths': {'private/*': ['./public/*']}}}))
+        git('add', '.')
+        git('commit', '-qm', 'same importer different context')
+        self.assertEqual([], gate.scan_tree(self.root, {}))
+        self.assertEqual([{'path': 'a.ts', 'rule': 'enterprise-import', 'line': 1,
+                           'commit': restricted}], gate.scan_history(self.root, {}))
 
 if __name__ == '__main__':
     unittest.main()

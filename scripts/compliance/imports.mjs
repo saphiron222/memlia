@@ -2,13 +2,12 @@
 import { createRequire } from 'node:module'
 import path from 'node:path'
 import fs from 'node:fs'
+import readline from 'node:readline'
 
 const require = createRequire(import.meta.url)
 const ts = require('@typescript/typescript6')
 if (!['6.0.2', '6.0.3'].includes(ts.version)) throw new Error(`Unreviewed TypeScript parser version: ${ts.version}`)
-const input = JSON.parse(fs.readFileSync(0, 'utf8'))
-const root = path.resolve(input.root)
-const issues = []
+let root
 const configCache = new Map()
 
 // Literal folding is deliberately limited: unknown module expressions block publication.
@@ -86,10 +85,14 @@ function forbidden(specifier, file, options) {
   if (resolved) targets.push(resolved.resolvedFileName.replaceAll('\\', '/'))
   return targets.some(target => /(?:^|\/)ee(?:\/|$)/i.test(target))
 }
-for (const entry of input.entries) {
+function inspectEntry(entry) {
+  if (!entry || typeof entry.path !== 'string' || typeof entry.content !== 'string') {
+    throw new Error('Invalid module frame')
+  }
+  const issues = []
   const file = ts.createSourceFile(entry.path, entry.content, ts.ScriptTarget.Latest, true)
   const add = (rule, node) => issues.push({ path: entry.path, rule, line: file.getLineAndCharacterOfPosition(node?.getStart(file) || 0).line + 1 })
-  if (file.parseDiagnostics.length) { add('parse-error'); continue }
+  if (file.parseDiagnostics.length) { add('parse-error'); return issues }
   const options = configFor(entry.path)
   const check = node => {
     const specifier = literal(node)
@@ -104,5 +107,53 @@ for (const entry of input.entries) {
     ts.forEachChild(node, visit)
   }
   visit(file)
+  return issues
 }
-process.stdout.write(JSON.stringify(issues))
+
+async function stream() {
+  const lines = readline.createInterface({ input: process.stdin, crlfDelay: Infinity })
+  const iterator = lines[Symbol.asyncIterator]()
+  const read = async () => {
+    const next = await iterator.next()
+    if (next.done) throw new Error('Incomplete module stream')
+    return JSON.parse(next.value)
+  }
+  const emit = value => new Promise((resolve, reject) => {
+    process.stdout.write(JSON.stringify(value) + '\n', error => error ? reject(error) : resolve())
+  })
+  try {
+    const header = await read()
+    if (!header || header.protocol !== 'memlia-imports-v1' || typeof header.root !== 'string' ||
+        !Number.isSafeInteger(header.count) || header.count < 0) throw new Error('Invalid stream header')
+    root = path.resolve(header.root)
+    for (let index = 0; index < header.count; index++) {
+      const frame = await read()
+      if (!frame || frame.index !== index || Object.keys(frame).length !== 2) {
+        throw new Error('Invalid module sequence')
+      }
+      await emit({ index, issues: inspectEntry(frame.entry) })
+    }
+    const end = await read()
+    if (!end || end.end !== header.count || Object.keys(end).length !== 1 ||
+        !(await iterator.next()).done) throw new Error('Invalid stream end')
+    await emit({ end: header.count })
+  } finally {
+    lines.close()
+  }
+}
+
+if (process.argv[2] === '--stream') {
+  try { await stream() } catch {
+    process.stderr.write('Invalid or incomplete module stream\n')
+    process.exitCode = 1
+  }
+} else {
+  // Keep the original JSON interface for callers and equivalence checks.
+  const input = JSON.parse(fs.readFileSync(0, 'utf8'))
+  root = path.resolve(input.root)
+  const issues = []
+  for (const entry of input.entries) {
+    for (const issue of inspectEntry(entry)) issues.push(issue)
+  }
+  process.stdout.write(JSON.stringify(issues))
+}
