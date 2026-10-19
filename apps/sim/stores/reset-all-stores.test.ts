@@ -20,9 +20,11 @@ const {
 vi.mock('@/app/_shell/providers/get-query-client', () => ({
   getQueryClient: mockGetQueryClient,
 }))
-vi.mock('@/stores/user-data-reset-registry', () => ({
-  resetRegisteredUserData: mockResetRegisteredUserData,
-}))
+vi.mock('@/stores/user-data-reset-registry', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/stores/user-data-reset-registry')>()
+  mockResetRegisteredUserData.mockImplementation(actual.resetRegisteredUserData)
+  return { ...actual, resetRegisteredUserData: mockResetRegisteredUserData }
+})
 vi.mock('@/stores/execution', () => ({
   useExecutionStore: { getState: () => ({ reset: vi.fn() }) },
 }))

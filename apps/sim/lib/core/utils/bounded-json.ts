@@ -1,3 +1,4 @@
+// Modified by Memlia: optionally capture strict JSON without lossy coercion for previews.
 const MAX_JSON_NODES = 100_000
 const MAX_JSON_DEPTH = 64
 
@@ -117,7 +118,13 @@ export function isJsonWithinByteLimit(value: unknown, maxBytes: number): boolean
 }
 
 /** Captures bounded plain JSON once, without executing accessors or serializing the source graph. */
-export function stringifyBoundedJson(value: unknown, maxBytes: number): string | undefined {
+export function stringifyBoundedJson(
+  value: unknown,
+  maxBytes: number,
+  options: { strict?: boolean } = {}
+): string | undefined {
+  const strict = options.strict === true
+  if (strict && (!Number.isSafeInteger(maxBytes) || maxBytes < 0)) return undefined
   let nodes = 0
   let bytes = 0
   const invalid = Symbol('invalid JSON')
@@ -133,37 +140,62 @@ export function stringifyBoundedJson(value: unknown, maxBytes: number): string |
       if (count === undefined || !addBytes(count)) return invalid
       return item
     }
+    if (item === undefined && strict) return invalid
     if (item === null || item === undefined) return addBytes(4) ? item : invalid
-    if (typeof item === 'number')
+    if (typeof item === 'number') {
+      if (strict && !Number.isFinite(item)) return invalid
       return addBytes(Number.isFinite(item) ? String(item).length : 4) ? item : invalid
+    }
     if (typeof item === 'boolean') return addBytes(item ? 4 : 5) ? item : invalid
     if (typeof item !== 'object' || ancestors.has(item) || 'toJSON' in item) return invalid
     const prototype = Object.getPrototypeOf(item)
     const isArray = Array.isArray(item)
     if (!isArray && prototype !== Object.prototype && prototype !== null) return invalid
+    if (strict && isArray && prototype !== Array.prototype && prototype !== null) return invalid
+    // One descriptor snapshot: validation and capture consume the same owned data.
+    const descriptors = strict ? Object.getOwnPropertyDescriptors(item) : undefined
+    if (descriptors) {
+      const keys = Reflect.ownKeys(descriptors)
+      if (keys.length > MAX_JSON_NODES - nodes + (isArray ? 1 : 0)) return invalid
+      for (const key of keys) {
+        if (typeof key !== 'string') return invalid
+        const field = descriptors[key]
+        if (!('value' in field)) return invalid
+        if (isArray && key === 'length') continue
+        if (!field.enumerable) return invalid
+        if (isArray && (!/^(0|[1-9]\d*)$/.test(key) || Number(key) >= descriptors.length.value))
+          return invalid
+      }
+    }
     if (!addBytes(2)) return invalid
     ancestors.add(item)
     const snapshot: Record<string, unknown> | unknown[] = isArray
       ? Object.setPrototypeOf([], null)
       : Object.create(null)
     if (isArray) {
-      const length = Object.getOwnPropertyDescriptor(item, 'length')?.value
+      const length = (descriptors?.length ?? Object.getOwnPropertyDescriptor(item, 'length'))?.value
       if (typeof length !== 'number' || length > MAX_JSON_NODES - nodes) return invalid
       for (let index = 0; index < length; index++) {
-        const field = Object.getOwnPropertyDescriptor(item, index)
+        const field = descriptors
+          ? descriptors[index]
+          : Object.getOwnPropertyDescriptor(item, index)
+        if (strict && !field) return invalid
         if (field && !('value' in field)) return invalid
         if (index > 0 && !addBytes(1)) return invalid
-        const captured = capture(field?.value ?? null, depth + 1)
+        const captured = capture(strict ? field!.value : (field?.value ?? null), depth + 1)
         if (captured === invalid) return invalid
         Object.defineProperty(snapshot, index, { value: captured, enumerable: true })
       }
     } else {
       let fields = 0
-      for (const key in item) {
-        const field = Object.getOwnPropertyDescriptor(item, key)
+      for (const key in descriptors ?? item) {
+        const field = descriptors
+          ? Object.getOwnPropertyDescriptor(descriptors, key)?.value
+          : Object.getOwnPropertyDescriptor(item, key)
         if (!field || !field.enumerable) continue
         if (!('value' in field)) return invalid
         if (field.value === undefined) {
+          if (strict) return invalid
           if (++nodes > MAX_JSON_NODES) return invalid
           continue
         }

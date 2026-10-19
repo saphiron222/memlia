@@ -133,27 +133,54 @@ describe('PUT internal CAS transport (writer/auth doubles)', () => {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
     })
-  it('passes expectedRevision and returns the same mutation receipt', async () => {
+  it.each([0, 7])(
+    'passes expectedRevision %s and returns the same mutation receipt',
+    async (revision) => {
+      writer.save.mockResolvedValue({
+        success: true,
+        warnings: [],
+        baseRevision: revision,
+        draftRevision: revision + 1,
+      })
+      const response = await PUT(
+        put({ blocks: {}, edges: [], expectedRevision: revision }),
+        context()
+      )
+      expect(response.status).toBe(200)
+      expect(writer.save).toHaveBeenCalledWith(
+        expect.objectContaining({ expectedRevision: revision })
+      )
+      expect(await response.json()).toEqual({
+        success: true,
+        warnings: [],
+        baseRevision: revision,
+        draftRevision: revision + 1,
+      })
+    }
+  )
+  it.each([
+    ['omitted', undefined],
+    ['null', null],
+    ['negative', -1],
+    ['fractional', 1.5],
+    ['string', '7'],
+    ['unsafe integer', Number.MAX_SAFE_INTEGER + 1],
+    ['boolean', true],
+    ['object', {}],
+    ['array', []],
+  ])('rejects %s revision before calling the save use case', async (_label, expectedRevision) => {
+    // A permissive writer would return success: only the real HTTP parser may reject this body.
     writer.save.mockResolvedValue({
       success: true,
       warnings: [],
       baseRevision: 7,
       draftRevision: 8,
     })
-    const response = await PUT(put({ blocks: {}, edges: [], expectedRevision: 7 }), context())
-    expect(response.status).toBe(200)
-    expect(writer.save).toHaveBeenCalledWith(expect.objectContaining({ expectedRevision: 7 }))
-    expect(await response.json()).toEqual({
-      success: true,
-      warnings: [],
-      baseRevision: 7,
-      draftRevision: 8,
-    })
-  })
-  it('rejects invalid supplied revision before writing', async () => {
-    const response = await PUT(put({ blocks: {}, edges: [], expectedRevision: '7' }), context())
+    const response = await PUT(put({ blocks: {}, edges: [], expectedRevision }), context())
     expect(response.status).toBe(400)
     expect(writer.save).not.toHaveBeenCalled()
+    expect(dbChainMockFns.transaction).not.toHaveBeenCalled()
+    expect(dbChainMockFns.update).not.toHaveBeenCalled()
   })
   it('does not turn a conflict into success or retry', async () => {
     writer.save.mockResolvedValue({ success: false, status: 409, error: 'Workflow draft changed' })

@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Memlia. All rights reserved.
 
 import { createSessionPrincipal } from '@sim/testing/factories/principal.factory'
-import { auditMock } from '@sim/testing/mocks/audit.mock'
+import { auditMock, auditMockFns } from '@sim/testing/mocks/audit.mock'
 import { blockVisibilityMock } from '@sim/testing/mocks/block-visibility.mock'
 import { customBlockOperationsMock } from '@sim/testing/mocks/custom-block-operations.mock'
 import { integrationsAvailabilityMock } from '@sim/testing/mocks/integrations-availability.mock'
@@ -20,6 +20,20 @@ import {
   workspaceContextMockFns,
 } from '@sim/testing/mocks/workspace-context.mock'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+const previewInfra = vi.hoisted(() => ({ snapshot: vi.fn(), replace: vi.fn(), ids: vi.fn() }))
+vi.mock('@/lib/workflows/persistence/utils', () => ({
+  loadWorkflowDraftSnapshot: previewInfra.snapshot,
+}))
+vi.mock('@/lib/workflows/persistence/replace-normalized-state', async (original) => ({
+  ...(await original<typeof import('@/lib/workflows/persistence/replace-normalized-state')>()),
+  replaceWorkflowNormalizedState: previewInfra.replace,
+  assertWorkflowGraphIdsUnclaimed: previewInfra.ids,
+}))
+vi.mock('@/lib/permission-groups/config-scope.server', () => ({
+  resolvePermissionGroupConfig: async () => null,
+}))
+vi.mock('@/lib/workflows/deployment-status', () => ({ checkNeedsRedeployment: async () => false }))
 
 // Real provider loops, SSE parsers, argument preparation, catalogue use cases and
 // schemas. Only HTTP, database/authz lookups and unrelated tool effects are doubles.
@@ -1308,5 +1322,369 @@ describe('catalogue provider binding — real loops, local HTTP doubles', () => 
           !('workspaceId' in tool.parameters.properties)
       )
     ).toBe(true)
+  })
+})
+
+describe('optional preview — native providers and edit engine, HTTP/DB doubles', () => {
+  const blockId = '11111111-1111-4111-8111-111111111111'
+  const workflow = {
+    workflowId: 'bound-workflow',
+    policy: 'sanitized_details' as const,
+    previewOperations: true as const,
+  }
+  const request = () => ({
+    expectedRevision: 7,
+    layout: 'none',
+    operations: [{ operation_type: 'edit', block_id: blockId, params: { name: 'After' } }],
+  })
+  const snapshot = () => ({
+    draftRevision: 7,
+    state: {
+      blocks: {
+        [blockId]: {
+          id: blockId,
+          type: 'function',
+          name: 'Before',
+          enabled: true,
+          position: { x: 0, y: 0 },
+          outputs: {},
+          subBlocks: { code: { id: 'code', type: 'code', value: 'return "PRIVATE_GRAPH_CANARY"' } },
+        },
+      },
+      edges: [],
+      loops: {},
+      parallels: {},
+    },
+  })
+  beforeEach(async () => {
+    const { FunctionBlock } = await import('@/blocks/blocks/function')
+    vi.mocked(getBlock).mockReturnValue(FunctionBlock)
+    workspaceAuthzMockFns.mockResolveEffectiveWorkspacePermission.mockResolvedValue('write')
+    workflowContextMockFns.mockResolveActiveWorkflowApplicationContext
+      .mockReset()
+      .mockResolvedValue({
+        workflowId: 'bound-workflow',
+        workflow: { id: 'bound-workflow', workspaceId: scope.workspaceId },
+        workspaceId: scope.workspaceId,
+        workspaceOrganizationId: null,
+        allowPersonalApiKeys: true,
+        billedAccountUserId: 'other-payer',
+      })
+    previewInfra.snapshot.mockReset().mockImplementation(async () => snapshot())
+    previewInfra.replace.mockReset().mockRejectedValue(new Error('Preview must not persist'))
+    previewInfra.ids.mockReset().mockResolvedValue(undefined)
+    auditMockFns.mockRecordAudit.mockClear()
+  })
+  function start(
+    provider: 'openai' | 'anthropic',
+    input: Record<string, unknown>,
+    overrides: Partial<Parameters<typeof runCatalogProvider>[0]> = {}
+  ) {
+    const name = 'preview_workflow_operations'
+    const http = vi
+      .fn()
+      .mockResolvedValueOnce(
+        provider === 'openai'
+          ? sse(response([toolCall(name, input)]))
+          : anthropicSse(true, { name, input })
+      )
+      .mockResolvedValueOnce(provider === 'openai' ? answer() : anthropicSse())
+    vi.stubGlobal('fetch', http)
+    const run = runCatalogProvider({
+      ...scope,
+      provider,
+      request: { ...modelRequest, model: provider === 'openai' ? 'gpt-4.1' : 'claude-sonnet-4-5' },
+      workflow,
+      ...overrides,
+    })
+    return { http, run }
+  }
+  async function turn(provider: 'openai' | 'anthropic', input: Record<string, unknown>) {
+    const { http, run } = start(provider, input)
+    const events = await collect(run.stream)
+    const body = JSON.parse(http.mock.calls[1][1].body)
+    const output =
+      provider === 'openai'
+        ? body.input.find((x: { type: string }) => x.type === 'function_call_output').output
+        : body.messages
+            .flatMap((x: { content: unknown[] }) => x.content)
+            .find((x: { type: string }) => x.type === 'tool_result').content
+    return { http, run, events, body, output: JSON.parse(output) }
+  }
+  it.each(['openai', 'anthropic'] as const)(
+    'announces the exact v2 request and executes a native preview with %s',
+    async (provider) => {
+      const { v2ApplyWorkflowOperationsBodySchema } = await import(
+        '@/lib/api/contracts/v2/workflows'
+      )
+      const { z } = await import('zod')
+      const { $schema: _dialect, ...native } = z.toJSONSchema(v2ApplyWorkflowOperationsBodySchema, {
+        io: 'input',
+      })
+      const result = await turn(provider, { request: request() })
+      const first = JSON.parse(result.http.mock.calls[0][1].body)
+      const tool = first.tools.find(
+        (x: { name: string }) => x.name === 'preview_workflow_operations'
+      )
+      const schema = provider === 'openai' ? tool.parameters : tool.input_schema
+      // Every local JSON pointer must resolve from the actual SDK schema root.
+      const pending: unknown[] = [schema]
+      let references = 0
+      while (pending.length) {
+        const node = pending.pop()
+        if (!node || typeof node !== 'object') continue
+        for (const [key, value] of Object.entries(node)) {
+          if (key === '$ref') {
+            expect(typeof value).toBe('string')
+            const pointer = value as string
+            expect(pointer.startsWith('#/')).toBe(true)
+            let target: unknown = schema
+            for (const part of pointer.slice(2).split('/')) {
+              const field = part.replace(/~1/g, '/').replace(/~0/g, '~')
+              expect(target).toHaveProperty(field)
+              target = (target as Record<string, unknown>)[field]
+            }
+            references++
+          } else pending.push(value)
+        }
+      }
+      expect(references).toBeGreaterThan(0)
+      // Only the pointer location changes; all native constraints and $defs survive.
+      const originalLocation = JSON.stringify(schema.properties.request).replaceAll(
+        '"$ref":"#/properties/request/',
+        '"$ref":"#/'
+      )
+      expect(JSON.parse(originalLocation)).toEqual(native)
+      expect(schema.required).toEqual(['request'])
+      expect(first.tools).toHaveLength(7)
+      expect(JSON.stringify(first.tools)).not.toContain('bound-workflow')
+      expect(result.output).toMatchObject({
+        dryRun: true,
+        persisted: false,
+        baseRevision: 7,
+        draftRevision: 7,
+        applied: 1,
+      })
+      expect(JSON.stringify(result.body)).not.toMatch(/PRIVATE_GRAPH_CANARY|"graph"/)
+      expect(result.run.usage()).toEqual({ modelCalls: 2, toolCalls: 1 })
+      expect(previewInfra.replace).not.toHaveBeenCalled()
+      expect(auditMockFns.mockRecordAudit).not.toHaveBeenCalled()
+    }
+  )
+  it.each(['openai', 'anthropic'] as const)(
+    'keeps atomic refusal diagnostics in model data and raw failure with %s',
+    async (provider) => {
+      const result = await turn(provider, {
+        request: {
+          expectedRevision: 7,
+          atomic: true,
+          layout: 'none',
+          operations: [{ operation_type: 'delete', block_id: 'PRIVATE_MISSING_ID' }],
+        },
+      })
+      expect(result.output).toMatchObject({
+        ok: false,
+        error: { code: 'atomic_refused' },
+        diagnostics: { skipped: [{ code: 'block_not_found', operationIndexes: [0] }] },
+      })
+      // Native conversation history retains the model's own submitted arguments.
+      expect(JSON.stringify(result.output)).not.toContain('PRIVATE_MISSING_ID')
+      expect(result.events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'tool_call_end', status: 'error' }),
+        ])
+      )
+      expect(previewInfra.replace).not.toHaveBeenCalled()
+    }
+  )
+  it.each([
+    { workflowId: 'bound-workflow', policy: 'summary_only', previewOperations: true },
+    { workflowId: 'bound-workflow', policy: 'sanitized_details', previewOperations: false },
+    { workflowId: 'bound-workflow', policy: 'sanitized_details', previewOperations: 'true' },
+  ])('refuses invalid opt-in before HTTP: %j', (selection) => {
+    const http = vi.fn()
+    vi.stubGlobal('fetch', http)
+    expect(() =>
+      runCatalogProvider({
+        ...scope,
+        provider: 'openai',
+        request: modelRequest,
+        workflow: selection,
+      } as never)
+    ).toThrow('Invalid workflow read binding.')
+    expect(http).not.toHaveBeenCalled()
+  })
+  it.each(['openai', 'anthropic'] as const)(
+    'cannot enable preview from model arguments when server opt-in is absent: %s',
+    async (provider) => {
+      for (const selection of [
+        undefined,
+        { workflowId: 'bound-workflow', policy: 'summary_only' as const },
+        { workflowId: 'bound-workflow', policy: 'sanitized_details' as const },
+      ]) {
+        clearProviderClientCacheForTests()
+        const { http, run } = start(
+          provider,
+          { request: request(), previewOperations: true },
+          { workflow: selection }
+        )
+        const events = await collect(run.stream)
+        expect(events).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ type: 'tool_call_end', status: 'error' }),
+          ])
+        )
+        const first = JSON.parse(http.mock.calls[0][1].body)
+        expect(
+          first.tools.some((x: { name: string }) => x.name === 'preview_workflow_operations')
+        ).toBe(false)
+        expect(http).toHaveBeenCalledTimes(2)
+        expect(run.usage()).toEqual({ modelCalls: 2, toolCalls: 0 })
+        expect(toolsMockFns.mockExecuteTool).not.toHaveBeenCalled()
+        expect(previewInfra.snapshot).not.toHaveBeenCalled()
+      }
+    }
+  )
+  it.each(['openai', 'anthropic'] as const)(
+    'rejects identity and option injections in both request layers: %s',
+    async (provider) => {
+      for (const input of [
+        { request: request(), workspaceId: 'foreign' },
+        { request: request(), workflowId: 'foreign' },
+        { request: { ...request(), principal: { userId: 'owner' } } },
+        { request: { ...request(), dryRun: false } },
+        { request: { ...request(), baseGraph: {} } },
+        { request: { ...request(), previewOperations: true } },
+        { request: { operations: request().operations } },
+      ]) {
+        clearProviderClientCacheForTests()
+        const result = await turn(provider, input)
+        expect(result.output).toMatchObject({ ok: false, error: { code: 'invalid_input' } })
+        expect(previewInfra.snapshot).not.toHaveBeenCalled()
+      }
+    }
+  )
+  it.each(['openai', 'anthropic'] as const)(
+    'preserves native revision and permission refusals through %s',
+    async (provider) => {
+      const conflict = await turn(provider, { request: { ...request(), expectedRevision: 6 } })
+      expect(conflict.output).toMatchObject({ ok: false, error: { code: 'revision_conflict' } })
+      clearProviderClientCacheForTests()
+      previewInfra.snapshot.mockClear()
+      workspaceAuthzMockFns.mockResolveEffectiveWorkspacePermission.mockResolvedValue('read')
+      const denied = await turn(provider, { request: request() })
+      expect(denied.output).toMatchObject({ ok: false, error: { code: 'forbidden' } })
+      expect(previewInfra.snapshot).not.toHaveBeenCalled()
+      expect(previewInfra.replace).not.toHaveBeenCalled()
+    }
+  )
+  it.each(['openai', 'anthropic'] as const)(
+    'withholds an incoherent canonical workspace through %s',
+    async (provider) => {
+      workflowContextMockFns.mockResolveActiveWorkflowApplicationContext.mockResolvedValue({
+        workflowId: 'bound-workflow',
+        workflow: { id: 'bound-workflow', workspaceId: 'foreign' },
+        workspaceId: 'foreign',
+        workspaceOrganizationId: null,
+        allowPersonalApiKeys: true,
+        billedAccountUserId: 'other-payer',
+      })
+      const result = await turn(provider, { request: request() })
+      expect(result.output).toMatchObject({ ok: false, error: { code: 'unavailable' } })
+      expect(previewInfra.replace).not.toHaveBeenCalled()
+    }
+  )
+  it.each(['openai', 'anthropic'] as const)(
+    'keeps model/tool budgets and cancellation for preview with %s',
+    async (provider) => {
+      for (const boundary of ['model', 'tool'] as const) {
+        clearProviderClientCacheForTests()
+        previewInfra.snapshot.mockClear()
+        const { http, run } = start(
+          provider,
+          { request: request() },
+          { limits: boundary === 'model' ? { maxModelCalls: 1 } : { maxToolCalls: 0 } }
+        )
+        await expect(collect(run.stream)).rejects.toMatchObject({
+          code: boundary === 'model' ? 'model_calls' : 'tool_calls',
+        })
+        expect(http).toHaveBeenCalledTimes(1)
+        expect(run.usage()).toEqual({ modelCalls: 1, toolCalls: boundary === 'model' ? 1 : 0 })
+        if (boundary === 'tool') expect(previewInfra.snapshot).not.toHaveBeenCalled()
+      }
+      clearProviderClientCacheForTests()
+      let release!: () => void
+      const wait = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      previewInfra.snapshot.mockReset().mockImplementation(async () => {
+        await wait
+        return snapshot()
+      })
+      previewInfra.ids.mockClear()
+      const abort = new AbortController()
+      const { http, run } = start(provider, { request: request() }, { signal: abort.signal })
+      const pending = collect(run.stream)
+      try {
+        await vi.waitFor(() => expect(previewInfra.snapshot).toHaveBeenCalledTimes(1))
+        abort.abort(new DOMException('Fixture cancellation', 'AbortError'))
+        await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+        expect(http).toHaveBeenCalledTimes(1)
+        expect(run.usage()).toEqual({ modelCalls: 1, toolCalls: 1 })
+      } finally {
+        release()
+      }
+      await new Promise((resolve) => setTimeout(resolve, 30))
+      expect(previewInfra.ids).not.toHaveBeenCalled()
+      expect(previewInfra.replace).not.toHaveBeenCalled()
+    }
+  )
+  it('captures the server selection and preview principal before awaiting HTTP', async () => {
+    const mutablePrincipal = createSessionPrincipal({ userId: 'catalog-reader' })
+    const mutableWorkflow = { ...workflow }
+    const { run } = start(
+      'openai',
+      { request: request() },
+      { principal: mutablePrincipal, workflow: mutableWorkflow }
+    )
+    mutablePrincipal.userId = 'different-user'
+    mutableWorkflow.workflowId = 'foreign'
+    const events = await collect(run.stream)
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'tool_call_end', status: 'success' }),
+      ])
+    )
+    expect(workflowContextMockFns.mockResolveActiveWorkflowApplicationContext).toHaveBeenCalledWith(
+      { workflowId: 'bound-workflow', assertedWorkspaceId: 'workspace-1' }
+    )
+    expect(
+      workspaceAuthzMockFns.mockResolveEffectiveWorkspacePermission.mock.calls.at(-1)?.[0]
+    ).toBe('catalog-reader')
+  })
+  it.each([
+    'https://invalid.example/schema',
+    '#/$defs/missing',
+    '#/~2invalid',
+    '#/description',
+    '#/properties',
+  ])('refuses unsupported or dangling generated refs before HTTP: %s', async (reference) => {
+    const { z } = await import('zod')
+    const { workflowPreviewInputs } = await import('./workflow-preview-tools')
+    // Fault injection through the real generator's metadata, restored after the test.
+    const schema = workflowPreviewInputs.preview_workflow_operations
+    const metadata = z.globalRegistry.get(schema)
+    z.globalRegistry.add(schema, { ...metadata, $ref: reference })
+    const http = vi.fn()
+    vi.stubGlobal('fetch', http)
+    try {
+      expect(() =>
+        runCatalogProvider({ ...scope, provider: 'openai', request: modelRequest, workflow })
+      ).toThrow('Unsupported workflow preview schema reference.')
+      expect(http).not.toHaveBeenCalled()
+    } finally {
+      if (metadata) z.globalRegistry.add(schema, metadata)
+      else z.globalRegistry.remove(schema)
+    }
   })
 })

@@ -1,3 +1,4 @@
+// Modified by Memlia: preserve canonical snapshots when displaying persisted diffs.
 import { createLogger } from '@sim/logger'
 import { getErrorMessage, toError } from '@sim/utils/errors'
 import { generateId } from '@sim/utils/id'
@@ -225,9 +226,13 @@ export class WorkflowDiffEngine {
   async createDiffFromWorkflowState(
     proposedState: WorkflowState,
     diffAnalysis?: DiffAnalysis,
-    baselineOverride?: WorkflowState
+    baselineOverride?: WorkflowState,
+    mode: 'proposal' | 'persisted_snapshot' = 'proposal'
   ): Promise<DiffResult & { diff?: WorkflowDiff }> {
     try {
+      proposedState = structuredClone(proposedState)
+      baselineOverride = baselineOverride ? structuredClone(baselineOverride) : undefined
+      diffAnalysis = diffAnalysis ? structuredClone(diffAnalysis) : undefined
       logger.info('WorkflowDiffEngine.createDiffFromWorkflowState called with:', {
         blockCount: Object.keys(proposedState.blocks || {}).length,
         edgeCount: proposedState.edges?.length || 0,
@@ -274,258 +279,263 @@ export class WorkflowDiffEngine {
         )
       }
 
-      // Build a map of existing blocks by type:name for matching
-      const existingBlockMap: Record<string, { id: string; block: BlockState }> = {}
-      for (const [id, block] of Object.entries(mergedBaseline.blocks)) {
-        const key = `${block.type}:${block.name}`
-        existingBlockMap[key] = { id, block }
-      }
-
-      // Create ID mapping - preserve existing IDs where blocks match by type:name
-      const idMap: Record<string, string> = {}
-      const finalBlocks: Record<string, BlockState & BlockWithDiff> = {}
-
-      // First pass: build ID mappings
-      for (const [proposedId, proposedBlock] of Object.entries(proposedState.blocks)) {
-        // CRITICAL: Skip invalid block IDs to prevent "undefined" keys in workflow state
-        if (!isValidKey(proposedId)) {
-          logger.error('Invalid proposedId detected in proposed state', {
-            proposedId,
-            proposedId_type: typeof proposedId,
-            blockType: proposedBlock?.type,
-            blockName: proposedBlock?.name,
-          })
-          continue
+      let fullyCleanedState: WorkflowState = proposedState
+      let finalBlocks: Record<string, BlockState & BlockWithDiff> = proposedState.blocks
+      if (mode !== 'persisted_snapshot') {
+        // Build a map of existing blocks by type:name for matching
+        const existingBlockMap: Record<string, { id: string; block: BlockState }> = {}
+        for (const [id, block] of Object.entries(mergedBaseline.blocks)) {
+          const key = `${block.type}:${block.name}`
+          existingBlockMap[key] = { id, block }
         }
 
-        const key = `${proposedBlock.type}:${proposedBlock.name}`
+        // Create ID mapping - preserve existing IDs where blocks match by type:name
+        const idMap: Record<string, string> = {}
+        finalBlocks = {}
 
-        // Check if this block exists in current state by type:name
-        if (existingBlockMap[key]) {
-          // Preserve existing ID
-          idMap[proposedId] = existingBlockMap[key].id
-        } else if (isUuid(proposedId)) {
-          // New block with a valid UUID (e.g., from server's DB save) — keep it.
-          // Minting a new UUID would create a mismatch between the client store
-          // and the database, causing foreign key violations on subsequent
-          // socket operations.
-          idMap[proposedId] = proposedId
-        } else {
-          // New block with a non-UUID ID (e.g., from YAML parsing) — mint a UUID
-          idMap[proposedId] = generateId()
-        }
-      }
+        // First pass: build ID mappings
+        for (const [proposedId, proposedBlock] of Object.entries(proposedState.blocks)) {
+          // CRITICAL: Skip invalid block IDs to prevent "undefined" keys in workflow state
+          if (!isValidKey(proposedId)) {
+            logger.error('Invalid proposedId detected in proposed state', {
+              proposedId,
+              proposedId_type: typeof proposedId,
+              blockType: proposedBlock?.type,
+              blockName: proposedBlock?.name,
+            })
+            continue
+          }
 
-      // Second pass: build final blocks with mapped IDs
-      for (const [proposedId, proposedBlock] of Object.entries(proposedState.blocks)) {
-        // CRITICAL: Skip invalid block IDs to prevent "undefined" keys in workflow state
-        if (!isValidKey(proposedId)) {
-          logger.error('Invalid proposedId detected in proposed state (second pass)', {
-            proposedId,
-            proposedId_type: typeof proposedId,
-            blockType: proposedBlock?.type,
-            blockName: proposedBlock?.name,
-          })
-          continue
-        }
+          const key = `${proposedBlock.type}:${proposedBlock.name}`
 
-        const finalId = idMap[proposedId]
-
-        // CRITICAL: Validate finalId before using as key
-        if (!isValidKey(finalId)) {
-          logger.error('Invalid finalId generated from idMap', {
-            proposedId,
-            finalId,
-            finalId_type: typeof finalId,
-            blockType: proposedBlock?.type,
-            blockName: proposedBlock?.name,
-          })
-          continue
-        }
-
-        const key = `${proposedBlock.type}:${proposedBlock.name}`
-        const existingBlock = existingBlockMap[key]?.block
-
-        // Merge with existing block if found, otherwise use proposed.
-        // Position strategy depends on whether the block's scope changed:
-        // - Same scope (parentId unchanged): preserve existing position so
-        //   unchanged blocks anchor correctly for targeted layout.
-        // - Different scope (parentId changed): use proposed position because
-        //   the coordinate system changed (absolute ↔ relative-to-container).
-        const existingParent = existingBlock?.data?.parentId ?? null
-        const proposedParentRaw = proposedBlock.data?.parentId ?? null
-        const proposedParent = proposedParentRaw
-          ? (idMap[proposedParentRaw] ?? proposedParentRaw)
-          : null
-        const scopeChanged = existingBlock ? existingParent !== proposedParent : false
-
-        const finalBlock: BlockState & BlockWithDiff = existingBlock
-          ? {
-              ...existingBlock,
-              ...proposedBlock,
-              id: finalId,
-              position: scopeChanged ? proposedBlock.position : existingBlock.position,
-            }
-          : {
-              ...proposedBlock,
-              id: finalId,
-            }
-
-        // Update parentId in data if it exists and has been remapped
-        if (finalBlock.data?.parentId && idMap[finalBlock.data.parentId]) {
-          finalBlock.data = {
-            ...finalBlock.data,
-            parentId: idMap[finalBlock.data.parentId],
+          // Check if this block exists in current state by type:name
+          if (existingBlockMap[key]) {
+            // Preserve existing ID
+            idMap[proposedId] = existingBlockMap[key].id
+          } else if (isUuid(proposedId)) {
+            // New block with a valid UUID (e.g., from server's DB save) — keep it.
+            // Minting a new UUID would create a mismatch between the client store
+            // and the database, causing foreign key violations on subsequent
+            // socket operations.
+            idMap[proposedId] = proposedId
+          } else {
+            // New block with a non-UUID ID (e.g., from YAML parsing) — mint a UUID
+            idMap[proposedId] = generateId()
           }
         }
 
-        finalBlocks[finalId] = finalBlock
-      }
+        // Second pass: build final blocks with mapped IDs
+        for (const [proposedId, proposedBlock] of Object.entries(proposedState.blocks)) {
+          // CRITICAL: Skip invalid block IDs to prevent "undefined" keys in workflow state
+          if (!isValidKey(proposedId)) {
+            logger.error('Invalid proposedId detected in proposed state (second pass)', {
+              proposedId,
+              proposedId_type: typeof proposedId,
+              blockType: proposedBlock?.type,
+              blockName: proposedBlock?.name,
+            })
+            continue
+          }
 
-      // Map edges with new IDs and standardized handles
-      const edgeMap = new Map<string, Edge>()
+          const finalId = idMap[proposedId]
 
-      proposedState.edges.forEach((edge) => {
-        const source = idMap[edge.source] || edge.source
-        const target = idMap[edge.target] || edge.target
-        const sourceHandle = edge.sourceHandle || 'source'
-        const targetHandle = edge.targetHandle || 'target'
+          // CRITICAL: Validate finalId before using as key
+          if (!isValidKey(finalId)) {
+            logger.error('Invalid finalId generated from idMap', {
+              proposedId,
+              finalId,
+              finalId_type: typeof finalId,
+              blockType: proposedBlock?.type,
+              blockName: proposedBlock?.name,
+            })
+            continue
+          }
 
-        // Create a unique key for deduplication
-        const edgeKey = `${source}-${sourceHandle}-${target}-${targetHandle}`
+          const key = `${proposedBlock.type}:${proposedBlock.name}`
+          const existingBlock = existingBlockMap[key]?.block
 
-        // Only add if we haven't seen this edge combination before
-        if (!edgeMap.has(edgeKey)) {
-          edgeMap.set(edgeKey, {
-            ...edge,
-            id: generateId(), // Use UUID for unique edge IDs
-            source,
-            target,
-            sourceHandle,
-            targetHandle,
-            type: edge.type || 'workflowEdge',
-          })
-        }
-      })
+          // Merge with existing block if found, otherwise use proposed.
+          // Position strategy depends on whether the block's scope changed:
+          // - Same scope (parentId unchanged): preserve existing position so
+          //   unchanged blocks anchor correctly for targeted layout.
+          // - Different scope (parentId changed): use proposed position because
+          //   the coordinate system changed (absolute ↔ relative-to-container).
+          const existingParent = existingBlock?.data?.parentId ?? null
+          const proposedParentRaw = proposedBlock.data?.parentId ?? null
+          const proposedParent = proposedParentRaw
+            ? (idMap[proposedParentRaw] ?? proposedParentRaw)
+            : null
+          const scopeChanged = existingBlock ? existingParent !== proposedParent : false
 
-      const finalEdges: Edge[] = Array.from(edgeMap.values())
-
-      // Build final proposed state
-      // Always regenerate loops and parallels from finalBlocks because the block IDs may have
-      // been remapped (via idMap) and the server's loops/parallels would have stale references.
-      // This ensures the nodes arrays in loops/parallels contain the correct (remapped) block IDs,
-      // which is critical for variable resolution in the tag dropdown.
-      const { generateLoopBlocks, generateParallelBlocks } = await import(
-        '@sim/workflow-persistence/subflow-helpers'
-      )
-
-      // Build the proposed state
-      const finalProposedState: WorkflowState = {
-        blocks: finalBlocks,
-        edges: finalEdges,
-        loops: generateLoopBlocks(finalBlocks),
-        parallels: generateParallelBlocks(finalBlocks),
-        lastSaved: Date.now(),
-      }
-
-      // Use the proposed state directly - validation happens at the source
-      const fullyCleanedState = finalProposedState
-
-      // Transfer block heights from baseline workflow for better measurements in diff view
-      // If editing on top of diff, this transfers from the diff (which already has good heights)
-      // Otherwise transfers from original workflow
-      logger.info('Transferring block heights from baseline workflow', {
-        isEditingOnTopOfDiff,
-        baselineBlockCount: Object.keys(mergedBaseline.blocks).length,
-      })
-      try {
-        const { transferBlockHeights } = await import('@/lib/workflows/autolayout')
-        transferBlockHeights(mergedBaseline.blocks, finalBlocks)
-      } catch (error) {
-        logger.warn('Failed to transfer block heights', {
-          error: toError(error).message,
-        })
-      }
-
-      // Apply autolayout to the proposed state
-      logger.info('Applying autolayout to proposed workflow state')
-      try {
-        const { layoutBlockIds, resizedBlockIds, shiftSourceBlockIds } = getTargetedLayoutImpact({
-          before: mergedBaseline,
-          after: fullyCleanedState,
-        })
-
-        const totalBlocks = Object.keys(finalBlocks).length
-
-        if (
-          layoutBlockIds.length === 0 &&
-          resizedBlockIds.length === 0 &&
-          shiftSourceBlockIds.length === 0
-        ) {
-          logger.info('No blocks need layout; skipping autolayout', {
-            totalBlocks,
-          })
-        } else {
-          // Always use targeted layout for copilot edits. When anchors exist
-          // (some blocks unchanged), they preserve user positions. When no
-          // anchors exist (all blocks are new), targeted layout degrades
-          // gracefully to a full layout from the padding origin — same result
-          // as applyAutoLayout but with one unified code path.
-          logger.info('Using targeted layout for copilot edits', {
-            blocksNeedingLayout: layoutBlockIds.length,
-            resizedAnchorBlocks: resizedBlockIds.length,
-            shiftSourceBlocks: shiftSourceBlockIds.length,
-            anchors: totalBlocks - layoutBlockIds.length,
-            totalBlocks,
-          })
-
-          const { applyTargetedLayout } = await import('@/lib/workflows/autolayout')
-          const { DEFAULT_HORIZONTAL_SPACING, DEFAULT_VERTICAL_SPACING } = await import(
-            '@/lib/workflows/autolayout/constants'
-          )
-
-          const layoutedBlocks = applyTargetedLayout(finalBlocks, fullyCleanedState.edges, {
-            changedBlockIds: layoutBlockIds,
-            resizedBlockIds,
-            shiftSourceBlockIds,
-            horizontalSpacing: DEFAULT_HORIZONTAL_SPACING,
-            verticalSpacing: DEFAULT_VERTICAL_SPACING,
-            previousBlocks: mergedBaseline.blocks,
-          })
-
-          Object.entries(layoutedBlocks).forEach(([id, layoutBlock]) => {
-            if (finalBlocks[id]) {
-              finalBlocks[id].position = layoutBlock.position
-
-              if (layoutBlock.data) {
-                finalBlocks[id].data = {
-                  ...finalBlocks[id].data,
-                  ...layoutBlock.data,
-                }
+          const finalBlock: BlockState & BlockWithDiff = existingBlock
+            ? {
+                ...existingBlock,
+                ...proposedBlock,
+                id: finalId,
+                position: scopeChanged ? proposedBlock.position : existingBlock.position,
+              }
+            : {
+                ...proposedBlock,
+                id: finalId,
               }
 
-              if (layoutBlock.layout) {
-                finalBlocks[id].layout = {
-                  ...finalBlocks[id].layout,
-                  ...layoutBlock.layout,
-                }
-              }
-
-              if (typeof layoutBlock.height === 'number') {
-                finalBlocks[id].height = layoutBlock.height
-              }
+          // Update parentId in data if it exists and has been remapped
+          if (finalBlock.data?.parentId && idMap[finalBlock.data.parentId]) {
+            finalBlock.data = {
+              ...finalBlock.data,
+              parentId: idMap[finalBlock.data.parentId],
             }
-          })
+          }
 
-          logger.info('Successfully applied targeted layout to proposed state', {
-            blocksLayouted: Object.keys(layoutedBlocks).length,
-            blocksNeedingLayout: layoutBlockIds.length,
+          finalBlocks[finalId] = finalBlock
+        }
+
+        // Map edges with new IDs and standardized handles
+        const edgeMap = new Map<string, Edge>()
+
+        proposedState.edges.forEach((edge) => {
+          const source = idMap[edge.source] || edge.source
+          const target = idMap[edge.target] || edge.target
+          const sourceHandle = edge.sourceHandle || 'source'
+          const targetHandle = edge.targetHandle || 'target'
+
+          // Create a unique key for deduplication
+          const edgeKey = `${source}-${sourceHandle}-${target}-${targetHandle}`
+
+          // Only add if we haven't seen this edge combination before
+          if (!edgeMap.has(edgeKey)) {
+            edgeMap.set(edgeKey, {
+              ...edge,
+              id: generateId(), // Use UUID for unique edge IDs
+              source,
+              target,
+              sourceHandle,
+              targetHandle,
+              type: edge.type || 'workflowEdge',
+            })
+          }
+        })
+
+        const finalEdges: Edge[] = Array.from(edgeMap.values())
+
+        // Build final proposed state
+        // Always regenerate loops and parallels from finalBlocks because the block IDs may have
+        // been remapped (via idMap) and the server's loops/parallels would have stale references.
+        // This ensures the nodes arrays in loops/parallels contain the correct (remapped) block IDs,
+        // which is critical for variable resolution in the tag dropdown.
+        const { generateLoopBlocks, generateParallelBlocks } = await import(
+          '@sim/workflow-persistence/subflow-helpers'
+        )
+
+        // Build the proposed state
+        const finalProposedState: WorkflowState = {
+          blocks: finalBlocks,
+          edges: finalEdges,
+          loops: generateLoopBlocks(finalBlocks),
+          parallels: generateParallelBlocks(finalBlocks),
+          variables: structuredClone(proposedState.variables ?? {}),
+          lastSaved: Date.now(),
+        }
+
+        // Use the proposed state directly - validation happens at the source
+        fullyCleanedState = finalProposedState
+
+        // Transfer block heights from baseline workflow for better measurements in diff view
+        // If editing on top of diff, this transfers from the diff (which already has good heights)
+        // Otherwise transfers from original workflow
+        logger.info('Transferring block heights from baseline workflow', {
+          isEditingOnTopOfDiff,
+          baselineBlockCount: Object.keys(mergedBaseline.blocks).length,
+        })
+        try {
+          const { transferBlockHeights } = await import('@/lib/workflows/autolayout')
+          transferBlockHeights(mergedBaseline.blocks, finalBlocks)
+        } catch (error) {
+          logger.warn('Failed to transfer block heights', {
+            error: toError(error).message,
           })
         }
-      } catch (layoutError) {
-        logger.warn('Error applying autolayout, using default positions', {
-          error: toError(layoutError).message,
-        })
+
+        // Apply autolayout to the proposed state
+        logger.info('Applying autolayout to proposed workflow state')
+        try {
+          const { layoutBlockIds, resizedBlockIds, shiftSourceBlockIds } = getTargetedLayoutImpact({
+            before: mergedBaseline,
+            after: fullyCleanedState,
+          })
+
+          const totalBlocks = Object.keys(finalBlocks).length
+
+          if (
+            layoutBlockIds.length === 0 &&
+            resizedBlockIds.length === 0 &&
+            shiftSourceBlockIds.length === 0
+          ) {
+            logger.info('No blocks need layout; skipping autolayout', {
+              totalBlocks,
+            })
+          } else {
+            // Always use targeted layout for copilot edits. When anchors exist
+            // (some blocks unchanged), they preserve user positions. When no
+            // anchors exist (all blocks are new), targeted layout degrades
+            // gracefully to a full layout from the padding origin — same result
+            // as applyAutoLayout but with one unified code path.
+            logger.info('Using targeted layout for copilot edits', {
+              blocksNeedingLayout: layoutBlockIds.length,
+              resizedAnchorBlocks: resizedBlockIds.length,
+              shiftSourceBlocks: shiftSourceBlockIds.length,
+              anchors: totalBlocks - layoutBlockIds.length,
+              totalBlocks,
+            })
+
+            const { applyTargetedLayout } = await import('@/lib/workflows/autolayout')
+            const { DEFAULT_HORIZONTAL_SPACING, DEFAULT_VERTICAL_SPACING } = await import(
+              '@/lib/workflows/autolayout/constants'
+            )
+
+            const layoutedBlocks = applyTargetedLayout(finalBlocks, fullyCleanedState.edges, {
+              changedBlockIds: layoutBlockIds,
+              resizedBlockIds,
+              shiftSourceBlockIds,
+              horizontalSpacing: DEFAULT_HORIZONTAL_SPACING,
+              verticalSpacing: DEFAULT_VERTICAL_SPACING,
+              previousBlocks: mergedBaseline.blocks,
+            })
+
+            Object.entries(layoutedBlocks).forEach(([id, layoutBlock]) => {
+              if (finalBlocks[id]) {
+                finalBlocks[id].position = layoutBlock.position
+
+                if (layoutBlock.data) {
+                  finalBlocks[id].data = {
+                    ...finalBlocks[id].data,
+                    ...layoutBlock.data,
+                  }
+                }
+
+                if (layoutBlock.layout) {
+                  finalBlocks[id].layout = {
+                    ...finalBlocks[id].layout,
+                    ...layoutBlock.layout,
+                  }
+                }
+
+                if (typeof layoutBlock.height === 'number') {
+                  finalBlocks[id].height = layoutBlock.height
+                }
+              }
+            })
+
+            logger.info('Successfully applied targeted layout to proposed state', {
+              blocksLayouted: Object.keys(layoutedBlocks).length,
+              blocksNeedingLayout: layoutBlockIds.length,
+            })
+          }
+        } catch (layoutError) {
+          logger.warn('Error applying autolayout, using default positions', {
+            error: toError(layoutError).message,
+          })
+        }
       }
 
       // Compute diff analysis if not provided

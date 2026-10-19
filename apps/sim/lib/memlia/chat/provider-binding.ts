@@ -13,15 +13,21 @@ import type { AgentStreamEvent } from '@/providers/stream-events'
 import type { ProviderRequest, ProviderToolConfig } from '@/providers/types'
 import { catalogToolInputs, createCatalogTools } from './catalog-tools'
 import { type ModelRunLimits, runModelAdapter } from './model-adapter'
+import { createWorkflowPreviewTools, workflowPreviewInputs } from './workflow-preview-tools'
 import { createWorkflowReadTools, workflowReadInputs } from './workflow-read-tools'
 
 const workflowBinding = z
   .object({
     workflowId: workflowIdParamsSchema.shape.id,
     policy: z.enum(['summary_only', 'sanitized_details']),
+    previewOperations: z.literal(true).optional(),
   })
   .strict()
+  .refine((value) => !value.previewOperations || value.policy === 'sanitized_details')
 const workflowInput = z.object({ request: workflowReadInputs.read_workflow }).strict()
+// Validate the wrapper only here; the preview owns and validates the original body
+// with the exact v2 schema before any await, without prior lossy Zod defaults.
+const workflowPreviewInput = z.object({ request: z.unknown() }).strict()
 const workflowBlockInput = z.object({ request: workflowReadInputs.read_workflow_block }).strict()
 
 type CatalogProviderOptions = Parameters<typeof createCatalogTools>[0] & {
@@ -60,6 +66,13 @@ export function runCatalogProvider(options: CatalogProviderOptions) {
   const catalog = createCatalogTools(options)
   const workflowReads = workflow
     ? createWorkflowReadTools({
+        principal: options.principal,
+        workspaceId: options.workspaceId,
+        workflowId: workflow.workflowId,
+      })
+    : undefined
+  const workflowPreview = workflow?.previewOperations
+    ? createWorkflowPreviewTools({
         principal: options.principal,
         workspaceId: options.workspaceId,
         workflowId: workflow.workflowId,
@@ -110,6 +123,27 @@ export function runCatalogProvider(options: CatalogProviderOptions) {
       })
   }
 
+  if (workflowPreview)
+    tools.push({
+      id: 'preview_workflow_operations',
+      description:
+        'Evaluate operations on the server-selected workflow at the required expectedRevision. Dry run only: no persistence or execution; diagnostics are best effort.',
+      params: {},
+      parameters: {
+        type: 'object',
+        properties: { request: previewJsonInput() },
+        required: ['request'],
+      },
+    })
+
+  async function previewWorkflow(params: unknown, signal: AbortSignal) {
+    const parsed = workflowPreviewInput.safeParse(params)
+    if (!parsed.success || !Object.hasOwn(parsed.data, 'request'))
+      return workflowFailure('invalid_input')
+    if (!workflowPreview) return workflowFailure('forbidden')
+    return workflowPreview.dispatch('preview_workflow_operations', parsed.data.request, signal)
+  }
+
   async function readWorkflow(toolId: string, params: unknown, signal: AbortSignal) {
     const parsed = (toolId === 'read_workflow' ? workflowInput : workflowBlockInput).safeParse(
       params
@@ -132,20 +166,28 @@ export function runCatalogProvider(options: CatalogProviderOptions) {
     async dispatch(toolId, params, signal) {
       // Added by Sim's native prepareToolExecution, never an authority input.
       const { _toolSchema: _schema, ...modelParams } = params
+      const previewCall = Boolean(workflowPreview) && toolId === 'preview_workflow_operations'
       const workflowCall =
-        Boolean(workflowReads) && (toolId === 'read_workflow' || toolId === 'read_workflow_block')
-      const result = workflowCall
-        ? await readWorkflow(toolId, modelParams, signal)
-        : await catalog.dispatch(toolId, modelParams, signal)
+        previewCall ||
+        (Boolean(workflowReads) && (toolId === 'read_workflow' || toolId === 'read_workflow_block'))
+      const result = previewCall
+        ? await previewWorkflow(modelParams, signal)
+        : workflowCall
+          ? await readWorkflow(toolId, modelParams, signal)
+          : await catalog.dispatch(toolId, modelParams, signal)
+      const refusal = !result.ok
+        ? {
+            error: result.error,
+            ...('diagnostics' in result ? { diagnostics: result.diagnostics } : {}),
+          }
+        : {}
       const response = result.ok
         ? { success: true, output: result.data }
-        : { success: false, output: { error: result.error }, error: result.error.message }
+        : { success: false, output: refusal, error: result.error.message }
       // Native error formatting drops structured output. Preserve a refusal as
       // model data, while raw failure still controls the provider error events.
       const modelResponse =
-        workflowCall && !result.ok
-          ? { success: true, output: { ok: false, error: result.error } }
-          : response
+        workflowCall && !result.ok ? { success: true, output: { ok: false, ...refusal } } : response
       return { rawResponse: response, modelResponse }
     },
     start(controls) {
@@ -212,4 +254,40 @@ function jsonInput(schema: z.ZodType) {
 }
 function workflowFailure(code: 'invalid_input' | 'forbidden') {
   return { ok: false as const, error: { code, message: 'Workflow read could not complete.' } }
+}
+
+/** Keep the native definitions with the body; SDK formatters discard root $defs. */
+function previewJsonInput() {
+  const native = jsonInput(workflowPreviewInputs.preview_workflow_operations)
+  const pending: unknown[] = [native]
+  while (pending.length) {
+    const node = pending.pop()
+    if (!node || typeof node !== 'object') continue
+    for (const [key, value] of Object.entries(node)) {
+      // These are instance/annotation data, never schema reference locations.
+      if (key === 'examples' || key === 'default' || key === 'const' || key === 'enum') continue
+      if (key !== '$ref') {
+        pending.push(value)
+        continue
+      }
+      if (typeof value !== 'string' || !/^#\/\$defs\/[^/]+$/.test(value) || /~(?![01])/.test(value))
+        throw new Error('Unsupported workflow preview schema reference.')
+      let target: unknown = native
+      for (const part of value.slice(2).split('/')) {
+        const field = part.replace(/~1/g, '/').replace(/~0/g, '~')
+        if (!target || typeof target !== 'object' || !Object.hasOwn(target, field))
+          throw new Error('Unsupported workflow preview schema reference.')
+        target = (target as Record<string, unknown>)[field]
+      }
+      if (
+        typeof target !== 'boolean' &&
+        (!target || typeof target !== 'object' || Array.isArray(target))
+      )
+        throw new Error('Unsupported workflow preview schema reference.')
+      // Generated schema is privately owned; constraints/definitions remain identical.
+      const record = node as Record<string, unknown>
+      record.$ref = `#/properties/request${value.slice(1)}`
+    }
+  }
+  return native
 }

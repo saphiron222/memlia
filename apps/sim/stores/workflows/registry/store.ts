@@ -14,6 +14,7 @@ import { workflowKeys } from '@/hooks/queries/utils/workflow-keys'
 import { useOperationQueueStore } from '@/stores/operation-queue/store'
 import { useVariablesStore } from '@/stores/variables/store'
 import type { Variable } from '@/stores/variables/types'
+import { useWorkflowDiffStore } from '@/stores/workflow-diff/store'
 import type { HydrationState, WorkflowRegistry } from '@/stores/workflows/registry/types'
 import { useSubBlockStore } from '@/stores/workflows/subblock/store'
 import {
@@ -35,7 +36,8 @@ const initialHydration: HydrationState = {
 
 const createRequestId = () => `${Date.now()}-${generateRandomHex(8)}`
 
-function resetWorkflowStores() {
+function resetWorkflowStores(isCurrent: () => boolean = () => true): boolean {
+  if (!isCurrent()) return false
   useWorkflowStore.setState({
     currentWorkflowId: null,
     draftRevisionAttestation: null,
@@ -46,9 +48,11 @@ function resetWorkflowStores() {
     lastSaved: Date.now(),
   })
 
+  if (!isCurrent()) return false
   useSubBlockStore.setState({
     workflowValues: {},
   })
+  return isCurrent()
 }
 
 export const useWorkflowRegistry = create<WorkflowRegistry>()(
@@ -63,11 +67,20 @@ export const useWorkflowRegistry = create<WorkflowRegistry>()(
       switchToWorkspace: (workspaceId: string) => {
         logger.info(`Switching to workspace: ${workspaceId}`)
 
-        resetWorkflowStores()
+        const source = get()
+        const ownsDetach = useWorkflowDiffStore
+          .getState()
+          .detachDiffForWorkspaceChange(source.activeWorkflowId, workspaceId)
+        // Both guards are needed: identity reset revokes the diff epoch before its
+        // async cleanup finishes, while registry changes supersede this source.
+        const isCurrent = () => ownsDetach() && get() === source
+        if (!resetWorkflowStores(isCurrent)) return
         // Workflow stores are fully reset and reloaded from the server in the new
         // workspace, so a previously tripped offline mode must not carry over.
         useOperationQueueStore.getState().clearError()
+        if (!isCurrent()) return
         void invalidateWorkflowLists(getQueryClient(), workspaceId)
+        if (!isCurrent()) return
 
         set({
           activeWorkflowId: null,

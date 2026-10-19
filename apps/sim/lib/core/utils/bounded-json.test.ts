@@ -1,5 +1,72 @@
+// Modified by Memlia: qualify opt-in strict JSON capture while retaining legacy semantics.
 import { describe, expect, it, vi } from 'vitest'
 import { isJsonWithinByteLimit, stringifyBoundedJson } from '@/lib/core/utils/bounded-json'
+
+describe('strict bounded JSON capture for workflow previews', () => {
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, -1, 1.5])(
+    'refuses an invalid strict byte bound: %s',
+    (bound) => {
+      expect(stringifyBoundedJson(null, bound, { strict: true })).toBeUndefined()
+    }
+  )
+
+  it('enforces strict depth and node boundaries without accepting sparse compensation', () => {
+    let admitted: unknown = null
+    for (let index = 0; index < 64; index++) admitted = [admitted]
+    expect(stringifyBoundedJson(admitted, 1024, { strict: true })).toBeDefined()
+    expect(stringifyBoundedJson([admitted], 1024, { strict: true })).toBeUndefined()
+    expect(stringifyBoundedJson(Array(99999).fill(null), 1000000, { strict: true })).toBeDefined()
+    expect(
+      stringifyBoundedJson(Array(100000).fill(null), 1000000, { strict: true })
+    ).toBeUndefined()
+    const sparse = Object.assign(Array(2), { 1: 1, extra: 'PRIVATE_CANARY' })
+    expect(stringifyBoundedJson(sparse, 1024, { strict: true })).toBeUndefined()
+    expect(
+      stringifyBoundedJson(Object.defineProperty([1], 'extra', { value: 1 }), 1024, {
+        strict: true,
+      })
+    ).toBeUndefined()
+  })
+
+  it.each([
+    { value: undefined },
+    { value: Number.NaN },
+    { value: Number.POSITIVE_INFINITY },
+    { value: { input: undefined } },
+    { value: { input: () => 'value' } },
+    { value: { input: Symbol('value') } },
+    { value: [undefined] },
+    { value: Array(1) },
+    { value: Object.assign([], { extra: true }) },
+    { value: Object.defineProperty({}, 'hidden', { value: 1 }) },
+    { value: { [Symbol('hidden')]: 1 } },
+    { value: Object.setPrototypeOf([], Object.create(Array.prototype)) },
+  ])('rejects lossy or non-JSON values before serialization: $value', ({ value }) => {
+    expect(stringifyBoundedJson(value, 1024, { strict: true })).toBeUndefined()
+  })
+
+  it('captures independent ordinary JSON and preserves the exact UTF-8 byte limit', () => {
+    const value = { input: ['é', 1, false, null], nested: { enabled: true } }
+    const json = '{"input":["é",1,false,null],"nested":{"enabled":true}}'
+    expect(stringifyBoundedJson(value, Buffer.byteLength(json), { strict: true })).toBe(json)
+    expect(
+      stringifyBoundedJson(value, Buffer.byteLength(json) - 1, { strict: true })
+    ).toBeUndefined()
+  })
+
+  it('never invokes getters or toJSON while refusing strict input', () => {
+    const get = vi.fn(() => 'private value')
+    const toJSON = vi.fn(() => 'private value')
+    for (const value of [
+      Object.defineProperty({}, 'input', { enumerable: true, get }),
+      Object.defineProperty([1], '0', { enumerable: true, get }),
+      { toJSON },
+    ])
+      expect(stringifyBoundedJson(value, 1024, { strict: true })).toBeUndefined()
+    expect(get).not.toHaveBeenCalled()
+    expect(toJSON).not.toHaveBeenCalled()
+  })
+})
 
 describe('bounded JSON', () => {
   it.each([

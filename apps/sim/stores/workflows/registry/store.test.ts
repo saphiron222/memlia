@@ -79,7 +79,10 @@ vi.mock('@/hooks/queries/deployments', () => ({
 
 import * as requestModule from '@/lib/api/client/request'
 import * as getQueryClientModule from '@/app/_shell/providers/get-query-client'
+import { useWorkflowDiffStore } from '@/stores/workflow-diff/store'
 import { useWorkflowRegistry } from '@/stores/workflows/registry/store'
+import { useSubBlockStore } from '@/stores/workflows/subblock/store'
+import { useWorkflowStore } from '@/stores/workflows/workflow/store'
 
 /**
  * Spy on the real module namespaces instead of vi.mock: under `isolate: false`
@@ -258,4 +261,42 @@ describe('registry store loadWorkflowState (collapsed cache)', () => {
       error: null,
     })
   })
+})
+
+describe('workspace transition ownership', () => {
+  it('captures the real workflow identity and refuses a revoked detach before resetting stores', () => {
+    useWorkflowRegistry.setState({ activeWorkflowId: 'source-workflow' })
+    const before = useWorkflowRegistry.getState()
+    const resetCalls = vi.mocked(useWorkflowStore.setState).mock.calls.length
+    const detach = vi
+      .spyOn(useWorkflowDiffStore.getState(), 'detachDiffForWorkspaceChange')
+      .mockReturnValue(() => false)
+    try {
+      useWorkflowRegistry.getState().switchToWorkspace('destination-workspace')
+      expect(detach).toHaveBeenCalledWith('source-workflow', 'destination-workspace')
+      expect(vi.mocked(useWorkflowStore.setState).mock.calls.length).toBe(resetCalls)
+      expect(useWorkflowRegistry.getState()).toBe(before)
+    } finally {
+      detach.mockRestore()
+    }
+  })
+})
+
+it('stops a workspace reset if the registry source changes without a new diff epoch', () => {
+  useWorkflowRegistry.setState({ activeWorkflowId: 'source-workflow' })
+  const beforeSubblockCalls = vi.mocked(useSubBlockStore.setState).mock.calls.length
+  const detach = vi
+    .spyOn(useWorkflowDiffStore.getState(), 'detachDiffForWorkspaceChange')
+    .mockReturnValue(() => true)
+  vi.mocked(useWorkflowStore.setState).mockImplementationOnce(() => {
+    useWorkflowRegistry.setState({ activeWorkflowId: 'newer-workflow' })
+  })
+  try {
+    useWorkflowRegistry.getState().switchToWorkspace('stale-workspace')
+    expect(useWorkflowRegistry.getState().activeWorkflowId).toBe('newer-workflow')
+    expect(useWorkflowRegistry.getState().hydration.workspaceId).not.toBe('stale-workspace')
+    expect(vi.mocked(useSubBlockStore.setState).mock.calls.length).toBe(beforeSubblockCalls)
+  } finally {
+    detach.mockRestore()
+  }
 })

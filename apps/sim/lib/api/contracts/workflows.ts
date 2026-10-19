@@ -1,4 +1,4 @@
-// Modified by Memlia: preserve the canonical draft revision in internal read contracts.
+// Modified by Memlia: preserve canonical draft revisions and require them for full-state writes.
 import { WorkflowProposalSchema } from '@memlia/contracts'
 import {
   BLOCK_RETRY_MAX_TRIES,
@@ -774,8 +774,8 @@ export const putWorkflowNormalizedStateContract = defineRouteContract({
   method: 'PUT',
   path: '/api/workflows/[id]/state',
   params: workflowIdParamsSchema,
-  // Transitional legacy omission only; supplied revisions use the canonical strict validator.
-  body: workflowStateSchema.extend({ expectedRevision: workflowDraftRevisionSchema.optional() }),
+  // Full replacements require the canonical revision captured with their source snapshot.
+  body: workflowStateSchema.extend({ expectedRevision: workflowDraftRevisionSchema }),
   response: {
     mode: 'json',
     schema: z.object({

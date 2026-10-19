@@ -1,3 +1,4 @@
+// Modified by Memlia: preserve the active diff until successful import navigation.
 import { useCallback, useRef, useState } from 'react'
 import { toast } from '@sim/emcn'
 import { createLogger } from '@sim/logger'
@@ -17,6 +18,7 @@ import { folderKeys } from '@/hooks/queries/utils/folder-keys'
 import { invalidateWorkflowLists } from '@/hooks/queries/utils/invalidate-workflow-lists'
 import { useCreateWorkflow } from '@/hooks/queries/workflows'
 import { useWorkflowDiffStore } from '@/stores/workflow-diff/store'
+import { useWorkflowRegistry } from '@/stores/workflows/registry/store'
 
 const logger = createLogger('useImportWorkflow')
 
@@ -39,7 +41,6 @@ export function useImportWorkflow({ workspaceId }: UseImportWorkflowProps) {
   const { mutateAsync: createWorkflow } = useCreateWorkflow()
   const queryClient = useQueryClient()
   const { mutateAsync: createFolder } = useCreateFolder()
-  const clearDiff = useWorkflowDiffStore((state) => state.clearDiff)
   const posthog = usePostHog()
   const posthogRef = useRef(posthog)
   posthogRef.current = posthog
@@ -50,7 +51,6 @@ export function useImportWorkflow({ workspaceId }: UseImportWorkflowProps) {
    */
   const importSingleWorkflow = useCallback(
     async (content: string, filename: string, folderId?: string, sortOrder?: number) => {
-      clearDiff()
       const result = await persistImportedWorkflow({
         content,
         filename,
@@ -74,7 +74,7 @@ export function useImportWorkflow({ workspaceId }: UseImportWorkflowProps) {
 
       return result.workflowId
     },
-    [clearDiff, createWorkflow, workspaceId]
+    [createWorkflow, workspaceId]
   )
 
   /**
@@ -231,9 +231,11 @@ export function useImportWorkflow({ workspaceId }: UseImportWorkflowProps) {
             workflow_count: importedWorkflowIds.length,
             format: hasZip && fileArray.length === 1 ? 'zip' : 'json',
           })
-          router.push(
-            `/workspace/${workspaceId}/w/${importedWorkflowIds[importedWorkflowIds.length - 1]}`
-          )
+          const destinationId = importedWorkflowIds[importedWorkflowIds.length - 1]
+          useWorkflowDiffStore
+            .getState()
+            .detachDiffForNavigation(useWorkflowRegistry.getState().activeWorkflowId, destinationId)
+          router.push(`/workspace/${workspaceId}/w/${destinationId}`)
         }
       } catch (error) {
         logger.error('Failed to import workflows:', error)

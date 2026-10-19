@@ -1,3 +1,4 @@
+// Modified by Memlia: delegate persisted diff reads with the captured workflow identity.
 // Modified by Memlia: centralize auto-layout error notification in its shared hook.
 'use client'
 
@@ -35,7 +36,6 @@ import {
   createWorkflowCopilotChatContract,
   deleteCopilotChatContract,
 } from '@/lib/api/contracts/copilot'
-import { getWorkflowNormalizedStateContract } from '@/lib/api/contracts/workflows'
 import { useSession } from '@/lib/auth/client'
 import { getWorkspaceUsageLimitAction } from '@/lib/billing/workspace-permissions'
 import { useDeploymentShape } from '@/lib/core/config/deployment-shape'
@@ -89,12 +89,10 @@ import type { ChatContext, PanelTab } from '@/stores/panel'
 import { usePanelStore } from '@/stores/panel'
 import { useVariablesStore } from '@/stores/variables/store'
 import { useWorkflowDiffStore } from '@/stores/workflow-diff/store'
-import { captureBaselineSnapshot } from '@/stores/workflow-diff/utils'
 import { useWorkflowSearchReplaceStore } from '@/stores/workflow-search-replace/store'
 import { getWorkflowWithValues } from '@/stores/workflows'
 import { useWorkflowRegistry } from '@/stores/workflows/registry/store'
 import { useWorkflowStore } from '@/stores/workflows/workflow/store'
-import type { WorkflowState } from '@/stores/workflows/workflow/types'
 
 const logger = createLogger('Panel')
 const EMPTY_COPILOT_CHATS: readonly CopilotChatListItem[] = []
@@ -369,16 +367,9 @@ export const Panel = memo(function Panel() {
       const workflowId = activeWorkflowId || useWorkflowRegistry.getState().activeWorkflowId
       if (!workflowId) return
 
-      const baselineWorkflow = captureBaselineSnapshot(workflowId)
-
-      requestJson(getWorkflowNormalizedStateContract, { params: { id: workflowId } })
-        .then((freshState) => {
-          const diffStore = useWorkflowDiffStore.getState()
-          return diffStore.setProposedChanges(freshState as WorkflowState, undefined, {
-            baselineWorkflow,
-            skipPersist: true,
-          })
-        })
+      useWorkflowDiffStore
+        .getState()
+        .showPersistedChanges(workflowId)
         .catch((err) => {
           logger.error('Failed to fetch/apply edit_workflow state', {
             error: toError(err).message,

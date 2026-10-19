@@ -1,3 +1,4 @@
+// Modified by Memlia: detach diff ownership before workflow hydration and navigation.
 'use client'
 
 import React, { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -2708,11 +2709,12 @@ const WorkflowContent = React.memo(
           (activeWorkflowId === currentId && hydration.phase !== 'ready'))
 
       if (needsWorkflowLoad) {
-        // Mark this workflow as being loaded to prevent duplicate calls
-        loadingWorkflowRef.current = currentId
+        useWorkflowDiffStore
+          .getState()
+          .detachDiffForNavigation(useWorkflowRegistry.getState().activeWorkflowId, currentId)
 
-        const { clearDiff } = useWorkflowDiffStore.getState()
-        clearDiff()
+        // Mark this workflow as being loaded only after its display has been detached.
+        loadingWorkflowRef.current = currentId
 
         setIsCanvasReady(false)
 

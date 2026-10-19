@@ -1,5 +1,7 @@
+// Modified by Memlia: track confirmed diff actions independently of draft attestations.
 import type { DiffAnalysis, WorkflowDiff } from '@/lib/workflows/diff'
 import type { WorkflowState } from '../workflows/workflow/types'
+import type { DiffObservation } from './utils'
 
 /**
  * The lifecycle stage of the workflow diff overlay.
@@ -18,7 +20,32 @@ import type { WorkflowState } from '../workflows/workflow/types'
  */
 export type WorkflowDiffStatus = 'none' | 'staged' | 'showing'
 
+export interface DiffAction {
+  id: string
+  workflowId: string
+  phase: 'saving' | 'confirmed' | 'conflict' | 'unknown'
+  intendedState: WorkflowState
+  confirmed?: { revision: number; state: WorkflowState; observation: DiffObservation }
+}
+
+export interface DetachedDiff {
+  id: string
+  action: DiffAction | null
+  baseline: WorkflowState | null
+  error: string
+  inFlight: boolean
+  consultationRequest?: string
+  consultation?: {
+    revision: number
+    state: WorkflowState
+    observation: DiffObservation
+    epoch: number
+  }
+}
+
 export interface WorkflowDiffState {
+  detachedDiffs: Record<string, DetachedDiff>
+  action: DiffAction | null
   /** Lifecycle stage of the diff overlay; the source of truth for diff flags */
   status: WorkflowDiffStatus
   /** Derived from {@link status}: a diff is staged (`staged` or `showing`) */
@@ -42,17 +69,25 @@ export interface WorkflowDiffState {
 interface DiffActionOptions {
   /** Skip recording this operation for undo/redo. Used during undo/redo replay. */
   skipRecording?: boolean
-  /** Skip persisting to DB. Use when the server tool already saved (e.g. edit_workflow). */
+  /** Legacy flag is rejected; persisted changes must use showPersistedChanges with an owned GET. */
   skipPersist?: boolean
   /**
-   * Explicit baseline snapshot to diff against.
-   * Use this when the proposed state is fetched asynchronously and the live
-   * workflow store may have already been updated to that same state.
+   * Optional owned baseline. It must match the attested live source exactly.
+   * Historical inverse baselines are retained only by a confirmed diff action.
    */
   baselineWorkflow?: WorkflowState
 }
 
 export interface WorkflowDiffActions {
+  /** Returns a guard revoked by any later detach or identity reset. */
+  detachDiffForWorkspaceChange: (
+    sourceWorkflowId: string | null,
+    destinationWorkspaceId: string
+  ) => () => boolean
+  detachDiffForNavigation: (sourceWorkflowId: string | null, destinationWorkflowId: string) => void
+  consultDetachedDiff: (workflowId: string) => Promise<void>
+  abandonDetachedDiff: (workflowId: string) => void
+  showPersistedChanges: (workflowId: string) => Promise<void>
   setProposedChanges: (
     workflowState: WorkflowState,
     diffAnalysis?: DiffAnalysis,

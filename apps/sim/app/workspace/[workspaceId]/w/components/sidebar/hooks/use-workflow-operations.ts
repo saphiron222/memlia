@@ -1,3 +1,4 @@
+// Modified by Memlia: detach the prior diff only for the explicit creation navigation.
 import { useCallback, useMemo } from 'react'
 import { generateId } from '@sim/utils/id'
 import { useRouter } from 'next/navigation'
@@ -28,9 +29,6 @@ export function useWorkflowOperations({ workspaceId }: UseWorkflowOperationsProp
   const createWorkflowMutate = createWorkflowMutation.mutate
 
   const handleCreateWorkflow = useCallback((): Promise<string | null> => {
-    const { clearDiff } = useWorkflowDiffStore.getState()
-    clearDiff()
-
     const name = generateCreativeWorkflowName()
     const id = generateId()
 
@@ -41,6 +39,9 @@ export function useWorkflowOperations({ workspaceId }: UseWorkflowOperationsProp
       deduplicate: true,
     })
 
+    useWorkflowDiffStore
+      .getState()
+      .detachDiffForNavigation(useWorkflowRegistry.getState().activeWorkflowId, id)
     useWorkflowRegistry.getState().markWorkflowCreating(id)
     router.push(`/workspace/${workspaceId}/w/${id}`)
     return Promise.resolve(id)

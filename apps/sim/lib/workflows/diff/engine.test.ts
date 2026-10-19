@@ -1,3 +1,4 @@
+// Modified by Memlia: qualify exact persisted-snapshot diff projection.
 import { toolsUtilsMock, toolsUtilsMockFns } from '@sim/testing/mocks/blocks.mock'
 import { triggersMock, triggersMockFns } from '@sim/testing/mocks/triggers.mock'
 import { workflowRegistryStoreMock } from '@sim/testing/mocks/workflow-registry-store.mock'
@@ -215,5 +216,35 @@ describe('WorkflowDiffEngine', () => {
         )
       })
     })
+  })
+})
+
+describe('persisted snapshot diff mode', () => {
+  it('preserves server IDs, positions, edge duplicates, handles, subflows and variables', async () => {
+    const baseline = createMockWorkflowState({ old: createMockBlock({ id: 'old', name: 'same' }) })
+    const state: WorkflowState = {
+      blocks: {
+        server: createMockBlock({ id: 'server', name: 'same', position: { x: 712, y: 85 } }),
+      },
+      edges: [
+        { id: 'edge-server', source: 'server', target: 'server', sourceHandle: null },
+        { id: 'edge-duplicate', source: 'server', target: 'server', sourceHandle: null },
+      ],
+      loops: {},
+      parallels: {},
+      variables: { v: { id: 'v', name: 'value', type: 'object', value: { n: 1 } } },
+      lastSaved: 10,
+    }
+    const owned = structuredClone(state)
+    const result = await new WorkflowDiffEngine().createDiffFromWorkflowState(
+      state,
+      undefined,
+      baseline,
+      'persisted_snapshot'
+    )
+    expect(result.success).toBe(true)
+    const { stripWorkflowDiffMarkers } = await import('./engine')
+    expect(stripWorkflowDiffMarkers(result.diff!.proposedState)).toEqual(owned)
+    expect(state).toEqual(owned)
   })
 })

@@ -1,0 +1,212 @@
+// Copyright (c) 2026 Memlia. All rights reserved.
+import {
+  v2ApplyWorkflowOperationsBodySchema,
+  v2WorkflowSkippedItemTypeSchema,
+} from '@/lib/api/contracts/v2/workflows'
+import { OrchestrationError } from '@/lib/core/orchestration/types'
+import { stringifyBoundedJson } from '@/lib/core/utils/bounded-json'
+import { waitWithAbort } from '@/lib/core/utils/concurrency'
+import { applyWorkflowOperations } from '@/lib/workflows/application/apply-workflow-operations'
+import { WorkflowOperationsNotAppliedError } from '@/lib/workflows/application/operations-error'
+import type { WorkflowLintReport } from '@/lib/workflows/editing/lint'
+import type { SkippedItem, ValidationError } from '@/lib/workflows/editing/types'
+import { MAX_IMPORT_BODY_BYTES } from '@/lib/workflows/operations/import-workflow'
+
+type PreviewContext = {
+  principal: Parameters<typeof applyWorkflowOperations.execute>[0]['principal']
+  workspaceId: string
+  workflowId: string
+}
+export const workflowPreviewInputs = Object.freeze({
+  preview_workflow_operations: v2ApplyWorkflowOperationsBodySchema,
+})
+
+/** Evaluates an owned batch with the native engine; never authorizes or persists an apply. */
+export function createWorkflowPreviewTools({ principal, workspaceId, workflowId }: PreviewContext) {
+  const ownedPrincipal = structuredClone(principal)
+  async function evaluate(params: unknown, signal?: AbortSignal) {
+    const captured = stringifyBoundedJson(params, MAX_IMPORT_BODY_BYTES, { strict: true })
+    if (captured === undefined) return failure('invalid_input')
+    const parsed = v2ApplyWorkflowOperationsBodySchema.safeParse(JSON.parse(captured))
+    if (!parsed.success) return failure('invalid_input')
+    const input = parsed.data
+    if (ownedPrincipal.kind === 'delegated' && ownedPrincipal.workspaceId !== workspaceId)
+      return failure('forbidden')
+    let result: Awaited<ReturnType<typeof applyWorkflowOperations.execute>>
+    try {
+      result = await applyWorkflowOperations.execute({
+        principal: ownedPrincipal,
+        input: {
+          workflowId,
+          assertedWorkspaceId: workspaceId,
+          expectedRevision: input.expectedRevision,
+          operations: input.operations,
+          atomic: input.atomic,
+          layout: input.layout,
+          blockEnabledChanges: input.setBlockEnabled?.map(({ block_id, enabled }) => ({
+            blockId: block_id,
+            enabled,
+          })),
+          dryRun: true,
+          checkAborted: () => signal?.throwIfAborted(),
+        },
+      })
+    } catch (error) {
+      signal?.throwIfAborted()
+      if (error instanceof WorkflowOperationsNotAppliedError)
+        return {
+          ...failure('atomic_refused'),
+          diagnostics: {
+            skipped: projectSkipped(error.skipped, input),
+            inputValidationErrorCount: error.droppedInputs.length,
+            inputValidationErrors: projectInputErrors(error.droppedInputs, input),
+          },
+        }
+      throw error
+    }
+    signal?.throwIfAborted()
+    if (
+      result.workflowId !== workflowId ||
+      result.workspaceId !== workspaceId ||
+      result.dryRun !== true ||
+      result.baseRevision !== input.expectedRevision ||
+      result.draftRevision !== input.expectedRevision ||
+      result.operationCount !== input.operations.length ||
+      !Number.isSafeInteger(result.applied) ||
+      result.applied < 0 ||
+      result.applied > input.operations.length + (input.setBlockEnabled?.length ?? 0) ||
+      typeof result.needsRedeployment !== 'boolean'
+    )
+      return failure('unavailable')
+    return {
+      ok: true as const,
+      data: {
+        dryRun: true as const,
+        persisted: false as const,
+        baseRevision: result.baseRevision,
+        draftRevision: result.draftRevision,
+        operationCount: result.operationCount,
+        applied: result.applied,
+        skipped: projectSkipped(result.skipped, input, result.previewBlockIds),
+        deferred: projectSkipped(result.deferred, input, result.previewBlockIds),
+        inputValidationErrorCount: result.inputValidationErrors.length,
+        inputValidationErrors: projectInputErrors(
+          result.inputValidationErrors,
+          input,
+          result.previewBlockIds
+        ),
+        lint: projectLint(result.lint, input, result.previewBlockIds),
+        warningCount: result.warnings.length,
+        provisionalBlockIdCount: Object.keys(result.previewBlockIds ?? {}).length,
+        needsRedeployment: result.needsRedeployment,
+      },
+    }
+  }
+  return {
+    async dispatch(toolId: string, params: unknown, signal?: AbortSignal) {
+      try {
+        signal?.throwIfAborted()
+        if (toolId !== 'preview_workflow_operations') return failure('tool_not_allowed')
+        const result = await waitWithAbort(evaluate(params, signal), signal)
+        signal?.throwIfAborted()
+        if (stringifyBoundedJson(result, 256 * 1024, { strict: true }) === undefined)
+          return failure('result_too_large')
+        return result
+      } catch (error) {
+        if (signal?.aborted) return failure('cancelled')
+        if (error instanceof OrchestrationError) {
+          if (error.code === 'forbidden') return failure('forbidden')
+          if (error.code === 'not_found') return failure('not_found')
+          if (error.code === 'conflict') return failure('revision_conflict')
+          if (error.code === 'locked') return failure('locked')
+          if (error.code === 'validation') return failure('invalid_input')
+        }
+        return failure('unavailable')
+      }
+    },
+  }
+}
+
+type FailureCode =
+  | 'invalid_input'
+  | 'tool_not_allowed'
+  | 'cancelled'
+  | 'forbidden'
+  | 'not_found'
+  | 'revision_conflict'
+  | 'locked'
+  | 'unavailable'
+  | 'atomic_refused'
+  | 'result_too_large'
+function failure(code: FailureCode) {
+  return { ok: false as const, error: { code, message: 'Workflow preview could not complete.' } }
+}
+
+type PreviewInput = ReturnType<typeof v2ApplyWorkflowOperationsBodySchema.parse>
+function projectSkipped(
+  items: SkippedItem[],
+  input: PreviewInput,
+  previewIds: Record<string, string> = {}
+) {
+  return items.map((item) => ({
+    code: v2WorkflowSkippedItemTypeSchema.parse(item.type),
+    operationIndexes: input.operations.flatMap((operation, index) =>
+      operation.operation_type === item.operationType &&
+      (operation.block_id === item.blockId || previewIds[operation.block_id] === item.blockId)
+        ? [index]
+        : []
+    ),
+    enabledChangeIndexes: (input.setBlockEnabled ?? []).flatMap((change, index) =>
+      item.operationType === 'set_block_enabled' && change.block_id === item.blockId ? [index] : []
+    ),
+  }))
+}
+
+function indexesForBlock(blockId: string, input: PreviewInput, previewIds: Record<string, string>) {
+  return input.operations.flatMap((operation, index) =>
+    operation.block_id === blockId || previewIds[operation.block_id] === blockId ? [index] : []
+  )
+}
+function projectInputErrors(
+  items: ValidationError[],
+  input: PreviewInput,
+  previewIds: Record<string, string> = {}
+) {
+  return items.map((item) => ({
+    code: 'input_rejected' as const,
+    operationIndexes: indexesForBlock(item.blockId, input, previewIds),
+  }))
+}
+function projectLint(
+  lint: WorkflowLintReport,
+  input: PreviewInput,
+  previewIds: Record<string, string> = {}
+) {
+  const diagnostics: { code: string; operationIndexes: number[]; count: number }[] = []
+  const add = (code: string, blockId: string, count = 1) => {
+    if (count > 0)
+      diagnostics.push({
+        code,
+        operationIndexes: indexesForBlock(blockId, input, previewIds),
+        count,
+      })
+  }
+  for (const item of lint.orphanBlocks) add('orphan_block', item.blockId)
+  for (const item of lint.emptyOutgoingPorts) add('empty_outgoing_port', item.blockId)
+  for (const item of lint.invalidBranchPorts) add('invalid_branch_port', item.blockId)
+  for (const item of lint.invalidConnectionTargets)
+    add('invalid_connection_target', item.sourceBlockId)
+  for (const item of lint.fieldIssues) {
+    add('missing_required_fields', item.blockId, item.missingRequiredFields.length)
+    add('inactive_mode_values', item.blockId, item.inactiveModeValues.length)
+  }
+  for (const item of lint.unresolvedReferences) add('unresolved_reference', item.blockId)
+  for (const item of lint.tableFieldIssues) add('unknown_table_field', item.blockId)
+  return {
+    completeness: 'best_effort' as const,
+    diagnostics,
+    sourceCount: lint.sources.length,
+    sinkCount: lint.sinks.length,
+    noteCount: lint.notes.length,
+  }
+}
