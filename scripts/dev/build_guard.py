@@ -2,6 +2,7 @@
 """Run a local build and record its outcome without recording command arguments."""
 
 import argparse
+from contextlib import contextmanager
 import ctypes
 import errno
 import importlib.util
@@ -14,6 +15,55 @@ import subprocess
 import sys
 import threading
 import time
+
+
+MONITORING_STAGES = frozenset((
+    'sysctl', 'sysctl_parse', 'pressure', 'pressure_parse', 'process_tree',
+    'process_tree_parse', 'process_identity', 'process_ownership',
+    'process_footprint', 'process_footprint_parse', 'process_recheck',
+    'disk', 'sample_validation', 'policy', 'observation'))
+MONITORING_CLASSES = frozenset((
+    'timeout', 'command_exit', 'os_error', 'format', 'invalid_sample', 'unexpected'))
+
+
+class _MonitoringFailure(RuntimeError):
+    """Carry only fixed diagnostics, never native output or exception text."""
+    def __init__(self, stage, failure_class):
+        super().__init__('monitoring unavailable')
+        self.stage = stage
+        self.failure_class = failure_class
+
+
+@contextmanager
+def _monitoring_stage(stage):
+    try:
+        yield
+    except _MonitoringFailure:
+        raise
+    except Exception as error:
+        if isinstance(error, subprocess.TimeoutExpired):
+            failure_class = 'timeout'
+        elif isinstance(error, subprocess.CalledProcessError):
+            failure_class = 'command_exit'
+        elif isinstance(error, OSError):
+            failure_class = 'os_error'
+        elif stage == 'sample_validation':
+            failure_class = 'invalid_sample'
+        elif stage.endswith('_parse') or isinstance(
+                error, (ValueError, TypeError, KeyError, IndexError, AttributeError)):
+            failure_class = 'format'
+        else:
+            failure_class = 'unexpected'
+        raise _MonitoringFailure(stage, failure_class) from None
+
+
+def _monitoring_diagnostic(error):
+    # Recheck the closed sets at the receipt boundary; unknown exception types
+    # (including subclasses) cannot supply arbitrary diagnostic attributes.
+    stage = error.stage if type(error) is _MonitoringFailure else None
+    failure_class = error.failure_class if type(error) is _MonitoringFailure else None
+    return {'stage': stage if type(stage) is str and stage in MONITORING_STAGES else 'observation',
+            'class': failure_class if type(failure_class) is str and failure_class in MONITORING_CLASSES else 'unexpected'}
 
 
 def native_identity(pid):
@@ -55,50 +105,58 @@ def mac_snapshot(pid):
     """
     if sys.platform != 'darwin':
         raise RuntimeError('macOS observation required')
-    def read(command):
-        return subprocess.run(command, check=True, capture_output=True, text=True,
-                              timeout=5).stdout
+    def read(command, stage):
+        with _monitoring_stage(stage):
+            return subprocess.run(command, check=True, capture_output=True, text=True,
+                                  timeout=5).stdout
     global_usage = read(['/usr/sbin/sysctl', 'kern.memorystatus_vm_pressure_level',
-                         'vm.swapusage'])
-    pressure = int(re.search(r'pressure_level:\s*(\d+)', global_usage)[1])
-    swap_mb = float(re.search(r'used\s*=\s*([\d.]+)M', global_usage)[1])
-    free = int(re.search(r'free percentage:\s*(\d+)%',
-                         read(['/usr/bin/memory_pressure', '-Q']))[1])
+                         'vm.swapusage'], 'sysctl')
+    with _monitoring_stage('sysctl_parse'):
+        pressure = int(re.search(r'pressure_level:\s*(\d+)', global_usage)[1])
+        swap_mb = float(re.search(r'used\s*=\s*([\d.]+)M', global_usage)[1])
+    free_usage = read(['/usr/bin/memory_pressure', '-Q'], 'pressure')
+    with _monitoring_stage('pressure_parse'):
+        free = int(re.search(r'free percentage:\s*(\d+)%', free_usage)[1])
     total = 0
     count = 0
     identities = []
     if pid is not None:
-        rows = [tuple(map(int, line.split())) for line in
-                read(['/bin/ps', '-axo', 'pid=,ppid=,pgid=']).splitlines() if line.strip()]
-        members = {p for p, _, group in rows if group == pid}
-        # Include trusted build descendants even if a worker created a new group.
-        parents = {pid}
-        seen = {pid}
-        while True:
-            following = {p for p, parent, _ in rows if parent in parents} - seen
-            if not following:
-                break
-            members.update(following)
-            seen.update(following)
-            parents = following
+        process_rows = read(['/bin/ps', '-axo', 'pid=,ppid=,pgid='], 'process_tree')
+        with _monitoring_stage('process_tree_parse'):
+            rows = [tuple(map(int, line.split())) for line in
+                    process_rows.splitlines() if line.strip()]
+            members = {p for p, _, group in rows if group == pid}
+            # Include trusted build descendants even if a worker created a new group.
+            parents = {pid}
+            seen = {pid}
+            while True:
+                following = {p for p, parent, _ in rows if parent in parents} - seen
+                if not following:
+                    break
+                members.update(following)
+                seen.update(following)
+                parents = following
         for member in members:
             try:
-                identity = native_identity(member)
+                with _monitoring_stage('process_identity'):
+                    identity = native_identity(member)
                 if identity is None or identity['status'] == 5:
                     continue
-                if identity['uid'] != os.getuid():
-                    raise RuntimeError('process ownership changed')
-                summary = read(['/usr/bin/vmmap', '-summary', str(member)])
-                footprint = re.search(r'^Physical footprint:\s*([\d.]+)([KMGT]?)B?\s*$',
-                                      summary, re.MULTILINE)
-                if not footprint:
-                    raise RuntimeError('footprint unavailable')
-                total += int(float(footprint[1]) * 1024**(' KMGT'.index(footprint[2] or ' ')))
+                with _monitoring_stage('process_ownership'):
+                    if identity['uid'] != os.getuid():
+                        raise RuntimeError('process ownership changed')
+                summary = read(['/usr/bin/vmmap', '-summary', str(member)], 'process_footprint')
+                with _monitoring_stage('process_footprint_parse'):
+                    footprint = re.search(r'^Physical footprint:\s*([\d.]+)([KMGT]?)B?\s*$',
+                                          summary, re.MULTILINE)
+                    if not footprint:
+                        raise RuntimeError('footprint unavailable')
+                    total += int(float(footprint[1]) * 1024**(' KMGT'.index(footprint[2] or ' ')))
                 count += 1
                 identities.append(identity)
             except Exception:
                 # A short-lived worker may have exited between ps and vmmap.
-                remaining = read(['/bin/ps', '-axo', 'pid=']).split()
+                remaining = read(['/bin/ps', '-axo', 'pid='], 'process_recheck').split()
                 if str(member) in remaining:
                     raise
     return {'footprintBytes': total, 'processCount': count,
@@ -158,30 +216,39 @@ def run_guard(command, report, *, measure=mac_snapshot, interval=2, profile='str
         receipt['elapsedSeconds'] = round(clock() - started, 3)
         report.write_text(json.dumps(receipt, indent=2) + '\n')
     def observe(pid):
-        sample = measure(pid)
+        with _monitoring_stage('observation'):
+            sample = measure(pid)
         if policy is not None:
             # Ownership survives an independent disk/pressure measurement failure.
-            identities = milestone.capture_identities(sample)
+            with _monitoring_stage('sample_validation'):
+                identities = milestone.capture_identities(sample)
             for identity in identities:
                 owned[identity['pid']] = identity
-            sample = milestone.capture_sample(sample, measure_disk(), identities)
+            with _monitoring_stage('disk'):
+                disk_free_bytes = measure_disk()
+            with _monitoring_stage('sample_validation'):
+                sample = milestone.capture_sample(sample, disk_free_bytes, identities)
         else:
-            for identity in sample.get('processes', []):
-                owned[identity['pid']] = identity
-        receipt['observations'] += 1
-        receipt['lastObservation'] = sample
-        receipt['peakFootprintBytes'] = max(receipt['peakFootprintBytes'], sample['footprintBytes'])
-        if policy is not None:
-            receipt['peakSwapBytes'] = max(receipt['peakSwapBytes'], sample['swapBytes'])
-            for receipt_key, sample_key in (('minDiskFreeBytes', 'diskFreeBytes'),
-                                            ('minFreePercent', 'freePercent')):
-                old = receipt[receipt_key]
-                receipt[receipt_key] = sample[sample_key] if old is None else min(old, sample[sample_key])
+            with _monitoring_stage('sample_validation'):
+                for identity in sample.get('processes', []):
+                    owned[identity['pid']] = identity
+        with _monitoring_stage('sample_validation'):
+            receipt['observations'] += 1
+            receipt['lastObservation'] = sample
+            receipt['peakFootprintBytes'] = max(receipt['peakFootprintBytes'], sample['footprintBytes'])
+            if policy is not None:
+                receipt['peakSwapBytes'] = max(receipt['peakSwapBytes'], sample['swapBytes'])
+                for receipt_key, sample_key in (('minDiskFreeBytes', 'diskFreeBytes'),
+                                                ('minFreePercent', 'freePercent')):
+                    old = receipt[receipt_key]
+                    receipt[receipt_key] = sample[sample_key] if old is None else min(old, sample[sample_key])
         return sample
     def budget(sample):
         if policy is not None:
             now = clock()
             reason = policy.evaluate(sample, now)
+            if reason == 'monitoring-unavailable':
+                receipt['monitoringFailure'] = {'stage': 'policy', 'class': 'invalid_sample'}
             receipt['criticalSeconds'] = round(policy.critical_seconds, 3)
             receipt['peakCriticalSeconds'] = max(receipt['peakCriticalSeconds'], receipt['criticalSeconds'])
             growth = sample['swapBytes'] - receipt['baseline']['swapBytes']
@@ -208,9 +275,11 @@ def run_guard(command, report, *, measure=mac_snapshot, interval=2, profile='str
         return None
     try:
         receipt['baseline'] = observe(None)
-        receipt['reason'] = budget(receipt['baseline'])
-    except Exception:
+        with _monitoring_stage('policy'):
+            receipt['reason'] = budget(receipt['baseline'])
+    except Exception as error:
         receipt['reason'] = 'monitoring-unavailable'
+        receipt['monitoringFailure'] = _monitoring_diagnostic(error)
     except KeyboardInterrupt:
         receipt['reason'] = 'operator-interrupt'
     if receipt['reason']:
@@ -226,11 +295,14 @@ def run_guard(command, report, *, measure=mac_snapshot, interval=2, profile='str
     try:
         while child.poll() is None:
             try:
-                receipt['reason'] = budget(observe(child.pid))
-            except Exception:
+                sample = observe(child.pid)
+                with _monitoring_stage('policy'):
+                    receipt['reason'] = budget(sample)
+            except Exception as error:
                 # Finishing between ps/vmmap is a normal race, not missing monitoring.
                 if policy is not None or child.poll() is None:
                     receipt['reason'] = 'monitoring-unavailable'
+                    receipt['monitoringFailure'] = _monitoring_diagnostic(error)
             if receipt['reason']:
                 break
             try:
@@ -242,16 +314,21 @@ def run_guard(command, report, *, measure=mac_snapshot, interval=2, profile='str
     try:
         # Even an immediate child exit must not skip the final disk/deadline observation.
         if policy is not None and not receipt['reason']:
-            receipt['reason'] = budget(observe(None))
+            sample = observe(None)
+            with _monitoring_stage('policy'):
+                receipt['reason'] = budget(sample)
     except KeyboardInterrupt:
         receipt['reason'] = 'operator-interrupt'
-    except Exception:
+    except Exception as error:
         receipt['reason'] = 'monitoring-unavailable'
+        receipt['monitoringFailure'] = _monitoring_diagnostic(error)
     try:
-        if not receipt['reason'] and any(_same_process(item) for item in owned.values()):
-            receipt['reason'] = 'descendants-still-running'
-    except Exception:
+        with _monitoring_stage('process_identity'):
+            if not receipt['reason'] and any(_same_process(item) for item in owned.values()):
+                receipt['reason'] = 'descendants-still-running'
+    except Exception as error:
         receipt['reason'] = receipt['reason'] or 'monitoring-unavailable'
+        receipt['monitoringFailure'] = _monitoring_diagnostic(error)
     if receipt['reason']:
         previous_handlers = {}
         if threading.current_thread() is threading.main_thread():

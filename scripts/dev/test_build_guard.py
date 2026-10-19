@@ -96,6 +96,50 @@ class GuardCliTests(unittest.TestCase):
                 measure=measure, interval=0.01))
             self.assertEqual('swap-growth-budget', json.loads(report.read_text())['reason'])
 
+
+    def test_native_monitor_failure_has_fixed_stage_and_class_without_private_details(self):
+        from unittest.mock import patch
+        marker = 'fictitious-private-monitor-value'
+        cases = (
+            ('sysctl', 'timeout', subprocess.TimeoutExpired([marker], 5, output=marker, stderr=marker)),
+            ('sysctl', 'command_exit', subprocess.CalledProcessError(7, [marker], output=marker, stderr=marker)),
+            ('sysctl', 'os_error', OSError(marker)),
+        )
+        for stage, failure_class, failure in cases:
+            with self.subTest(failure_class=failure_class), tempfile.TemporaryDirectory() as tmp:
+                report = Path(tmp) / 'report.json'
+                with patch.object(guard.sys, 'platform', 'darwin'), patch.object(
+                        guard.subprocess, 'run', side_effect=failure):
+                    result = guard.run_guard(
+                        [sys.executable, '-c', 'raise SystemExit(0)'], report,
+                        measure=guard.mac_snapshot)
+                self.assertEqual(125, result)
+                receipt = json.loads(report.read_text())
+                self.assertEqual('refused', receipt['status'])
+                self.assertEqual('monitoring-unavailable', receipt['reason'])
+                self.assertEqual({'stage': stage, 'class': failure_class}, receipt['monitoringFailure'])
+                self.assertIsNone(receipt['childExitCode'])
+                self.assertNotIn(marker, report.read_text())
+
+    def test_generic_monitor_failure_during_child_keeps_interruption_and_cleanup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / 'report.json'
+            def measure(pid):
+                if pid is not None:
+                    raise RuntimeError('fictitious-private-monitor-value')
+                return {'footprintBytes': 0, 'swapBytes': 0, 'pressureLevel': 1, 'freePercent': 70}
+            result = guard.run_guard(
+                [sys.executable, '-c', 'import time; time.sleep(30)'], report,
+                measure=measure, interval=0.01)
+            receipt = json.loads(report.read_text())
+            self.assertEqual(130, result)
+            self.assertEqual('interrupted', receipt['status'])
+            self.assertEqual('monitoring-unavailable', receipt['reason'])
+            self.assertEqual({'stage': 'observation', 'class': 'unexpected'}, receipt['monitoringFailure'])
+            self.assertLess(receipt['childExitCode'], 0)
+            self.assertNotIn('cleanupFailure', receipt)
+            self.assertNotIn('fictitious-private-monitor-value', report.read_text())
+
     def test_missing_observation_refuses_or_interrupts_without_leaking_exception(self):
         for fail_before_launch in (True, False):
             with self.subTest(preflight=fail_before_launch), tempfile.TemporaryDirectory() as tmp:
@@ -242,6 +286,139 @@ raise SystemExit(g.main())
             self.assertEqual('interrupted', receipt['status'])
             self.assertEqual('footprint-budget', receipt['reason'])
             self.assertNotIn('cleanupFailure', receipt)
+
+
+class MonitoringDiagnosticsTests(unittest.TestCase):
+    def test_native_stages_are_captured_without_retry_or_private_data(self):
+        import os
+        from unittest.mock import patch
+        marker = 'fictitious-private-monitor-details'
+        scenarios = (
+            ('sysctl_parse', 'format'), ('pressure', 'command_exit'),
+            ('pressure_parse', 'format'), ('process_tree', 'os_error'),
+            ('process_tree_parse', 'format'), ('process_tree_parse_shape', 'format'),
+            ('process_identity', 'unexpected'),
+            ('process_ownership', 'unexpected'), ('process_footprint', 'timeout'),
+            ('process_footprint_parse', 'format'), ('process_recheck', 'command_exit'),
+        )
+        for failed_stage, failure_class in scenarios:
+            with self.subTest(stage=failed_stage), tempfile.TemporaryDirectory() as tmp:
+                calls = []
+                def read(command, **kwargs):
+                    calls.append(tuple(command))
+                    if command[0] == '/usr/sbin/sysctl':
+                        value = 'invalid' if failed_stage == 'sysctl_parse' else 'pressure_level: 1\nused = 0.00M'
+                    elif command[0] == '/usr/bin/memory_pressure':
+                        if failed_stage == 'pressure':
+                            raise subprocess.CalledProcessError(7, [marker], output=marker, stderr=marker)
+                        value = 'invalid' if failed_stage == 'pressure_parse' else 'free percentage: 70%'
+                    elif command == ['/bin/ps', '-axo', 'pid=,ppid=,pgid=']:
+                        if failed_stage == 'process_tree': raise OSError(marker)
+                        value = 'invalid' if failed_stage == 'process_tree_parse' else ('321 0' if failed_stage == 'process_tree_parse_shape' else '321 0 321')
+                    elif command == ['/usr/bin/vmmap', '-summary', '321']:
+                        if failed_stage == 'process_footprint': raise subprocess.TimeoutExpired([marker], 5, output=marker)
+                        value = 'invalid' if failed_stage == 'process_footprint_parse' else 'Physical footprint: 1M'
+                    elif command == ['/bin/ps', '-axo', 'pid=']:
+                        if failed_stage == 'process_recheck':
+                            raise subprocess.CalledProcessError(8, [marker], stderr=marker)
+                        value = '321'
+                    else:
+                        self.fail('unexpected native command')
+                    return subprocess.CompletedProcess(command, 0, stdout=value)
+                def identity(pid):
+                    if failed_stage in ('process_identity', 'process_recheck'): raise RuntimeError(marker)
+                    return {'pid':321,'uid':os.getuid()+(1 if failed_stage=='process_ownership' else 0),
+                            'seconds':1,'microseconds':2,'status':2}
+                report=Path(tmp)/'report.json'
+                with patch.object(guard.sys,'platform','darwin'), patch.object(
+                        guard.subprocess,'run',side_effect=read), patch.object(
+                        guard,'native_identity',side_effect=identity), patch.object(
+                        guard.os,'kill',side_effect=AssertionError('fixture must never signal a synthetic identity')):
+                    result=guard.run_guard([sys.executable,'-c','raise SystemExit(0)'],report,
+                                           measure=lambda pid:guard.mac_snapshot(321))
+                receipt=json.loads(report.read_text())
+                self.assertEqual(125,result)
+                self.assertEqual('refused',receipt['status'])
+                self.assertEqual('monitoring-unavailable',receipt['reason'])
+                self.assertIsNone(receipt['childExitCode'])
+                self.assertEqual({'stage':failed_stage.removesuffix('_shape'),'class':failure_class},receipt['monitoringFailure'])
+                self.assertNotIn(marker,report.read_text())
+                # One attempt per real command site: no diagnostic retry.
+                self.assertEqual(len(calls),len(set(calls)))
+
+    def test_disappeared_worker_race_remains_ignored(self):
+        from unittest.mock import patch
+        def read(command,**kwargs):
+            if command[0]=='/usr/sbin/sysctl': value='pressure_level: 1\nused = 0.00M'
+            elif command[0]=='/usr/bin/memory_pressure': value='free percentage: 70%'
+            elif command==['/bin/ps','-axo','pid=,ppid=,pgid=']: value='321 0 321'
+            elif command==['/bin/ps','-axo','pid=']: value=''
+            else: self.fail('unexpected native command')
+            return subprocess.CompletedProcess(command,0,stdout=value)
+        with patch.object(guard.sys,'platform','darwin'), patch.object(
+                guard.subprocess,'run',side_effect=read), patch.object(
+                guard,'native_identity',side_effect=RuntimeError('fictitious-private-race')):
+            sample=guard.mac_snapshot(321)
+        self.assertEqual(0,sample['processCount'])
+        self.assertEqual([],sample['processes'])
+        self.assertEqual(0,sample['footprintBytes'])
+
+    def test_disk_validation_policy_and_unknown_exception_have_fixed_diagnostics(self):
+        from unittest.mock import patch
+        Unknown=type('FictitiousPrivateExceptionName',(Exception,),{})
+        cases=(('disk','disk','os_error'),('invalid_sample','sample_validation','invalid_sample'),
+               ('invalid_clock','policy','invalid_sample'),('unknown','observation','unexpected'))
+        for case,stage,failure_class in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                report=Path(tmp)/'report.json'
+                def measure(pid):
+                    if case=='unknown': raise Unknown('fictitious-private-value')
+                    return {'footprintBytes':0,'swapBytes':0,'pressureLevel':3 if case=='invalid_sample' else 1,
+                            'freePercent':70,'processes':[]}
+                def disk():
+                    if case=='disk': raise OSError('fictitious-private-value')
+                    return 40*1024**3
+                ticks=iter([0,float('nan'),1])
+                result=guard.run_guard([sys.executable,'-c','raise SystemExit(0)'],report,
+                    profile='milestone',measure=measure,measure_disk=disk,
+                    clock=(lambda:next(ticks)) if case=='invalid_clock' else time.monotonic)
+                receipt=json.loads(report.read_text())
+                self.assertEqual(125,result)
+                self.assertEqual('refused',receipt['status'])
+                self.assertEqual('monitoring-unavailable',receipt['reason'])
+                self.assertEqual({'stage':stage,'class':failure_class},receipt['monitoringFailure'])
+                self.assertNotIn('FictitiousPrivateExceptionName',report.read_text())
+                self.assertNotIn('fictitious-private-value',report.read_text())
+
+    def test_diagnostic_boundary_keeps_closed_strings_for_forged_and_subclass_errors(self):
+        Unknown=type('FictitiousPrivateExceptionName',(guard._MonitoringFailure,),{})
+        cases=((guard._MonitoringFailure('private-stage','private-class'),
+                {'stage':'observation','class':'unexpected'}),
+               (guard._MonitoringFailure([],{}),{'stage':'observation','class':'unexpected'}),
+               (Unknown('sysctl','timeout'),{'stage':'observation','class':'unexpected'}))
+        for failure,expected in cases:
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as tmp:
+                report=Path(tmp)/'report.json'
+                def measure(pid): raise failure
+                result=guard.run_guard([sys.executable,'-c','raise SystemExit(0)'],report,measure=measure)
+                self.assertEqual(125,result)
+                receipt=json.loads(report.read_text())
+                self.assertEqual(expected,receipt['monitoringFailure'])
+                self.assertNotIn('private-stage',report.read_text())
+                self.assertNotIn('private-class',report.read_text())
+                self.assertNotIn('FictitiousPrivateExceptionName',report.read_text())
+
+    def test_diagnostic_is_absent_for_success_budget_and_operator_interrupt(self):
+        for case,expected in [('success',0),('budget',125),('operator',130)]:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                report=Path(tmp)/'report.json'
+                def measure(pid):
+                    if case=='operator': raise KeyboardInterrupt
+                    return dict(footprintBytes=0,swapBytes=0,pressureLevel=2 if case=='budget' else 1,freePercent=70)
+                result=guard.run_guard([sys.executable,'-c','raise SystemExit(0)'],report,
+                                       measure=measure,interval=.01)
+                self.assertEqual(expected,result)
+                self.assertNotIn('monitoringFailure',json.loads(report.read_text()))
 
 
 class MilestonePolicyTests(unittest.TestCase):
