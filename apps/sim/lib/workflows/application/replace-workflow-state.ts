@@ -1,3 +1,4 @@
+// Modified by Memlia: compare draft revision after validation and return the transaction receipt.
 import { AuditAction, AuditResourceType } from '@sim/audit'
 import {
   type Principal,
@@ -27,7 +28,7 @@ import {
   collectWorkflowGraphIds,
   replaceWorkflowNormalizedState,
 } from '@/lib/workflows/persistence/replace-normalized-state'
-import { loadWorkflowFromNormalizedTables } from '@/lib/workflows/persistence/utils'
+import { loadWorkflowDraftSnapshot } from '@/lib/workflows/persistence/utils'
 import { validateWorkflowState } from '@/lib/workflows/sanitization/validation'
 import {
   getToolBindingAuthoringSchema,
@@ -62,6 +63,7 @@ function humanSubjectUserId(principal: Principal): string | null {
 export interface ReplaceWorkflowStateInput {
   workflowId: string
   assertedWorkspaceId?: string
+  expectedRevision?: number
   blocks: Record<string, BlockState>
   edges: WorkflowState['edges']
   /** Omitted leaves the stored variables untouched. */
@@ -75,6 +77,8 @@ export interface ReplaceWorkflowStateInput {
 }
 
 export interface ReplaceWorkflowStateResult {
+  baseRevision: number
+  draftRevision: number
   workflowId: string
   workflowName: string
   workspaceId: string
@@ -103,9 +107,26 @@ export const replaceWorkflowState = defineAuthorizedWorkflowUseCase({
   operation: workflowOperations.replaceState,
   resolveContext: resolvePrincipalWorkflowContext<ReplaceWorkflowStateInput>,
   async execute({ principal, input, context }): Promise<ReplaceWorkflowStateResult> {
+    if (
+      input.expectedRevision !== undefined &&
+      (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0)
+    ) {
+      throw new OrchestrationError(
+        'validation',
+        'Workflow revision must be a non-negative safe integer'
+      )
+    }
     await requireMutableWorkflow(context.workflowId)
 
     return withWorkflowBlockScope(context, async () => {
+      const snapshot = await loadWorkflowDraftSnapshot(context.workflowId)
+      const baseRevision = snapshot.draftRevision
+      if (input.expectedRevision !== undefined && input.expectedRevision !== baseRevision) {
+        throw new OrchestrationError(
+          'conflict',
+          'Workflow draft changed; refresh the proposal before applying it'
+        )
+      }
       const candidate = {
         blocks: input.blocks,
         edges: input.edges,
@@ -127,9 +148,7 @@ export const replaceWorkflowState = defineAuthorizedWorkflowUseCase({
         principal.kind === 'delegated' &&
         principal.serviceId === 'copilot' &&
         Object.values(blocks).some((block) => getToolBindingAuthoringSchema(block.type))
-      const previous = enforceToolBindings
-        ? await loadWorkflowFromNormalizedTables(context.workflowId)
-        : undefined
+      const previous = enforceToolBindings ? snapshot.state : undefined
       if (enforceToolBindings && !previous) {
         throw new OrchestrationError(
           'validation',
@@ -220,6 +239,8 @@ export const replaceWorkflowState = defineAuthorizedWorkflowUseCase({
           needsRedeployment: await checkNeedsRedeployment(context.workflowId),
           lint,
           dryRun: true,
+          baseRevision,
+          draftRevision: baseRevision,
         }
       }
 
@@ -239,6 +260,7 @@ export const replaceWorkflowState = defineAuthorizedWorkflowUseCase({
          * reachable state.
          */
         subjectUserId,
+        expectedRevision: baseRevision,
         state: {
           blocks: graph.blocks,
           edges: graph.edges,
@@ -271,6 +293,8 @@ export const replaceWorkflowState = defineAuthorizedWorkflowUseCase({
         needsRedeployment: await checkNeedsRedeployment(context.workflowId),
         lint,
         dryRun: false,
+        baseRevision: persisted.baseRevision,
+        draftRevision: persisted.draftRevision,
       }
     })
   },

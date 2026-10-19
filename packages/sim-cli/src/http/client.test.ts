@@ -1,3 +1,4 @@
+// Modified by Memlia: classify only operations exported by the retained route contracts.
 import { sleep } from '@sim/utils/helpers'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { V2_OPERATIONS, type V2OperationName } from '../generated/v2-api'
@@ -435,13 +436,7 @@ describe('destructive operations are gated', () => {
     'updateProjectFileFolder',
     'updateProjectFileShare',
     /** These amend access or request history without discarding a resource. */
-    'cancelOrganizationAccessRequest',
-    'cancelWorkspaceAccessRequest',
-    'createOrganizationAccessRequest',
-    'createWorkspaceAccessRequest',
     'createWorkspaceInvitations',
-    'resolveOrganizationAccessRequest',
-    'updateOrganizationAccessRequestSettings',
     'updateOrganizationMemberUsageLimit',
     'createOrganizationInvitation',
     'resendOrganizationInvitation',

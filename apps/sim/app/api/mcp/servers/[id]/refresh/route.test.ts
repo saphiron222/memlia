@@ -1,4 +1,5 @@
-import { dbChainMockFns, resetDbChainMock } from '@sim/testing'
+// Modified by Memlia: common workflow draft revision and regression coverage.
+import { dbChainMockFns, queueTableRows, resetDbChainMock, schemaMock } from '@sim/testing'
 import { mcpServiceMock, mcpServiceMockFns } from '@sim/testing/mocks/mcp-service.mock'
 import type { NextRequest } from 'next/server'
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -173,5 +174,59 @@ describe('MCP server refresh route', () => {
         updatedWorkflowIds: [],
       })
     )
+  })
+  it('refreshes locked current tools while preserving human fields and advances one draft revision', async () => {
+    mockDiscoverServerTools.mockResolvedValueOnce([
+      {
+        name: 'lookup',
+        description: 'Current tool',
+        inputSchema: { type: 'object', properties: { query: { type: 'string' } } },
+      },
+    ])
+    queueTableRows(schemaMock.workflow, [{ id: 'workflow-1' }])
+    queueTableRows(schemaMock.workflow, [{ draftRevision: 6 }])
+    queueTableRows(schemaMock.workflowBlocks, [
+      {
+        id: 'block-1',
+        workflowId: 'workflow-1',
+        subBlocks: {
+          prompt: { value: 'Human edit' },
+          tools: {
+            value: [
+              {
+                type: 'mcp',
+                params: { serverId: 'server-1', toolName: 'lookup', query: 'Human query' },
+                schema: {},
+              },
+            ],
+          },
+        },
+      },
+    ])
+    dbChainMockFns.returning.mockResolvedValue([{ ...persistedServer, draftRevision: 7 }])
+    const response = await POST(
+      new Request('http://localhost/api/mcp/servers/server-1/refresh', {
+        method: 'POST',
+      }) as NextRequest,
+      { params: Promise.resolve({ id: 'server-1' }) }
+    )
+    expect((await response.json()).data.workflowsUpdated).toBe(1)
+    expect(dbChainMockFns.for).toHaveBeenCalledWith('update')
+    expect(dbChainMockFns.set).toHaveBeenCalledWith(
+      expect.objectContaining({
+        subBlocks: {
+          prompt: { value: 'Human edit' },
+          tools: {
+            value: [
+              expect.objectContaining({
+                params: expect.objectContaining({ query: 'Human query' }),
+                schema: expect.objectContaining({ description: 'Current tool' }),
+              }),
+            ],
+          },
+        },
+      })
+    )
+    expect(dbChainMockFns.set).toHaveBeenCalledWith({ draftRevision: 7 })
   })
 })

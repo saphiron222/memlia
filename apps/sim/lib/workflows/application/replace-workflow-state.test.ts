@@ -1,3 +1,4 @@
+// Modified by Memlia: common workflow draft revision and regression coverage.
 import { WorkflowLockedError } from '@sim/platform-authz/workflow'
 import { workflowAuthzMockFns } from '@sim/testing'
 import {
@@ -47,7 +48,13 @@ vi.mock('@/lib/workflows/sanitization/validation', () => ({
   validateWorkflowState: mocks.validate,
 }))
 vi.mock('@/lib/workflows/deployment-status', () => workflowDeploymentStatusMock)
-vi.mock('@/lib/workflows/persistence/utils', () => workflowsPersistenceUtilsMock)
+vi.mock('@/lib/workflows/persistence/utils', () => ({
+  ...workflowsPersistenceUtilsMock,
+  loadWorkflowDraftSnapshot: async (id: string) => ({
+    state: await workflowsPersistenceUtilsMockFns.mockLoadWorkflowFromNormalizedTables(id),
+    draftRevision: 0,
+  }),
+}))
 
 import { OrchestrationError } from '@/lib/core/orchestration/types'
 import { replaceWorkflowState } from '@/lib/workflows/application/replace-workflow-state'
@@ -100,6 +107,8 @@ describe('replaceWorkflowState', () => {
     workflowAuthzMockFns.mockAssertWorkflowMutable.mockResolvedValue(undefined)
     mocks.validate.mockReturnValue({ valid: true, errors: [], warnings: [] })
     mocks.replace.mockResolvedValue({
+      baseRevision: 0,
+      draftRevision: 1,
       warnings: [],
       state: { blocks: { 'block-1': BLOCK }, edges: [], loops: {}, parallels: {} },
     })
@@ -146,6 +155,7 @@ describe('replaceWorkflowState', () => {
     })
 
     expect(mocks.replace).toHaveBeenCalledWith({
+      expectedRevision: 0,
       subjectUserId: 'user-1',
       workflowId: 'workflow-1',
       workspaceId: 'workspace-1',

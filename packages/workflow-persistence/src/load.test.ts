@@ -1,6 +1,8 @@
+// Modified by Memlia: reject malformed migrate-on-read revisions even for an empty batch.
 import { describe, expect, it, vi } from 'vitest'
 
 type Row = Record<string, unknown>
+const migrationMocks = vi.hoisted(() => ({ warn: vi.fn(), transaction: vi.fn() }))
 
 const tables = vi.hoisted(() => ({
   workflow: { name: 'workflow' as const },
@@ -14,7 +16,7 @@ const tables = vi.hoisted(() => ({
 }))
 
 vi.mock('@sim/db', () => ({
-  db: {},
+  db: { transaction: migrationMocks.transaction },
   workflow: tables.workflow,
   workflowBlocks: tables.workflowBlocks,
   workflowEdges: tables.workflowEdges,
@@ -22,7 +24,12 @@ vi.mock('@sim/db', () => ({
 }))
 
 vi.mock('@sim/logger', () => ({
-  createLogger: () => ({ debug: vi.fn(), error: vi.fn(), info: vi.fn(), warn: vi.fn() }),
+  createLogger: () => ({
+    debug: vi.fn(),
+    error: vi.fn(),
+    info: vi.fn(),
+    warn: migrationMocks.warn,
+  }),
 }))
 
 vi.mock('drizzle-orm', () => ({
@@ -33,7 +40,7 @@ vi.mock('drizzle-orm', () => ({
   sql: vi.fn(() => 'updated_at::text'),
 }))
 
-import { loadWorkflowFromNormalizedTablesRaw } from './load'
+import { loadWorkflowFromNormalizedTablesRaw, persistMigratedBlocks } from './load'
 
 /**
  * Minimal stand-in for the drizzle query builder the loader uses: every chain
@@ -115,3 +122,22 @@ describe('loadWorkflowFromNormalizedTablesRaw', () => {
     })
   })
 })
+
+it.each([undefined, -1, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1])(
+  'validates migration revision %s before the no-op path without unhandled rejection',
+  async (revision) => {
+    migrationMocks.warn.mockClear()
+    migrationMocks.transaction.mockClear()
+    await expect(
+      persistMigratedBlocks('workflow', {}, {}, {}, revision as number)
+    ).resolves.toBeUndefined()
+    expect(migrationMocks.warn).toHaveBeenCalledWith(
+      'Failed to persist block migrations',
+      expect.objectContaining({
+        workflowId: 'workflow',
+        error: expect.objectContaining({ code: 'validation' }),
+      })
+    )
+    expect(migrationMocks.transaction).not.toHaveBeenCalled()
+  }
+)

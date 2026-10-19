@@ -1,3 +1,5 @@
+// Modified by Memlia: preserve the canonical draft revision in internal read contracts.
+import { WorkflowProposalSchema } from '@memlia/contracts'
 import {
   BLOCK_RETRY_MAX_TRIES,
   BLOCK_RETRY_MAX_WAIT_MS,
@@ -15,6 +17,8 @@ import { defineRouteContract } from '@/lib/api/contracts/types'
 import { MAX_WORKFLOW_EXECUTION_TIMEOUT_SECONDS } from '@/lib/billing/execution-timeout-defaults'
 import { PRIVATE_SECRET_PROVENANCE_FIELD } from '@/lib/execution/private-tool-metadata'
 
+// Use the same revision bounds as proposals and the v2 draft contracts.
+const workflowDraftRevisionSchema = WorkflowProposalSchema.shape.expectedRevision
 const subBlockValuesSchema = z.record(z.string(), z.record(z.string(), z.unknown()))
 export const WORKFLOW_EXECUTION_ID_HEADER = 'X-Execution-Id'
 export const WORKFLOW_EXECUTION_TIMEOUT_SECONDS_HEADER = 'X-Execution-Timeout-Seconds'
@@ -710,6 +714,7 @@ export const listWorkflowsContract = defineRouteContract({
  * `workspaceId` / `isDeployed` / `deployedAt` out as `unknown`.
  */
 export const getWorkflowResponseDataSchema = z.object({
+  draftRevision: workflowDraftRevisionSchema,
   id: z.string(),
   userId: z.string(),
   workspaceId: z.string().nullable(),
@@ -747,6 +752,7 @@ export const getWorkflowStateContract = defineRouteContract({
 })
 
 export const workflowStateResponseSchema = z.object({
+  draftRevision: workflowDraftRevisionSchema,
   blocks: z.record(z.string(), workflowBlockStateSchema),
   edges: z.array(workflowEdgeSchema),
   loops: z.record(z.string(), workflowLoopSchema),

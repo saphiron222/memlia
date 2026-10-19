@@ -1,3 +1,4 @@
+// Modified by Memlia: bound controlled SDK calls with per-request retries and cancellation.
 import type Anthropic from '@anthropic-ai/sdk'
 import type { RawMessageStreamEvent } from '@anthropic-ai/sdk/resources/messages/messages'
 import type { Logger } from '@sim/logger'
@@ -35,7 +36,7 @@ import {
   supportsNativeStructuredOutputs,
   supportsTemperature,
 } from '@/providers/models'
-import { executeProviderTool } from '@/providers/runtime-context'
+import { beforeProviderModelCall, executeProviderTool } from '@/providers/runtime-context'
 import { createStreamingExecution } from '@/providers/streaming-execution'
 import { isAbortError } from '@/providers/streaming-tool-loop-shared'
 import { adaptAnthropicToolSchema } from '@/providers/tool-schema-adapter'
@@ -260,7 +261,7 @@ async function createMessage(
   payload: AnthropicPayload,
   abortSignal?: AbortSignal
 ): Promise<Anthropic.Messages.Message> {
-  const options = abortSignal ? { signal: abortSignal } : undefined
+  const options = beforeProviderModelCall(abortSignal)
   if (payload.max_tokens > ANTHROPIC_SDK_NON_STREAMING_MAX_TOKENS && !payload.stream) {
     const stream = anthropic.messages.stream(
       payload as Anthropic.Messages.MessageStreamParams,
@@ -537,12 +538,13 @@ export async function executeAnthropicProviderRequest(
     const providerStartTime = Date.now()
     const providerStartTimeISO = new Date(providerStartTime).toISOString()
 
+    const prepared = await prepareConversationGeneration(request, 'anthropic', {
+      ...payload,
+      stream: true,
+    } as Anthropic.Messages.MessageCreateParamsStreaming)
     const streamResponse = await anthropic.messages.create(
-      await prepareConversationGeneration(request, 'anthropic', {
-        ...payload,
-        stream: true,
-      } as Anthropic.Messages.MessageCreateParamsStreaming),
-      request.abortSignal ? { signal: request.abortSignal } : undefined
+      prepared,
+      beforeProviderModelCall(request.abortSignal)
     )
 
     const streamingResult = createStreamingExecution({

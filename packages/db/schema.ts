@@ -1,3 +1,4 @@
+// Modified by Memlia: add the common workflow draft revision.
 import { WHITESPACE_CHARACTER_CLASS } from '@sim/utils/string'
 import { type SQL, sql } from 'drizzle-orm'
 import {
@@ -431,9 +432,14 @@ export const workflow = pgTable(
     runCount: integer('run_count').notNull().default(0),
     lastRunAt: timestamp('last_run_at'),
     variables: json('variables').default('{}'),
+    draftRevision: bigint('draft_revision', { mode: 'number' }).notNull().default(0),
     archivedAt: timestamp('archived_at'),
   },
   (table) => ({
+    draftRevisionRange: check(
+      'workflow_draft_revision_range',
+      sql`${table.draftRevision} BETWEEN 0 AND 9007199254740991`
+    ),
     userIdIdx: index('workflow_user_id_idx').on(table.userId),
     workspaceIdIdx: index('workflow_workspace_id_idx').on(table.workspaceId),
     userWorkspaceIdx: index('workflow_user_workspace_idx').on(table.userId, table.workspaceId),
@@ -8531,3 +8537,6 @@ export const copilotServiceUsage = pgTable(
     index('copilot_service_usage_pending_idx').on(t.nextAttemptAt).where(sql`delivered_at IS NULL`),
   ]
 )
+
+// Memlia additions remain separate from the Apache upstream schema definitions.
+export { memliaWorkflowCopy } from './memlia-schema'

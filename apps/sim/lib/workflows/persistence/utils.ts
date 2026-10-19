@@ -1,3 +1,4 @@
+// Modified by Memlia: preserve the common draft mutation receipt.
 import {
   db,
   runOutsideTransactionContext,
@@ -23,8 +24,9 @@ import {
 } from '@sim/workflow-types/workflow'
 import type { Edge } from '@xyflow/react'
 import type { InferSelectModel } from 'drizzle-orm'
-import { and, desc, eq, inArray, lt, sql } from 'drizzle-orm'
+import { and, desc, eq, inArray, isNull, lt, sql } from 'drizzle-orm'
 import { LRUCache } from 'lru-cache'
+import { OrchestrationError } from '@/lib/core/orchestration/types'
 import { releaseWebhookPathClaims } from '@/lib/webhooks/path-claims'
 import { remapConditionBlockIds, remapConditionEdgeHandle } from '@/lib/workflows/condition-ids'
 import { isDynamicHandleSubblock } from '@/lib/workflows/dynamic-handle-topology'
@@ -596,7 +598,13 @@ export async function loadWorkflowFromNormalizedTables(
     // it escapes the transaction context instead of tripping the wire.
     runOutsideTransactionContext(() => {
       Promise.resolve().then(() =>
-        persistMigratedBlocks(workflowId, raw.blocks, finalBlocks, raw.blockUpdatedAtById)
+        persistMigratedBlocks(
+          workflowId,
+          raw.blocks,
+          finalBlocks,
+          raw.blockUpdatedAtById,
+          raw.draftRevision
+        )
       )
     })
   }
@@ -625,6 +633,22 @@ export async function loadWorkflowFromNormalizedTables(
     parallels: patchedParallels,
     isFromNormalizedTables: true,
   }
+}
+
+/** A short share-locked read; release before validation, external IO, or approval. */
+export async function loadWorkflowDraftSnapshot(workflowId: string) {
+  return db.transaction(async (tx) => {
+    const [row] = await tx
+      .select({ draftRevision: workflow.draftRevision })
+      .from(workflow)
+      .where(and(eq(workflow.id, workflowId), isNull(workflow.archivedAt)))
+      .limit(1)
+      .for('share')
+    if (!row) throw new OrchestrationError('not_found', 'Workflow not found')
+    const state = await loadWorkflowFromNormalizedTables(workflowId, tx)
+    if (!state) throw new OrchestrationError('validation', 'Workflow has no normalized state')
+    return { state, draftRevision: row.draftRevision }
+  })
 }
 
 export async function loadWorkflowDeploymentSnapshot(
@@ -707,7 +731,7 @@ export async function saveAdmittedWorkflowState(
   tx: DbOrTx,
   workflowId: string,
   admitted: AdmittedWorkflowState
-): Promise<{ success: boolean; error?: string }> {
+): ReturnType<typeof saveWorkflowToNormalizedTablesRaw> {
   if (!admitted[ADMITTED_WORKFLOW_STATE]) throw new Error('Workflow state was not admitted')
   return saveWorkflowToNormalizedTablesRaw(workflowId, admitted.state, tx)
 }
@@ -717,7 +741,7 @@ export async function saveWorkflowToNormalizedTables(
   state: WorkflowState,
   governance: WorkflowPersistGovernance,
   externalTx?: DbOrTx
-): Promise<{ success: boolean; error?: string }> {
+): ReturnType<typeof saveWorkflowToNormalizedTablesRaw> {
   await assertNoWithheldBlockType(governance, Object.values(state.blocks))
 
   if (externalTx) {

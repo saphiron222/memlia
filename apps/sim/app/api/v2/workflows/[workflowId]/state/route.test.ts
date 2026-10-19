@@ -1,3 +1,4 @@
+// Modified by Memlia: qualify HTTP draft revision and conflict transport.
 import {
   V2_OPERATION_RATE_LIMIT_ALLOWED,
   V2_PREAUTH_RATE_LIMIT_ALLOWED,
@@ -26,6 +27,7 @@ vi.mock('@/lib/api/server/routes/v2-api-key-auth', () => v2ApiKeyAuthModuleMock)
 vi.mock('@/lib/core/rate-limiter', () => v2RateLimiterModuleMock)
 
 import { NoWorkspaceAccessError } from '@/lib/core/application'
+import { OrchestrationError } from '@/lib/core/orchestration/types'
 import { GET, PUT } from '@/app/api/v2/workflows/[workflowId]/state/route'
 
 const WORKFLOW_ID = 'workflow-1'
@@ -39,6 +41,7 @@ const BLOCK = {
   enabled: true,
 }
 const GRAPH = {
+  draftRevision: 7,
   blocks: { 'block-1': BLOCK },
   edges: [],
   loops: {},
@@ -89,6 +92,8 @@ describe('/api/v2/workflows/[workflowId]/state', () => {
     mocks.replaceWorkflowState.mockResolvedValue({
       workflowId: WORKFLOW_ID,
       workflowName: 'Daily digest',
+      baseRevision: 7,
+      draftRevision: 8,
       workspaceId: 'workspace-1',
       blocksCount: 1,
       edgesCount: 0,
@@ -121,7 +126,10 @@ describe('/api/v2/workflows/[workflowId]/state', () => {
   })
 
   it('accepts the published empty-graph example', async () => {
-    const response = await PUT(putRequest({ blocks: {}, edges: [] }), routeContext)
+    const response = await PUT(
+      putRequest({ blocks: {}, edges: [], expectedRevision: 7 }),
+      routeContext
+    )
 
     expect(response.status).toBe(200)
     expect(mocks.replaceWorkflowState).toHaveBeenCalledOnce()
@@ -141,9 +149,39 @@ describe('/api/v2/workflows/[workflowId]/state', () => {
     })
   })
 
-  it('accepts a graph read straight back from the GET', async () => {
-    const response = await PUT(putRequest(GRAPH), routeContext)
+  it('accepts the GET graph with its revision explicitly bound as expectedRevision', async () => {
+    const response = await PUT(
+      putRequest({ ...GRAPH, draftRevision: undefined, expectedRevision: GRAPH.draftRevision }),
+      routeContext
+    )
 
     expect(response.status).toBe(200)
+  })
+})
+
+describe('state revision at the HTTP boundary', () => {
+  beforeEach(() => {
+    v2RouteMocks.authenticate.mockResolvedValue(personalAuth)
+    v2RouteMocks.preauthRate.mockResolvedValue(V2_PREAUTH_RATE_LIMIT_ALLOWED)
+    v2RouteMocks.operationRate.mockResolvedValue(V2_OPERATION_RATE_LIMIT_ALLOWED)
+  })
+  it('refuses an unversioned replacement before executing a writer', async () => {
+    const response = await PUT(putRequest({ blocks: {}, edges: [] }), routeContext)
+    expect(response.status).toBe(400)
+    expect(mocks.replaceWorkflowState).not.toHaveBeenCalled()
+  })
+  it('carries revision to the writer and preserves its conflict as HTTP 409', async () => {
+    mocks.replaceWorkflowState.mockImplementation(async ({ input }) => {
+      if (input.expectedRevision === 7)
+        throw new OrchestrationError('conflict', 'Workflow draft changed')
+      throw new Error('Expected revision was lost at the transport')
+    })
+    const response = await PUT(
+      putRequest({ blocks: {}, edges: [], expectedRevision: 7 }),
+      routeContext
+    )
+    expect(response.status).toBe(409)
+    expect(response.headers.get('Cache-Control')).toBe('private, no-store')
+    expect((await response.json()).error.code).toBe('CONFLICT')
   })
 })

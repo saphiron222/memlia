@@ -29,6 +29,10 @@
     "./types": {
       "types": "./src/types.ts",
       "default": "./src/types.ts"
+    },
+    "./revision": {
+      "types": "./src/revision.ts",
+      "default": "./src/revision.ts"
     }
   },
   "scripts": {
@@ -53,5 +57,6 @@
     "@types/node": "24.2.1",
     "typescript": "^7.0.2",
     "vitest": "^5.0.1"
-  }
+  },
+  "x-memlia-modifications": "Modified by Memlia in 2026: common draft revision persistence. Upstream Apache-2.0 license and notices retained."
 }

@@ -1,3 +1,4 @@
+// Modified by Memlia: require the draft revision and expose the native operation receipt.
 import { v2ApplyWorkflowOperationsContract } from '@/lib/api/contracts/v2/workflows'
 import { defineV2JsonRoute, v2ApiKeyAuth, v2RateLimits } from '@/lib/api/server/routes'
 import { v2WorkflowErrorPolicies } from '@/lib/workflows/api'
@@ -27,6 +28,7 @@ export const POST = defineV2JsonRoute({
   mapInput: ({ params, query, body }) => ({
     workflowId: params.workflowId,
     dryRun: query.dryRun,
+    expectedRevision: body.expectedRevision,
     operations: body.operations,
     atomic: body.atomic,
     layout: body.layout,
@@ -39,6 +41,8 @@ export const POST = defineV2JsonRoute({
   present: (result) => ({
     data: {
       id: result.workflowId,
+      baseRevision: result.baseRevision,
+      draftRevision: result.draftRevision,
       applied: result.applied,
       skipped: result.skipped,
       deferred: result.deferred,

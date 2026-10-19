@@ -1,3 +1,4 @@
+// Modified by Memlia: common workflow draft revision and regression coverage.
 import { dbChainMockFns, resetDbChainMock } from '@sim/testing'
 import { auditMock, auditMockFns } from '@sim/testing/mocks/audit.mock'
 import { realtimeNotifyMock, realtimeNotifyMockFns } from '@sim/testing/mocks/realtime-notify.mock'
@@ -54,13 +55,14 @@ describe('applyWorkflowVariableOperations', () => {
     resetDbChainMock()
     mockResolveContext.mockResolvedValue(context)
     mockResolvePermission.mockResolvedValue('write')
-    dbChainMockFns.for.mockResolvedValue([{ variables: {} }])
-    dbChainMockFns.returning.mockResolvedValue([{ id: 'workflow-1' }])
+    dbChainMockFns.for.mockResolvedValue([{ variables: {}, draftRevision: 0 }])
+    dbChainMockFns.returning.mockResolvedValue([{ id: 'workflow-1', draftRevision: 1 }])
   })
 
   it('transforms the row locked in the write transaction and projects effects afterward', async () => {
     dbChainMockFns.for.mockResolvedValueOnce([
       {
+        draftRevision: 0,
         variables: {
           concurrent: {
             id: 'concurrent',

@@ -1,3 +1,4 @@
+// Modified by Memlia: only transaction doubles expose the native rollback boundary.
 import { vi } from 'vitest'
 import { schemaMock } from './schema.mock'
 import { GENERATED_DB_CONSTANTS } from './schema-tables.generated'
@@ -257,7 +258,13 @@ const values = vi.fn<
   }
 >(() => ({ returning, onConflictDoUpdate, onConflictDoNothing }))
 const transaction: ReturnType<typeof vi.fn> = vi.fn(
-  async (cb: (tx: any) => unknown): Promise<unknown> => cb(dbChainMock.db)
+  async (cb: (tx: any) => unknown): Promise<unknown> =>
+    cb({
+      ...dbChainMock.db,
+      rollback: () => {
+        throw new Error('Transaction rollback')
+      },
+    })
 )
 
 /**

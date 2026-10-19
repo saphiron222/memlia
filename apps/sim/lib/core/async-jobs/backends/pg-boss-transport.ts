@@ -20,6 +20,8 @@ interface TransportOptions {
   connectionString: string
   schema: string
   queueName: string
+  /** Set false when provisioning owns the schema; pg-boss still migrates its tables. */
+  createSchema?: boolean
   /** Receives only a fixed diagnostic code, never the underlying driver error. */
   onError: (code: 'transport_background_error') => void
 }
@@ -66,6 +68,7 @@ export class PgBossTransport {
     this.boss = new PgBoss({
       connectionString: options.connectionString,
       schema: options.schema,
+      ...(options.createSchema !== undefined ? { createSchema: options.createSchema } : {}),
       // Sim retains scheduling. pg-boss only supervises delivery/expiration.
       schedule: false,
     })

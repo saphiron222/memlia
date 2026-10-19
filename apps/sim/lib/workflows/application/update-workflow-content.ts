@@ -1,7 +1,9 @@
+// Modified by Memlia: variable mutations invalidate draft proposals in the same transaction.
 import { AuditAction, AuditResourceType } from '@sim/audit'
 import { db } from '@sim/db'
 import { workflow } from '@sim/db/schema'
 import { generateId } from '@sim/utils/id'
+import { advanceWorkflowDraft } from '@sim/workflow-persistence/revision'
 import { and, eq, isNull } from 'drizzle-orm'
 import { principalAuditSource } from '@/lib/core/application'
 import { OrchestrationError } from '@/lib/core/orchestration/types'
@@ -81,7 +83,7 @@ export const applyWorkflowVariableOperations = defineAuthorizedWorkflowUseCase({
 
     return db.transaction(async (tx) => {
       const [current] = await tx
-        .select({ variables: workflow.variables })
+        .select({ variables: workflow.variables, draftRevision: workflow.draftRevision })
         .from(workflow)
         .where(
           and(
@@ -115,7 +117,8 @@ export const applyWorkflowVariableOperations = defineAuthorizedWorkflowUseCase({
         )
         .returning({ id: workflow.id })
       if (!updated) throw new OrchestrationError('not_found', 'Workflow not found')
-      return { updated: Object.keys(transformed.variables).length, changed: true }
+      const receipt = await advanceWorkflowDraft(tx, context.workflowId, current.draftRevision)
+      return { updated: Object.keys(transformed.variables).length, changed: true, ...receipt }
     })
   },
   projectAudit: ({ principal, input, context, result }) =>

@@ -1,8 +1,10 @@
+// Modified by Memlia: legacy variable writes advance the common draft revision.
 import { db } from '@sim/db'
 import { folder as folderTable, workflow as workflowTable } from '@sim/db/schema'
 import { createLogger } from '@sim/logger'
 import { authorizeWorkflowByWorkspacePermission } from '@sim/platform-authz/workflow'
 import { generateId } from '@sim/utils/id'
+import { withWorkflowDraftMutation } from '@sim/workflow-persistence/revision'
 import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm'
 import { NextResponse } from 'next/server'
 import { getSession } from '@/lib/auth'
@@ -453,10 +455,15 @@ export async function deleteWorkflowRecord(workflowId: string) {
 }
 
 export async function setWorkflowVariables(workflowId: string, variables: Record<string, unknown>) {
-  await db
-    .update(workflowTable)
-    .set({ variables, updatedAt: new Date() })
-    .where(eq(workflowTable.id, workflowId))
+  await db.transaction((tx) =>
+    withWorkflowDraftMutation(tx, workflowId, async () => {
+      await tx
+        .update(workflowTable)
+        .set({ variables, updatedAt: new Date() })
+        .where(eq(workflowTable.id, workflowId))
+      return { changed: true, value: undefined }
+    })
+  )
 }
 
 // ── Folder CRUD ──

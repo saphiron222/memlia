@@ -1,3 +1,4 @@
+// Modified by Memlia: qualify revision projection from the same graph snapshot.
 import { createPersonalApiKeyPrincipal } from '@sim/testing/factories/principal.factory'
 import { auditMock } from '@sim/testing/mocks/audit.mock'
 import {
@@ -50,7 +51,7 @@ describe('readWorkflowGraph', () => {
     mockResolveContext.mockResolvedValue(context)
     mockResolvePermission.mockResolvedValue('read')
     mockLoadSnapshot.mockResolvedValue({
-      workflowRecord: { id: 'workflow-1', variables: STORED_VARIABLES },
+      workflowRecord: { id: 'workflow-1', draftRevision: 7, variables: STORED_VARIABLES },
       normalizedData: { blocks: { 'block-1': { id: 'block-1' } }, edges: [] },
     })
   })
@@ -59,6 +60,7 @@ describe('readWorkflowGraph', () => {
     await expect(readWorkflowGraph.execute({ principal, input })).resolves.toEqual({
       workflowId: 'workflow-1',
       workspaceId: 'workspace-1',
+      draftRevision: 7,
       blocks: { 'block-1': { id: 'block-1' } },
       edges: [],
       loops: {},
@@ -78,7 +80,7 @@ describe('readWorkflowGraph', () => {
     ['a legacy array', Object.values(STORED_VARIABLES)],
   ])('reads variables stored as %s', async (_shape, stored) => {
     mockLoadSnapshot.mockResolvedValue({
-      workflowRecord: { id: 'workflow-1', variables: stored },
+      workflowRecord: { id: 'workflow-1', draftRevision: 7, variables: stored },
       normalizedData: { blocks: { 'block-1': { id: 'block-1' } }, edges: [] },
     })
 

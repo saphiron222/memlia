@@ -1,3 +1,4 @@
+// Modified by Memlia: return the revision from the same persisted graph snapshot.
 import type { BlockState, Variable, WorkflowState } from '@sim/workflow-types/workflow'
 import { OrchestrationError } from '@/lib/core/orchestration/types'
 import { defineAuthorizedWorkflowUseCase } from '@/lib/workflows/application/authorized-workflow-use-case'
@@ -14,6 +15,7 @@ export interface ReadWorkflowGraphInput {
 export interface ReadWorkflowGraphResult {
   workflowId: string
   workspaceId: string
+  draftRevision: number
   blocks: Record<string, BlockState>
   edges: WorkflowState['edges']
   loops: WorkflowState['loops']
@@ -60,6 +62,7 @@ export async function loadWorkflowGraph(context: {
   return {
     workflowId: context.workflowId,
     workspaceId: context.workspaceId,
+    draftRevision: snapshot.workflowRecord.draftRevision,
     blocks: (snapshot.normalizedData?.blocks ?? {}) as Record<string, BlockState>,
     edges: (snapshot.normalizedData?.edges ?? []) as WorkflowState['edges'],
     loops: snapshot.normalizedData?.loops ?? {},

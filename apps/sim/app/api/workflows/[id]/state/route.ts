@@ -1,3 +1,4 @@
+// Modified by Memlia: project the draft revision from the existing coherent read snapshot.
 import { db } from '@sim/db'
 import { workflow } from '@sim/db/schema'
 import { createLogger } from '@sim/logger'
@@ -44,15 +45,15 @@ export const GET = withRouteHandler(
         const [normalized, [workflowRecord]] = await Promise.all([
           loadWorkflowFromNormalizedTables(workflowId, tx),
           tx
-            .select({ variables: workflow.variables })
+            .select({ variables: workflow.variables, draftRevision: workflow.draftRevision })
             .from(workflow)
             .where(eq(workflow.id, workflowId))
             .limit(1),
         ])
-        return { normalized, variables: workflowRecord?.variables }
+        return { normalized, workflowRecord }
       })
 
-      if (!snapshot.normalized) {
+      if (!snapshot.normalized || !snapshot.workflowRecord) {
         return NextResponse.json({ error: 'Workflow state not found' }, { status: 404 })
       }
 
@@ -61,7 +62,7 @@ export const GET = withRouteHandler(
       // requiring clients to thread the path param through. The read
       // contract requires this server-stamped field.
       const persistedVariables =
-        (snapshot.variables as Record<string, Record<string, unknown>>) || {}
+        (snapshot.workflowRecord.variables as Record<string, Record<string, unknown>>) || {}
       const variables: Record<string, Record<string, unknown>> = {}
       for (const [variableId, variable] of Object.entries(persistedVariables)) {
         if (variable && typeof variable === 'object') {
@@ -70,6 +71,7 @@ export const GET = withRouteHandler(
       }
 
       return NextResponse.json({
+        draftRevision: snapshot.workflowRecord.draftRevision,
         blocks: snapshot.normalized.blocks,
         edges: snapshot.normalized.edges,
         loops: snapshot.normalized.loops || {},

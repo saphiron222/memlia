@@ -1,3 +1,4 @@
+// Modified by Memlia: qualify HTTP revision requirements and conflict transport.
 import {
   V2_OPERATION_RATE_LIMIT_ALLOWED,
   V2_PREAUTH_RATE_LIMIT_ALLOWED,
@@ -22,6 +23,7 @@ vi.mock('@/lib/api/server/routes/v2-api-key-auth', () => v2ApiKeyAuthModuleMock)
 vi.mock('@/lib/core/rate-limiter', () => v2RateLimiterModuleMock)
 
 import { NoWorkspaceAccessError } from '@/lib/core/application'
+import { OrchestrationError } from '@/lib/core/orchestration/types'
 import { WorkflowOperationsNotAppliedError } from '@/lib/workflows/application/operations-error'
 import { POST } from '@/app/api/v2/workflows/[workflowId]/operations/route'
 
@@ -85,6 +87,8 @@ describe('/api/v2/workflows/[workflowId]/operations', () => {
     mocks.applyWorkflowOperations.mockResolvedValue({
       workflowId: WORKFLOW_ID,
       workflowName: 'Daily digest',
+      baseRevision: 7,
+      draftRevision: 8,
       workspaceId: 'workspace-1',
       graph: { blocks: {}, edges: [], loops: {}, parallels: {} },
       operationCount: 1,
@@ -109,6 +113,8 @@ describe('/api/v2/workflows/[workflowId]/operations', () => {
     mocks.applyWorkflowOperations.mockResolvedValue({
       workflowId: WORKFLOW_ID,
       workflowName: 'Daily digest',
+      baseRevision: 7,
+      draftRevision: 7,
       workspaceId: 'workspace-1',
       graph: { blocks: {}, edges: [], loops: {}, parallels: {} },
       operationCount: 1,
@@ -128,7 +134,7 @@ describe('/api/v2/workflows/[workflowId]/operations', () => {
       new NextRequest(`http://localhost/api/v2/workflows/${WORKFLOW_ID}/operations?dryRun=true`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ operations: [ADD] }),
+        body: JSON.stringify({ expectedRevision: 7, operations: [ADD] }),
       }),
       routeContext
     )
@@ -138,12 +144,15 @@ describe('/api/v2/workflows/[workflowId]/operations', () => {
       mintedBlockIds: {},
       previewBlockIds: { triage: 'a3f1c0b2-7a44-4c1d-9d3a-2b8e5f0a1c77' },
       dryRun: true,
+      baseRevision: 7,
+      draftRevision: 7,
     })
   })
 
   it('maps the setBlockEnabled flag onto the use case input', async () => {
     await POST(
       request({
+        expectedRevision: 7,
         operations: [ADD],
         setBlockEnabled: [{ block_id: 'block-1', enabled: false }],
       }),
@@ -164,7 +173,10 @@ describe('/api/v2/workflows/[workflowId]/operations', () => {
       new WorkflowOperationsNotAppliedError([SKIPPED] as never)
     )
 
-    const response = await POST(request({ operations: [ADD], atomic: true }), routeContext)
+    const response = await POST(
+      request({ expectedRevision: 7, operations: [ADD], atomic: true }),
+      routeContext
+    )
 
     expect(response.status).toBe(409)
     expect(await response.json()).toEqual({
@@ -187,7 +199,10 @@ describe('/api/v2/workflows/[workflowId]/operations', () => {
       new WorkflowOperationsNotAppliedError([], [DROPPED_INPUT] as never)
     )
 
-    const response = await POST(request({ operations: [ADD], atomic: true }), routeContext)
+    const response = await POST(
+      request({ expectedRevision: 7, operations: [ADD], atomic: true }),
+      routeContext
+    )
 
     expect(response.status).toBe(409)
     expect((await response.json()).error.details).toEqual({
@@ -200,7 +215,7 @@ describe('/api/v2/workflows/[workflowId]/operations', () => {
   it('conceals a cross-tenant write as not found', async () => {
     mocks.applyWorkflowOperations.mockRejectedValue(new NoWorkspaceAccessError('workspace-2'))
 
-    const response = await POST(request({ operations: [ADD] }), routeContext)
+    const response = await POST(request({ expectedRevision: 7, operations: [ADD] }), routeContext)
 
     expect(response.status).toBe(404)
     expect((await response.json()).error.code).toBe('NOT_FOUND')
@@ -231,6 +246,8 @@ describe('/api/v2/workflows/[workflowId]/operations', () => {
     mocks.applyWorkflowOperations.mockResolvedValue({
       workflowId: WORKFLOW_ID,
       workflowName: 'Daily digest',
+      baseRevision: 7,
+      draftRevision: 8,
       workspaceId: 'workspace-1',
       graph: { blocks: {}, edges: [], loops: {}, parallels: {} },
       operationCount: 1,
@@ -260,7 +277,7 @@ describe('/api/v2/workflows/[workflowId]/operations', () => {
       dryRun: false,
     })
 
-    const response = await POST(request({ operations: [ADD] }), routeContext)
+    const response = await POST(request({ expectedRevision: 7, operations: [ADD] }), routeContext)
 
     expect(response.status).toBe(200)
     const { lint } = (await response.json()).data
@@ -276,9 +293,27 @@ describe('/api/v2/workflows/[workflowId]/operations', () => {
    * principal. The v2 body is `.strict()`, so it must never reach the use case
    * from an API key at all.
    */
+  it('requires a revision before executing any operations', async () => {
+    const response = await POST(request({ operations: [ADD] }), routeContext)
+    expect(response.status).toBe(400)
+    expect(mocks.applyWorkflowOperations).not.toHaveBeenCalled()
+  })
+
+  it('carries the expected revision and preserves a stale conflict as HTTP 409', async () => {
+    mocks.applyWorkflowOperations.mockImplementation(async ({ input }) => {
+      if (input.expectedRevision === 7)
+        throw new OrchestrationError('conflict', 'Workflow draft changed')
+      throw new Error('Expected revision was lost at the transport')
+    })
+    const response = await POST(request({ operations: [ADD], expectedRevision: 7 }), routeContext)
+    expect(response.status).toBe(409)
+    expect(response.headers.get('Cache-Control')).toBe('private, no-store')
+    expect((await response.json()).error.code).toBe('CONFLICT')
+  })
+
   it('rejects baseGraph in a v2 body', async () => {
     const response = await POST(
-      request({ operations: [ADD], baseGraph: { blocks: {}, edges: [] } }),
+      request({ expectedRevision: 7, operations: [ADD], baseGraph: { blocks: {}, edges: [] } }),
       routeContext
     )
 

@@ -1,3 +1,4 @@
+// Modified by Memlia: common workflow draft revision and regression coverage.
 import { WorkflowLockedError } from '@sim/platform-authz/workflow'
 import { workflowAuthzMockFns } from '@sim/testing'
 import {
@@ -62,7 +63,13 @@ vi.mock('@/lib/workflows/persistence/replace-normalized-state', () => ({
   assertWorkflowGraphIdsUnclaimed: hoisted.assertIdsUnclaimed,
   collectWorkflowGraphIds: hoisted.collectGraphIds,
 }))
-vi.mock('@/lib/workflows/persistence/utils', () => workflowsPersistenceUtilsMock)
+vi.mock('@/lib/workflows/persistence/utils', () => ({
+  ...workflowsPersistenceUtilsMock,
+  loadWorkflowDraftSnapshot: async (id: string) => ({
+    state: await workflowsPersistenceUtilsMockFns.mockLoadWorkflowFromNormalizedTables(id),
+    draftRevision: 0,
+  }),
+}))
 vi.mock('@/lib/workflows/sanitization/validation', () => ({
   validateWorkflowState: hoisted.validate,
   sanitizeAgentToolsInBlocks: (blocks: Record<string, unknown>) => ({ blocks, warnings: [] }),
@@ -219,7 +226,12 @@ describe('applyWorkflowOperations', () => {
     mocks.collectReferences.mockResolvedValue([])
     mocks.collectToolReferences.mockResolvedValue([])
     mocks.validate.mockReturnValue({ valid: true, errors: [], warnings: [] })
-    mocks.replace.mockResolvedValue({ warnings: [], state: graph() })
+    mocks.replace.mockResolvedValue({
+      baseRevision: 0,
+      draftRevision: 1,
+      warnings: [],
+      state: graph(),
+    })
     mocks.needsRedeployment.mockResolvedValue(true)
     mocks.collectGraphIds.mockReturnValue(GRAPH_IDS)
     mocks.assertIdsUnclaimed.mockResolvedValue(undefined)
@@ -460,9 +472,9 @@ describe('applyWorkflowOperations', () => {
 
     await applyWorkflowOperations.execute({
       principal: copilotPrincipal,
-      input: { workflowId: 'workflow-1', operations, baseGraph },
+      input: { workflowId: 'workflow-1', operations, baseGraph, expectedRevision: 0 },
     })
-    expect(mockLoadNormalized).not.toHaveBeenCalled()
+    expect(mockLoadNormalized).toHaveBeenCalledWith('workflow-1')
     expect(mocks.applyOperations).toHaveBeenCalledWith(baseGraph, operations, null, true)
 
     vi.clearAllMocks()
@@ -483,12 +495,17 @@ describe('applyWorkflowOperations', () => {
     mocks.collectReferences.mockResolvedValue([])
     mocks.collectToolReferences.mockResolvedValue([])
     mocks.validate.mockReturnValue({ valid: true, errors: [], warnings: [] })
-    mocks.replace.mockResolvedValue({ warnings: [], state: graph() })
+    mocks.replace.mockResolvedValue({
+      baseRevision: 0,
+      draftRevision: 1,
+      warnings: [],
+      state: graph(),
+    })
     mocks.needsRedeployment.mockResolvedValue(true)
 
     await applyWorkflowOperations.execute({
       principal: sessionPrincipal,
-      input: { workflowId: 'workflow-1', operations, baseGraph },
+      input: { workflowId: 'workflow-1', operations, baseGraph, expectedRevision: 0 },
     })
     expect(mockLoadNormalized).toHaveBeenCalledWith('workflow-1')
     expect(mocks.applyOperations).not.toHaveBeenCalledWith(baseGraph, operations, null, true)
@@ -714,5 +731,24 @@ describe('applyWorkflowOperations', () => {
         input: { workflowId: 'workflow-1', operations, atomic: true },
       })
     ).resolves.toMatchObject({ applied: 1 })
+  })
+  it('rejects an expected revision that does not match the loaded draft before editing', async () => {
+    await expect(
+      applyWorkflowOperations.execute({
+        principal: sessionPrincipal,
+        input: { workflowId: 'workflow-1', operations, expectedRevision: 99 },
+      })
+    ).rejects.toMatchObject({ code: 'conflict' })
+    expect(mocks.replace).not.toHaveBeenCalled()
+  })
+
+  it('refuses a delegated base graph without an expected revision', async () => {
+    await expect(
+      applyWorkflowOperations.execute({
+        principal: copilotPrincipal,
+        input: { workflowId: 'workflow-1', operations, baseGraph: graph() },
+      })
+    ).rejects.toMatchObject({ code: 'validation' })
+    expect(mocks.replace).not.toHaveBeenCalled()
   })
 })

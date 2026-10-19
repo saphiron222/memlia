@@ -1,4 +1,5 @@
 {
+  "x-memlia-modifications": "Modified by Memlia in 2026. Upstream Apache-2.0 license and notices retained.",
   "name": "sim-setup",
   "version": "1.0.2",
   "description": "Set up and manage a self-hosted Sim installation",
@@ -49,7 +50,7 @@
   },
   "devDependencies": {
     "@clack/prompts": "1.7.0",
-    "@next/env": "16.4.0",
+    "@next/env": "16.4.2",
     "@sim/deployment-config": "workspace:*",
     "@sim/security": "workspace:*",
     "@sim/tsconfig": "workspace:*",

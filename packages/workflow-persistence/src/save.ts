@@ -1,3 +1,4 @@
+// Modified by Memlia: serialize draft writes and return a common revision receipt.
 import { db, workflowBlocks, workflowEdges, workflowSubflows } from '@sim/db'
 import { createLogger } from '@sim/logger'
 import { toError } from '@sim/utils/errors'
@@ -9,6 +10,12 @@ import {
 } from '@sim/workflow-types/workflow'
 import type { InferInsertModel } from 'drizzle-orm'
 import { eq } from 'drizzle-orm'
+import {
+  assertWorkflowDraftTransaction,
+  WorkflowDraftError,
+  type WorkflowDraftReceipt,
+  withWorkflowDraftMutation,
+} from './revision'
 import { generateLoopBlocks, generateParallelBlocks } from './subflow-helpers'
 import type { DbOrTx } from './types'
 
@@ -20,7 +27,7 @@ export async function saveWorkflowToNormalizedTables(
   workflowId: string,
   state: WorkflowState,
   externalTx?: DbOrTx
-): Promise<{ success: boolean; error?: string }> {
+): Promise<({ success: true } & WorkflowDraftReceipt) | { success: false; error: string }> {
   const blockRecords = state.blocks as Record<string, BlockState>
   const canonicalLoops = generateLoopBlocks(blockRecords)
   const canonicalParallels = generateParallelBlocks(blockRecords)
@@ -101,15 +108,25 @@ export async function saveWorkflowToNormalizedTables(
     }
   }
 
-  if (externalTx) {
-    await execute(externalTx)
-    return { success: true }
+  const persist = async (tx: DbOrTx) => {
+    assertWorkflowDraftTransaction(tx)
+    const { baseRevision, draftRevision } = await withWorkflowDraftMutation(
+      tx,
+      workflowId,
+      async () => {
+        await execute(tx)
+        return { changed: true, value: undefined }
+      }
+    )
+    return { success: true as const, baseRevision, draftRevision }
   }
 
+  if (externalTx) return persist(externalTx)
+
   try {
-    await db.transaction(execute)
-    return { success: true }
+    return await db.transaction(persist)
   } catch (error) {
+    if (error instanceof WorkflowDraftError) throw error
     logger.error(`Error saving workflow ${workflowId} to normalized tables:`, error)
     return {
       success: false,

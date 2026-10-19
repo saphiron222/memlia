@@ -1,6 +1,9 @@
+import { isDeepStrictEqual } from 'node:util'
+// Modified by Memlia: preserve concurrent author edits and invalidate draft proposals during cleanup.
 import { db } from '@sim/db'
 import { workflowBlocks } from '@sim/db/schema'
 import { createLogger } from '@sim/logger'
+import { advanceWorkflowDraft, lockWorkflowDraft } from '@sim/workflow-persistence/revision'
 import { and, eq } from 'drizzle-orm'
 import { extractInputFieldsFromBlocks } from '@/lib/workflows/input-format'
 
@@ -77,7 +80,12 @@ export async function lazyCleanupInputMapping(
       `Lazy cleanup: Removing ${orphanedFields.length} orphaned field(s) from inputMapping in workflow ${parentWorkflowId}, block ${parentBlockId}: ${orphanedFields.join(', ')}`
     )
 
-    persistCleanedMapping(parentWorkflowId, parentBlockId, cleanedMapping).catch((error) => {
+    persistCleanedMapping(
+      parentWorkflowId,
+      parentBlockId,
+      structuredClone(currentInputMapping),
+      cleanedMapping
+    ).catch((error) => {
       logger.error('Failed to persist cleaned inputMapping:', error)
     })
 
@@ -98,10 +106,12 @@ export async function lazyCleanupInputMapping(
 async function persistCleanedMapping(
   workflowId: string,
   blockId: string,
+  originalMapping: Record<string, any>,
   cleanedMapping: Record<string, any>
 ): Promise<void> {
   try {
     await db.transaction(async (tx) => {
+      const baseRevision = await lockWorkflowDraft(tx, workflowId)
       const [block] = await tx
         .select({ subBlocks: workflowBlocks.subBlocks })
         .from(workflowBlocks)
@@ -115,7 +125,10 @@ async function persistCleanedMapping(
 
       const subBlocks = (block.subBlocks as Record<string, any>) || {}
 
-      if (subBlocks.inputMapping) {
+      if (
+        subBlocks.inputMapping &&
+        isDeepStrictEqual(subBlocks.inputMapping.value, originalMapping)
+      ) {
         subBlocks.inputMapping = {
           ...subBlocks.inputMapping,
           value: cleanedMapping,
@@ -130,6 +143,7 @@ async function persistCleanedMapping(
           })
           .where(and(eq(workflowBlocks.id, blockId), eq(workflowBlocks.workflowId, workflowId)))
 
+        await advanceWorkflowDraft(tx, workflowId, baseRevision)
         logger.info(`Successfully persisted cleaned inputMapping for block ${blockId}`)
       }
     })

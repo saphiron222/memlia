@@ -1,3 +1,4 @@
+// Modified by Memlia: invalidate proposals atomically when replacing workflow variables.
 import { AuditAction, AuditResourceType, recordAudit } from '@sim/audit'
 import { db } from '@sim/db'
 import { workflow } from '@sim/db/schema'
@@ -8,6 +9,7 @@ import {
   WorkflowLockedError,
 } from '@sim/platform-authz/workflow'
 import { getErrorMessage } from '@sim/utils/errors'
+import { withWorkflowDraftMutation } from '@sim/workflow-persistence/revision'
 import { eq } from 'drizzle-orm'
 import { type NextRequest, NextResponse } from 'next/server'
 import { workflowVariablesContract } from '@/lib/api/contracts/workflows'
@@ -67,13 +69,15 @@ export const POST = withRouteHandler(
 
       // Variables are already in Record format - use directly
       // The frontend is the source of truth for what variables should exist
-      await db
-        .update(workflow)
-        .set({
-          variables,
-          updatedAt: new Date(),
+      await db.transaction(async (tx) =>
+        withWorkflowDraftMutation(tx, workflowId, async () => {
+          await tx
+            .update(workflow)
+            .set({ variables, updatedAt: new Date() })
+            .where(eq(workflow.id, workflowId))
+          return { changed: true, value: undefined }
         })
-        .where(eq(workflow.id, workflowId))
+      )
 
       recordAudit({
         workspaceId: workflowData.workspaceId ?? null,

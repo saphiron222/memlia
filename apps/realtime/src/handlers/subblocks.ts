@@ -1,3 +1,4 @@
+// Modified by Memlia: lock before debounce reads and advance the shared draft revision.
 import { db } from '@sim/db'
 import { workflow, workflowBlocks } from '@sim/db/schema'
 import { createLogger } from '@sim/logger'
@@ -5,6 +6,7 @@ import { assertWorkflowMutable, WorkflowLockedError } from '@sim/platform-authz/
 import { SUBBLOCK_OPERATIONS } from '@sim/realtime-protocol/constants'
 import { ROOM_TYPES } from '@sim/realtime-protocol/rooms'
 import { getErrorMessage } from '@sim/utils/errors'
+import { advanceWorkflowDraft, lockWorkflowDraft } from '@sim/workflow-persistence/revision'
 import { isWorkflowBlockProtected } from '@sim/workflow-types/workflow'
 import { and, eq } from 'drizzle-orm'
 import type { AuthenticatedSocket } from '@/middleware/auth'
@@ -282,6 +284,7 @@ async function flushSubblockUpdate(
     let updateSuccessful = false
     let blockLocked = false
     await db.transaction(async (tx) => {
+      const baseRevision = await lockWorkflowDraft(tx, workflowId)
       const allBlocks = await tx
         .select({
           id: workflowBlocks.id,
@@ -321,6 +324,7 @@ async function flushSubblockUpdate(
         .set({ subBlocks, updatedAt: new Date() })
         .where(and(eq(workflowBlocks.id, blockId), eq(workflowBlocks.workflowId, workflowId)))
 
+      await advanceWorkflowDraft(tx, workflowId, baseRevision)
       updateSuccessful = true
     })
 

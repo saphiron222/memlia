@@ -1,9 +1,11 @@
+// Modified by Memlia: refresh stored MCP metadata from locked current blocks, with one draft revision per workflow.
 import { db } from '@sim/db'
 import { mcpServers, workflow, workflowBlocks } from '@sim/db/schema'
 import { createLogger } from '@sim/logger'
 import { getErrorMessage, toError } from '@sim/utils/errors'
 import { truncate } from '@sim/utils/string'
-import { and, eq, inArray, isNull } from 'drizzle-orm'
+import { withWorkflowDraftMutation } from '@sim/workflow-persistence/revision'
+import { and, eq, isNull } from 'drizzle-orm'
 import type { NextRequest } from 'next/server'
 import { mcpServerIdParamsSchema } from '@/lib/api/contracts/mcp'
 import { validationErrorResponse } from '@/lib/api/server'
@@ -67,82 +69,91 @@ async function syncToolSchemasToWorkflows(
   const workspaceWorkflows = await db
     .select({ id: workflow.id })
     .from(workflow)
-    .where(eq(workflow.workspaceId, workspaceId))
+    .where(and(eq(workflow.workspaceId, workspaceId), isNull(workflow.archivedAt)))
 
   const workflowIds = workspaceWorkflows.map((w) => w.id)
   if (workflowIds.length === 0) return { updatedCount: 0, updatedWorkflowIds: [] }
 
-  const agentBlocks = await db
-    .select({
-      id: workflowBlocks.id,
-      workflowId: workflowBlocks.workflowId,
-      subBlocks: workflowBlocks.subBlocks,
-    })
-    .from(workflowBlocks)
-    .where(and(eq(workflowBlocks.type, 'agent'), inArray(workflowBlocks.workflowId, workflowIds)))
-
   const updatedWorkflowIds = new Set<string>()
+  for (const workflowId of [...workflowIds].sort()) {
+    const result = await db.transaction(async (tx) =>
+      withWorkflowDraftMutation(tx, workflowId, async () => {
+        const agentBlocks = await tx
+          .select({
+            id: workflowBlocks.id,
+            workflowId: workflowBlocks.workflowId,
+            subBlocks: workflowBlocks.subBlocks,
+          })
+          .from(workflowBlocks)
+          .where(and(eq(workflowBlocks.type, 'agent'), eq(workflowBlocks.workflowId, workflowId)))
+        let changed = false
+        for (const block of agentBlocks) {
+          const subBlocks = block.subBlocks as Record<string, unknown> | null
+          if (!subBlocks) continue
 
-  for (const block of agentBlocks) {
-    const subBlocks = block.subBlocks as Record<string, unknown> | null
-    if (!subBlocks) continue
+          const toolsSubBlock = subBlocks.tools as { value?: StoredTool[] } | undefined
+          if (!toolsSubBlock?.value || !Array.isArray(toolsSubBlock.value)) continue
 
-    const toolsSubBlock = subBlocks.tools as { value?: StoredTool[] } | undefined
-    if (!toolsSubBlock?.value || !Array.isArray(toolsSubBlock.value)) continue
+          let hasUpdates = false
+          const updatedTools = toolsSubBlock.value.map((tool) => {
+            if (tool.type !== 'mcp' || tool.params?.serverId !== serverId) {
+              return tool
+            }
 
-    let hasUpdates = false
-    const updatedTools = toolsSubBlock.value.map((tool) => {
-      if (tool.type !== 'mcp' || tool.params?.serverId !== serverId) {
-        return tool
-      }
+            const freshTool = toolsByName.get(tool.params.toolName)
+            if (!freshTool) return tool
 
-      const freshTool = toolsByName.get(tool.params.toolName)
-      if (!freshTool) return tool
+            const newSchema: StoredToolSchema = {
+              ...freshTool.inputSchema,
+              description: freshTool.description,
+            }
 
-      const newSchema: StoredToolSchema = {
-        ...freshTool.inputSchema,
-        description: freshTool.description,
-      }
+            const schemasMatch = JSON.stringify(tool.schema) === JSON.stringify(newSchema)
 
-      const schemasMatch = JSON.stringify(tool.schema) === JSON.stringify(newSchema)
+            const urlChanged = serverMeta?.url != null && tool.params.serverUrl !== serverMeta.url
+            const nameChanged =
+              serverMeta?.name != null && tool.params.serverName !== serverMeta.name
 
-      const urlChanged = serverMeta?.url != null && tool.params.serverUrl !== serverMeta.url
-      const nameChanged = serverMeta?.name != null && tool.params.serverName !== serverMeta.name
+            if (!schemasMatch || urlChanged || nameChanged) {
+              hasUpdates = true
 
-      if (!schemasMatch || urlChanged || nameChanged) {
-        hasUpdates = true
+              const validParamKeys = new Set(Object.keys(newSchema.properties || {}))
 
-        const validParamKeys = new Set(Object.keys(newSchema.properties || {}))
+              const cleanedParams: Record<string, unknown> = {}
+              for (const [key, value] of Object.entries(tool.params || {})) {
+                if (MCP_TOOL_CORE_PARAMS.has(key) || validParamKeys.has(key)) {
+                  cleanedParams[key] = value
+                }
+              }
 
-        const cleanedParams: Record<string, unknown> = {}
-        for (const [key, value] of Object.entries(tool.params || {})) {
-          if (MCP_TOOL_CORE_PARAMS.has(key) || validParamKeys.has(key)) {
-            cleanedParams[key] = value
+              if (urlChanged) cleanedParams.serverUrl = serverMeta.url
+              if (nameChanged) cleanedParams.serverName = serverMeta.name
+
+              return { ...tool, schema: newSchema, params: cleanedParams }
+            }
+
+            return tool
+          })
+
+          if (hasUpdates) {
+            const updatedSubBlocks = {
+              ...subBlocks,
+              tools: { ...toolsSubBlock, value: updatedTools },
+            }
+
+            await tx
+              .update(workflowBlocks)
+              .set({ subBlocks: updatedSubBlocks, updatedAt: new Date() })
+              .where(eq(workflowBlocks.id, block.id))
+
+            changed = true
           }
         }
 
-        if (urlChanged) cleanedParams.serverUrl = serverMeta.url
-        if (nameChanged) cleanedParams.serverName = serverMeta.name
-
-        return { ...tool, schema: newSchema, params: cleanedParams }
-      }
-
-      return tool
-    })
-
-    if (hasUpdates) {
-      const updatedSubBlocks = {
-        ...subBlocks,
-        tools: { ...toolsSubBlock, value: updatedTools },
-      }
-
-      await db
-        .update(workflowBlocks)
-        .set({ subBlocks: updatedSubBlocks, updatedAt: new Date() })
-        .where(eq(workflowBlocks.id, block.id))
-
-      updatedWorkflowIds.add(block.workflowId)
-    }
+        return { changed, value: changed }
+      })
+    )
+    if (result.value) updatedWorkflowIds.add(workflowId)
   }
 
   if (updatedWorkflowIds.size > 0) {

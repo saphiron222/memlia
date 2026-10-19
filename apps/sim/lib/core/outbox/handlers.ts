@@ -1,4 +1,4 @@
-// Modified by Memlia in 2026. Upstream Apache-2.0 license and notices retained.
+// Modified by Memlia (2026): register durable pg-boss publication through the native outbox.
 import { ADMIN_INVITATION_OPERATION_EVENT_TYPE } from '@/lib/admin/invitation-operation-event'
 import { ADMIN_MEMBER_OPERATION_EVENT_TYPE } from '@/lib/admin/member-operation-event'
 import {
@@ -69,6 +69,13 @@ import {
  * export of the module as used.
  */
 export const OUTBOX_HANDLER_GROUPS: readonly LazyOutboxHandlerGroup[] = [
+  {
+    events: ['memlia.pg-boss.publish'],
+    load: async () => {
+      const { pgBossOutboxHandlers } = await import('@/lib/core/async-jobs/backends/pg-boss-outbox')
+      return pgBossOutboxHandlers
+    },
+  },
   {
     events: [MEMORY_CLEANUP_EVENT],
     load: async () => {

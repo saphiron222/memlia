@@ -1,3 +1,4 @@
+// Modified by Memlia: stamp the initial duplicated draft graph with the common revision.
 import { db } from '@sim/db'
 import {
   folder as folderTable,
@@ -13,6 +14,7 @@ import {
 } from '@sim/platform-authz/workflow'
 import { generateId } from '@sim/utils/id'
 import { isRecordLike } from '@sim/utils/object'
+import { advanceWorkflowDraft, lockWorkflowDraft } from '@sim/workflow-persistence/revision'
 import {
   normalizeWorkflowEdgeSourceHandle,
   normalizeWorkflowEdgeTargetHandle,
@@ -450,6 +452,9 @@ export async function duplicateWorkflow(
         `[${requestId}] Copied ${newSubflows.length}/${sourceSubflows.length} subflows with updated block references and matching IDs`
       )
     }
+
+    const baseRevision = await lockWorkflowDraft(tx, newWorkflowId)
+    await advanceWorkflowDraft(tx, newWorkflowId, baseRevision)
 
     // Update the workflow timestamp
     await tx

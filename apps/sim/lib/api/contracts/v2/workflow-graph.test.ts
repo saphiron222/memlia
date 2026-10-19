@@ -1,5 +1,7 @@
+// Modified by Memlia: qualify required draft CAS contracts and read/write receipts.
 import { describe, expect, it } from 'vitest'
 import {
+  v2ApplyWorkflowOperationsBodySchema,
   v2ApplyWorkflowOperationsDataSchema,
   v2ReplaceWorkflowStateBodySchema,
   v2WorkflowGraphSchema,
@@ -7,6 +9,7 @@ import {
 import { WORKFLOW_SKIPPED_ITEM_TYPES } from '@/lib/workflows/editing/types'
 
 const STORED_GRAPH = {
+  draftRevision: 7,
   blocks: {
     'block-1': {
       id: 'block-1',
@@ -88,7 +91,11 @@ describe('v2WorkflowGraphSchema', () => {
   it('accepts its own output as a replacement body', () => {
     const parsed = v2WorkflowGraphSchema.parse(STORED_GRAPH)
 
-    expect(v2ReplaceWorkflowStateBodySchema.safeParse(parsed).success).toBe(true)
+    const { draftRevision, ...graph } = parsed
+    expect(
+      v2ReplaceWorkflowStateBodySchema.safeParse({ ...graph, expectedRevision: draftRevision })
+        .success
+    ).toBe(true)
   })
 })
 
@@ -183,6 +190,8 @@ describe('v2ApplyWorkflowOperationsDataSchema', () => {
     for (const type of WORKFLOW_SKIPPED_ITEM_TYPES) {
       const result = v2ApplyWorkflowOperationsDataSchema.safeParse({
         id: 'workflow-1',
+        baseRevision: 7,
+        draftRevision: 8,
         warnings: [],
         needsRedeployment: false,
         applied: 0,
@@ -205,6 +214,8 @@ describe('v2ApplyWorkflowOperationsDataSchema', () => {
   it('publishes every field of the lint report the use case produces', () => {
     const result = v2ApplyWorkflowOperationsDataSchema.safeParse({
       id: 'workflow-1',
+      baseRevision: 7,
+      draftRevision: 8,
       warnings: [],
       needsRedeployment: false,
       applied: 1,
@@ -221,5 +232,72 @@ describe('v2ApplyWorkflowOperationsDataSchema', () => {
     // declare is silently stripped rather than rejected. Assert the parsed
     // output, not just that the input was accepted.
     expect(result.data?.lint).toEqual(FULL_LINT)
+  })
+})
+
+describe('draft revision wire contract', () => {
+  it('keeps published graph-write examples valid after adding revision authority', () => {
+    for (const schema of [v2ReplaceWorkflowStateBodySchema, v2ApplyWorkflowOperationsBodySchema]) {
+      for (const example of schema.meta()?.examples ?? []) {
+        expect(schema.safeParse(example).success).toBe(true)
+      }
+    }
+  })
+  it('preserves the native 200-operation limit', () => {
+    const operation = { operation_type: 'delete', block_id: 'b' }
+    expect(
+      v2ApplyWorkflowOperationsBodySchema.safeParse({
+        expectedRevision: 0,
+        operations: Array(200).fill(operation),
+      }).success
+    ).toBe(true)
+    expect(
+      v2ApplyWorkflowOperationsBodySchema.safeParse({
+        expectedRevision: 0,
+        operations: Array(201).fill(operation),
+      }).success
+    ).toBe(false)
+  })
+  it.each([
+    undefined,
+    null,
+    -1,
+    1.5,
+    '7',
+    Number.MAX_SAFE_INTEGER + 1,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+  ])('rejects missing or invalid expected revision %s', (expectedRevision) => {
+    expect(
+      v2ReplaceWorkflowStateBodySchema.safeParse({ blocks: {}, edges: [], expectedRevision })
+        .success
+    ).toBe(false)
+    expect(
+      v2ApplyWorkflowOperationsBodySchema.safeParse({
+        operations: [{ operation_type: 'delete', block_id: 'b' }],
+        expectedRevision,
+      }).success
+    ).toBe(false)
+  })
+  it.each([0, 7, Number.MAX_SAFE_INTEGER])(
+    'accepts safe revision %s without coercion',
+    (expectedRevision) => {
+      expect(
+        v2ReplaceWorkflowStateBodySchema.parse({ blocks: {}, edges: [], expectedRevision })
+          .expectedRevision
+      ).toBe(expectedRevision)
+      expect(
+        v2ApplyWorkflowOperationsBodySchema.parse({
+          operations: [{ operation_type: 'delete', block_id: 'b' }],
+          expectedRevision,
+        }).expectedRevision
+      ).toBe(expectedRevision)
+    }
+  )
+  it('does not accept an unrenamed read revision as write authority', () => {
+    expect(
+      v2ReplaceWorkflowStateBodySchema.safeParse({ blocks: {}, edges: [], draftRevision: 7 })
+        .success
+    ).toBe(false)
   })
 })

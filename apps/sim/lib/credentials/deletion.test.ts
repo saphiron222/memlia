@@ -1,3 +1,4 @@
+// Modified by Memlia: verify row-locked draft cleanup separately from frozen snapshot scans.
 /**
  * Coverage for {@link deleteOrphanedOAuthAccount}, the single predicate standing
  * between a workspace-scoped admin disconnect and a cross-workspace OAuth grant
@@ -28,12 +29,34 @@ const { capturedQueries, driverRows } = vi.hoisted(() => ({
 vi.unmock('drizzle-orm')
 vi.unmock('@sim/db/schema')
 
-vi.mock('@sim/db', () => ({
-  db: drizzle(async (sql: string, params: unknown[]) => {
+vi.mock('@sim/db', async () => {
+  const schema = await vi.importActual<typeof import('@sim/db/schema')>('@sim/db/schema')
+  const proxy = drizzle(async (sql: string, params: unknown[]) => {
     capturedQueries.push({ sql, params })
+    if (sql.startsWith('select "id" from "workflow"')) return { rows: [['workflow-target']] }
+    if (sql.startsWith('select "draft_revision"')) return { rows: [[0]] }
+    if (sql.startsWith('select "id", "sub_blocks"')) {
+      return {
+        rows: (driverRows.value as { id: string; value: unknown }[]).map((row) => [
+          row.id,
+          row.value,
+        ]),
+      }
+    }
+    if (sql.startsWith('update "workflow"')) return { rows: [[1]] }
     return { rows: driverRows.value }
-  }),
-}))
+  })
+  // SQL compilation only: pg-proxy has no transactions. Real rollback/locking is tested in PostgreSQL.
+  proxy.transaction = async (callback) =>
+    callback(
+      Object.assign(Object.create(proxy), {
+        rollback: () => {
+          throw new Error('Transaction rollback')
+        },
+      })
+    )
+  return { db: proxy, workflow: schema.workflow }
+})
 
 import {
   clearCredentialInValue,
@@ -108,7 +131,6 @@ describe('deleteOrphanedOAuthAccount', () => {
 
 describe('clearCredentialRefs', () => {
   const sources = [
-    ['workflow_blocks', 'sub_blocks'],
     ['workflow_deployment_version', 'state'],
     ['paused_executions', 'execution_snapshot'],
     ['workflow_checkpoints', 'workflow_state'],
@@ -117,6 +139,9 @@ describe('clearCredentialRefs', () => {
   it('scopes every snapshot scan before converting JSON to text, including archived workflows', async () => {
     await clearCredentialRefs('credential-target', 'workspace-target')
 
+    const lock = capturedQueries.find((query) => query.sql.includes('for update'))
+    expect(lock?.sql).toContain('workspace_id')
+    expect(lock?.sql).not.toContain('archived_at')
     const reads = capturedQueries.filter((query) => normalizeSql(query.sql).startsWith('WITH'))
     expect(reads).toHaveLength(sources.length)
     for (const [table, column] of sources) {
@@ -146,7 +171,7 @@ describe('clearCredentialRefs', () => {
 
     await clearCredentialRefs('credential-target', 'workspace-target')
 
-    for (const [table] of sources) {
+    for (const table of ['workflow_blocks', ...sources.map(([table]) => table)]) {
       const updates = capturedQueries.filter((query) => query.sql.startsWith(`update "${table}"`))
       expect(updates).toHaveLength(1)
       expect(JSON.parse(updates[0].params[0] as string)).toEqual({

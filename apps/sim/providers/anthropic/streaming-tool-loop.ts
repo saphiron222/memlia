@@ -1,3 +1,4 @@
+// Modified by Memlia: reserve and bound each controlled streaming SDK turn.
 import { prepareConversationGeneration } from '@/providers/conversation-generation'
 /**
  * Live Anthropic streaming tool loop.
@@ -28,7 +29,7 @@ import {
   captureProviderConversationStep,
   recordProviderConversationToolError,
 } from '@/providers/conversation-history'
-import { executeProviderTool } from '@/providers/runtime-context'
+import { beforeProviderModelCall, executeProviderTool } from '@/providers/runtime-context'
 import type { AgentStreamEvent, ToolCallEndStatus } from '@/providers/stream-events'
 import {
   isAbortError,
@@ -144,7 +145,6 @@ export function createAnthropicStreamingToolLoopStream(
       /** Tools that received start but not yet end (abort settlement). */
       const openToolStarts = new Map<string, string>()
 
-      const streamOptions = { signal: loopAbortController.signal }
       const reportProgress = () => {
         const tokens = buildAnthropicUsageTokens(usage)
         const toolCost = sumToolCosts(toolResults)
@@ -201,9 +201,10 @@ export function createAnthropicStreamingToolLoopStream(
           }
 
           const modelStart = Date.now()
+          const prepared = await prepareConversationGeneration(request, 'anthropic', turnPayload)
           const messageStream = anthropic.messages.stream(
-            await prepareConversationGeneration(request, 'anthropic', turnPayload),
-            streamOptions
+            prepared,
+            beforeProviderModelCall(loopAbortController.signal)
           )
           activeMessageStream = messageStream
 

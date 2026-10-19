@@ -941,6 +941,229 @@
       "license": "Apache-2.0",
       "targetSources": [],
       "enumeratedTargets": "handlers"
+    },
+    {
+      "path": "scripts/generate-v2-cli-api.ts",
+      "sha256": "df77e5b9b103be94d5ad7474f5a912b536f03ecb03352e6b59421670e9cbb41f",
+      "lines": [
+        92,
+        128,
+        129,
+        130,
+        245
+      ],
+      "reason": "Générateur CLI de développement Apache exact hors deux notices : ROOT fixé par import.meta.url, quatre cibles littérales path.join et contrats .ts immédiats isFile/non-test/non-index sous répertoire fixe. Aucun chemin utilisateur ou environnement. Admission du chargeur source exact uniquement ; cibles versionnées inspectées par la gate complète ; aucune admission de binaire ou de module futur. Revoir tout changement du loader et de ses cibles.",
+      "source": {
+        "repository": "https://github.com/simstudioai/sim",
+        "commit": "c6cef5f87b6a1d1d01df89e7140bad9e9fd4c2e2",
+        "blob": "4b9af6376a07bce36c644fb40be95350eec04d5d",
+        "sha256": "a440f7d04d68c9a172c508126965f6dd1c1746a1db851ca50340d8907d131085",
+        "modified": true
+      },
+      "license": "Apache-2.0",
+      "targetSources": [
+        {
+          "path": "apps/sim/lib/api/contracts/v2/openapi/shared.ts",
+          "sha256": "d9c30febfa35ab32903d879a0ce27e7878d9da53a246ff3c17d4a3682f8401e8"
+        },
+        {
+          "path": "scripts/openapi/generator.ts",
+          "sha256": "41cac729355800a4d6a6c225b1aac225d46d023f5ee2a95039c0f722c8298d0c"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/openapi/files-audit.ts",
+          "sha256": "fe11402696f769b43140b90342bc55265e8fb8f35204c06170e8f484955c693c"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/openapi/unpublished-project-files.ts",
+          "sha256": "6596e62cd99e4d68c54b2983f03be86700bf6cf259d95df6383ec333a088d587"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/audit-logs.ts",
+          "sha256": "5f1ee65f96b35f7a8a8da6ad458c1438ec2d9e6011a5118c97ac3c1d43088e2e"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/billing.ts",
+          "sha256": "6bd754e9b1224b09e4974b004a1c30dc7b70423bc139b20f2b9e8d74d0d0b9d6"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/catalog.ts",
+          "sha256": "7ceed5e879c68058c73445def02c36aaf31c2b1ab8531cf533ba2881979637e9"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/chat-deployments.ts",
+          "sha256": "740f64c8ae14264cd162f62dbf323b9c96b3558401c5bbdd2a719abfb6e78cf8"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/chat.ts",
+          "sha256": "0464ab9a34d55aef8648c852730e5b1b54c4f196fb69cfc40a1d775d94ae9b58"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/credentials.ts",
+          "sha256": "2eb67e9004f85b6b171b29c38e0b2fb3cf798be87ad4a7fb3f7ea5b13e7df63d"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/custom-tools.ts",
+          "sha256": "a5e34da89af25a7e6d0cf8dc9620859492c76e9e424cb7b80697be7d3fa8545e"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/error-codes.ts",
+          "sha256": "b2c361adb07ab8dcca9703f7f6e9248c6d8d1a2eef0401aebbe6e9ecbe4813cd"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/file-copy.ts",
+          "sha256": "e6de344a0c1a4f21b53df4147f017e277ceb3c9199abba938acd2498bec46530"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/file-versions.ts",
+          "sha256": "7c37d7c422c08d8ffded7599db6ffafc97673d08d63ceb80e85b2f9dec228d4b"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/files.ts",
+          "sha256": "1886bd754692c5215fe0faf2c822617a2903cec650bee7c6f16765672eca999a"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/knowledge-chunks.ts",
+          "sha256": "276851df55895e58407f1467cb1f0f8770a2f3e603f14ec88db9a555b8a8cea8"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/knowledge-tags.ts",
+          "sha256": "60af94e9a71a3bd40db979afb0784f09683b33093396f49c481e178579e27c1d"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/knowledge.ts",
+          "sha256": "ffaeb8ef570cf043a0a71c6481ab21c14b3923476f7783d400fa0e7210b0c6c2"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/logs-stats.ts",
+          "sha256": "a78d5dbd1e009f85b9fc2892f3e3fe576782fa2ea23d0f5b7b6eb10f9557fa66"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/logs.ts",
+          "sha256": "a44403b3e2eb8a696dda242d6e1d0735d93574616033f301af8c329382f3daff"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/mcp-servers.ts",
+          "sha256": "105047e2941c8657c08664584d689115858c068d36c482ec6415091b4bea5ebb"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/meta.ts",
+          "sha256": "beb651d3f637edef812fac3749d2a1ca3f3c049fd1c2e29095e02c71bbf133c5"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/organization-usage.ts",
+          "sha256": "e3326cdb7fc82079c5ce5f8809b0bac3c7b0752bc44df6670c5b15ba1689f722"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/organizations.ts",
+          "sha256": "e7e440a88c9e392651850b4bdd0868ac4521cfa4459c132b2e07f531834a3667"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/permission-groups.ts",
+          "sha256": "9e5a7ca71b4d9c0d2ad08488f101933ad3c42611dc48641286972557c70e2148"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/project-file-downloads.ts",
+          "sha256": "aa89eed0cc8831a0c7c5a10a88c32f5a27cdc50988a74beff83ab056d91c0aa1"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/project-file-extraction.ts",
+          "sha256": "9d4419661162c810c7853890e3926294b0bb23ee31b8eb8f1bd9a6dc6582e114"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/project-file-folders.ts",
+          "sha256": "4d3113118931297fd6da96cc6f47051b6b347e45cde8d573046eceb7c9688947"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/project-file-lifecycle.ts",
+          "sha256": "49caebc7d3d7f26285c30d9e14fc781d6138353cd522c08dfb2c33bef4cafc00"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/project-file-search.ts",
+          "sha256": "26edab3fc2527719abc38dc9d468617ce05e8d78ee5c1f5b22a6882fc46ee385"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/project-file-shares.ts",
+          "sha256": "7b5efa24a28af57657f2b0422926bfc93a1082cd22e995c7527d105df2e0b53f"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/project-file-uploads.ts",
+          "sha256": "42180fe2270a9bb2286495f1c615f94f18e6f2cb2baadd2e022a6786e01f6f48"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/project-file-versions.ts",
+          "sha256": "ba6a442382bdc1e88f725e14d94304da46fe9dbe6dfc83da92304953d5ae1428"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/project-files.ts",
+          "sha256": "3eb1398254dc7443158fdd13bead8d7d5987472d7a7daf0b91fdc4d64b56669d"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/sandboxes.ts",
+          "sha256": "30d107c68be01fe9998fc097a08f636ea4b4de72a8f2cdc618eeffa15784d4f0"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/secrets.ts",
+          "sha256": "bb027c8bfbbdcc6422757b69936bcd881662959f652a3d5d6b47b31918face40"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/selectors.ts",
+          "sha256": "afb4cd8625c8d229616fc9620611264c417ae9745afe6e2ba6b0a8c9dd2b92c4"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/shared.ts",
+          "sha256": "900165ab56953a96561e5053e16cec52535f3385e8c37755b58fa0e9178e4b76"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/skills.ts",
+          "sha256": "83d3bf182559c15a14f2aa54770a07344a3974cb6c6da17c8b2ac8865f94416c"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/sso.ts",
+          "sha256": "0c673a72ea3989a354a3430ebb614ee34d576b8ec7966c21fa7a7457f2aa94d9"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/tables.ts",
+          "sha256": "83f43bc8bce488abcebad7358572abd1716a4811a64bee433baa03668cb6657e"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/test-utils.ts",
+          "sha256": "6a91580822edf3bf83975994cec6590ca682ca14b53e2e54b3d1a8e8b4e23531"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/uploads.ts",
+          "sha256": "57f294fdcf9697798760c86a201a2fa693b439da16672183653bd5c4134bd26a"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/workflow-mcp-servers.ts",
+          "sha256": "372a778d81e7d0e3f94dbea66961096e8abbcc7df2fc56b9ad3bf8cd11f33d5d"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/workflows.ts",
+          "sha256": "78d9f499a926316ba840ca2dff66297eb36e62748503359b765585cf0ee00a56"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/workspace-fork.ts",
+          "sha256": "fb4ba5eb78d867cf298d61fa569a186deebf708b9e65435b4ed77264ae0d0762"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/workspace-invitations.ts",
+          "sha256": "1ea72e85c360526f7fb97c49c9032041b07694cdd32988e1d4ee0d78ca9ea524"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/workspace-operations.ts",
+          "sha256": "5ed60c69eb85360b0c9ef75b37b50bd4ef2521de0173bfaab66c6d6cbb4eedfe"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/workspace-permissions.ts",
+          "sha256": "3b17c4e6d081f4530210388cae3529bab4b7fb8f701dc04535b5f1e4a8f1dc21"
+        },
+        {
+          "path": "apps/sim/lib/api/contracts/v2/workspaces.ts",
+          "sha256": "3a469cfc7198f789d879647c58cc5397ca9f767294df0ada4ceb52f49effc05d"
+        }
+      ],
+      "enumeratedTargets": null
     }
   ]
 }

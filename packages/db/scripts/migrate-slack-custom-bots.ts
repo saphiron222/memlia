@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+// Modified by Memlia: serialize trigger migration with the common workflow draft revision.
 
 /**
  * Materializes raw Slack bot tokens from saved workflows as reusable
@@ -1011,7 +1012,7 @@ async function prepareWorkspaceCredentials(params: {
   return prepared
 }
 
-async function applyPreparedCredential(params: {
+export async function applyPreparedCredential(params: {
   db: MigrationDb
   workspaceId: string
   workspaceOwnerId: string
@@ -1039,10 +1040,26 @@ async function applyPreparedCredential(params: {
       })()
     : null
 
+  let triggersLinked = 0
   await params.db.transaction(async (tx) => {
     await tx.execute(
       sql`select set_config('lock_timeout', ${`${TRANSACTION_LOCK_TIMEOUT_MS}ms`}, true), set_config('statement_timeout', ${`${TRANSACTION_STATEMENT_TIMEOUT_MS}ms`}, true)`
     )
+    // One workflow per transaction. The DB package cannot depend on workflow-persistence.
+    // Use its same row lock and bounded counter directly, before any related row is written.
+    const triggerLinks = params.prepared.sourceLinks.filter((link) => link.updateTriggerBlock)
+    const [locked] = await tx
+      .select({ draftRevision: workflow.draftRevision })
+      .from(workflow)
+      .where(
+        and(
+          eq(workflow.id, params.prepared.workflowId),
+          eq(workflow.workspaceId, params.workspaceId)
+        )
+      )
+      .limit(1)
+      .for('update')
+    if (!locked) throw new Error('Workflow disappeared during Slack migration')
     if (params.prepared.insertCredential) {
       if (
         !params.prepared.displayName ||
@@ -1080,8 +1097,40 @@ async function applyPreparedCredential(params: {
       }
     }
 
-    const triggerLinks = params.prepared.sourceLinks.filter((link) => link.updateTriggerBlock)
     for (const triggerLinkChunk of chunkArray(triggerLinks, TRIGGER_BLOCK_UPDATE_CHUNK_SIZE)) {
+      const current = await tx
+        .select({ id: workflowBlocks.id, subBlocks: workflowBlocks.subBlocks })
+        .from(workflowBlocks)
+        .where(
+          and(
+            eq(workflowBlocks.workflowId, params.prepared.workflowId),
+            inArray(
+              workflowBlocks.id,
+              triggerLinkChunk.map((link) => link.source.blockId)
+            )
+          )
+        )
+      if (
+        current.length !== triggerLinkChunk.length ||
+        current.some((row) => {
+          const value = toRecord(toRecord(row.subBlocks).botCredential).value
+          return value != null && value !== credentialId
+        })
+      )
+        throw new Error(
+          `A Slack trigger in workflow ${params.prepared.workflowId} changed while the migration was running`
+        )
+      const missingIds = current
+        .filter((row) => toRecord(toRecord(row.subBlocks).botCredential).value == null)
+        .map((row) => row.id)
+      if (missingIds.length === 0) continue
+      if (
+        !Number.isSafeInteger(locked.draftRevision) ||
+        locked.draftRevision < 0 ||
+        locked.draftRevision === Number.MAX_SAFE_INTEGER
+      ) {
+        throw new Error('Workflow draft revision limit reached')
+      }
       const updatedBlocks = await tx
         .update(workflowBlocks)
         .set({
@@ -1090,20 +1139,20 @@ async function applyPreparedCredential(params: {
         })
         .where(
           and(
-            inArray(
-              workflowBlocks.id,
-              triggerLinkChunk.map((link) => link.source.blockId)
-            ),
-            eq(workflowBlocks.workflowId, params.prepared.workflowId),
-            sql`(${workflowBlocks.subBlocks}->'botCredential'->>'value' IS NULL OR ${workflowBlocks.subBlocks}->'botCredential'->>'value' = ${credentialId})`
+            inArray(workflowBlocks.id, missingIds),
+            eq(workflowBlocks.workflowId, params.prepared.workflowId)
           )
         )
         .returning({ id: workflowBlocks.id })
-      if (updatedBlocks.length !== triggerLinkChunk.length) {
-        throw new Error(
-          `A Slack trigger in workflow ${params.prepared.workflowId} changed while the migration was running`
-        )
-      }
+      if (updatedBlocks.length !== missingIds.length)
+        throw new Error('Slack trigger disappeared during migration')
+      triggersLinked += updatedBlocks.length
+    }
+    if (triggersLinked > 0) {
+      await tx
+        .update(workflow)
+        .set({ draftRevision: locked.draftRevision + 1 })
+        .where(eq(workflow.id, params.prepared.workflowId))
     }
 
     const webhookIdsToUpdate = params.prepared.sourceLinks.flatMap(
@@ -1139,7 +1188,7 @@ async function applyPreparedCredential(params: {
   })
 
   return {
-    triggersLinked: params.prepared.sourceLinks.filter((link) => link.updateTriggerBlock).length,
+    triggersLinked,
     webhooksMarked: params.prepared.sourceLinks.reduce(
       (count, link) => count + link.webhookIdsToUpdate.length,
       0
@@ -1452,7 +1501,10 @@ async function processWorkspace(params: {
     const memberUserIds = [
       ...new Set([workspaceOwnerId, ...permissionRows.map((row) => row.userId)]),
     ]
-    for (const candidate of prepared) {
+    for (const candidate of [...prepared].sort(
+      (a, b) =>
+        a.workflowId.localeCompare(b.workflowId) || a.credentialId.localeCompare(b.credentialId)
+    )) {
       const applied = await applyPreparedCredential({
         db: params.db,
         workspaceId: params.workspaceId,

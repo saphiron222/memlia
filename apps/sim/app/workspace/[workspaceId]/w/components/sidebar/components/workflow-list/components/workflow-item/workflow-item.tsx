@@ -1,3 +1,4 @@
+// Modified by Memlia (2026): open private copying for one explicitly selected source.
 'use client'
 
 import { memo, useCallback, useMemo, useRef, useState } from 'react'
@@ -9,6 +10,7 @@ import { useUserPermissionsContext } from '@/app/workspace/[workspaceId]/provide
 import { SidebarRowAction } from '@/app/workspace/[workspaceId]/w/components/sidebar/components/sidebar-row-actions'
 import { ContextMenu } from '@/app/workspace/[workspaceId]/w/components/sidebar/components/workflow-list/components/context-menu/context-menu'
 import { DeleteModal } from '@/app/workspace/[workspaceId]/w/components/sidebar/components/workflow-list/components/delete-modal/delete-modal'
+import { PrivateCopyDialog } from '@/app/workspace/[workspaceId]/w/components/sidebar/components/workflow-list/components/private-copy-dialog/private-copy-dialog'
 import { Avatars } from '@/app/workspace/[workspaceId]/w/components/sidebar/components/workflow-list/components/workflow-item/avatars/avatars'
 import {
   useItemDrag,
@@ -78,6 +80,7 @@ export const WorkflowItem = memo(function WorkflowItem({
 
   const { canDeleteWorkflows, canDeleteFolder } = useCanDelete({ workspaceId })
 
+  const [isPrivateCopyOpen, setIsPrivateCopyOpen] = useState(false)
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false)
   const [deleteItemType, setDeleteItemType] = useState<'workflow' | 'mixed'>('workflow')
   const [deleteModalNames, setDeleteModalNames] = useState<string | string[]>('')
@@ -158,6 +161,21 @@ export const WorkflowItem = memo(function WorkflowItem({
       duplicateWorkflows(workflowIds)
     }
   }, [duplicateWorkflows, handleDuplicateSelection])
+
+  const handlePrivateCopy = useCallback(() => {
+    const captured = capturedSelectionRef.current
+    const current = useFolderStore.getState()
+    if (
+      captured?.workflowIds.length !== 1 ||
+      captured.workflowIds[0] !== workflow.id ||
+      captured.folderIds.length !== 0 ||
+      current.selectedWorkflows.size !== 1 ||
+      !current.selectedWorkflows.has(workflow.id) ||
+      current.selectedFolders.size !== 0
+    )
+      return
+    setIsPrivateCopyOpen(true)
+  }, [workflow.id])
 
   const handleExport = useCallback(() => {
     if (!capturedSelectionRef.current) return
@@ -483,6 +501,8 @@ export const WorkflowItem = memo(function WorkflowItem({
         onOpenInNewTab={handleOpenInNewTab}
         onRename={handleStartEdit}
         renameInputRef={inputRef}
+        onPrivateCopy={handlePrivateCopy}
+        showPrivateCopy={contextMenuSelectedCount === 1 && !isMixedSelection}
         onDuplicate={handleDuplicate}
         onExport={handleExport}
         onDelete={handleOpenDeleteModal}
@@ -501,6 +521,16 @@ export const WorkflowItem = memo(function WorkflowItem({
         isLocked={effectiveLocked}
         selectedCount={contextMenuSelectedCount}
       />
+
+      {isPrivateCopyOpen && (
+        <PrivateCopyDialog
+          key={workflow.id}
+          sourceWorkflowId={workflow.id}
+          sourceWorkspaceId={workspaceId}
+          sourceName={workflow.name}
+          onClose={() => setIsPrivateCopyOpen(false)}
+        />
+      )}
 
       <DeleteModal
         isOpen={isDeleteModalOpen}

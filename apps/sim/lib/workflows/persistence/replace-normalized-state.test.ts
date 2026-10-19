@@ -1,3 +1,4 @@
+// Modified by Memlia: common workflow draft revision and regression coverage.
 import { dbChainMockFns, queueTableRows, resetDbChainMock, schemaMock } from '@sim/testing'
 import {
   workflowsPersistenceUtilsMock,
@@ -81,9 +82,9 @@ describe('replaceWorkflowNormalizedState', () => {
     resetDbChainMock()
     // The lock select must find a live row in the caller's workspace; an empty
     // result is the archived / cross-workspace refusal, covered separately.
-    dbChainMockFns.for.mockResolvedValue([{ id: 'workflow-1' }])
+    dbChainMockFns.for.mockResolvedValue([{ id: 'workflow-1', draftRevision: 0 }])
     mocks.prepare.mockReturnValue({ state: PREPARED, warnings: [] })
-    mockSave.mockResolvedValue({ success: true })
+    mockSave.mockResolvedValue({ success: true, baseRevision: 0, draftRevision: 1 })
     mocks.extractCustomTools.mockResolvedValue({ saved: 0, errors: [] })
   })
 

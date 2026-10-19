@@ -1,7 +1,13 @@
+// Modified by Memlia: compare expected draft revision under the native row lock.
 import { db } from '@sim/db'
 import { workflow, workflowBlocks, workflowEdges, workflowSubflows } from '@sim/db/schema'
 import { createLogger } from '@sim/logger'
 import { getPostgresConstraintName, getPostgresErrorCode } from '@sim/utils/errors'
+import {
+  lockWorkflowDraft,
+  WorkflowDraftError,
+  type WorkflowDraftReceipt,
+} from '@sim/workflow-persistence/revision'
 import { and, eq, inArray, isNull, ne } from 'drizzle-orm'
 import { OrchestrationError } from '@/lib/core/orchestration/types'
 import type { DbOrTx } from '@/lib/db/types'
@@ -185,6 +191,7 @@ export interface ReplaceWorkflowState {
 }
 
 export interface ReplaceWorkflowNormalizedStateInput {
+  expectedRevision?: number
   workflowId: string
   /** Canonical workspace the workflow belongs to; custom-tool extraction is skipped without one. */
   workspaceId: string | null
@@ -215,7 +222,7 @@ export interface ReplaceWorkflowNormalizedStateInput {
   requestId?: string
 }
 
-export interface ReplaceWorkflowNormalizedStateResult {
+export interface ReplaceWorkflowNormalizedStateResult extends WorkflowDraftReceipt {
   /** Non-fatal notes about blocks and edges the preparation step rewrote or dropped. */
   warnings: string[]
   /** Exactly what was written, after preparation. */
@@ -265,75 +272,83 @@ export async function replaceWorkflowNormalizedState(
   let warnings: string[] = []
   let workflowState!: WorkflowState
 
-  const saveResult = await db.transaction(async (tx) => {
-    /**
-     * Scoped to the workspace and to a live row, matching the predicate the
-     * pre-consolidation callers used: a workflow archived between the caller's
-     * authorization check and this write is refused rather than written.
-     */
-    const [locked] = await tx
-      .select({ id: workflow.id })
-      .from(workflow)
-      .where(
-        and(
-          eq(workflow.id, workflowId),
-          workspaceId ? eq(workflow.workspaceId, workspaceId) : undefined,
-          isNull(workflow.archivedAt)
+  const saveResult = await db
+    .transaction(async (tx) => {
+      /**
+       * Scoped to the workspace and to a live row, matching the predicate the
+       * pre-consolidation callers used: a workflow archived between the caller's
+       * authorization check and this write is refused rather than written.
+       */
+      const [locked] = await tx
+        .select({ id: workflow.id })
+        .from(workflow)
+        .where(
+          and(
+            eq(workflow.id, workflowId),
+            workspaceId ? eq(workflow.workspaceId, workspaceId) : undefined,
+            isNull(workflow.archivedAt)
+          )
         )
-      )
-      .limit(1)
-      .for('update')
-    if (!locked) {
-      throw new OrchestrationError('not_found', 'Workflow not found')
-    }
-
-    const resolved = typeof state === 'function' ? await state(tx) : state
-    const prepared = prepareWorkflowStateForPersistence({
-      blocks: resolved.blocks,
-      edges: resolved.edges,
-    })
-    preparedState = prepared.state
-    warnings = prepared.warnings
-    workflowState = {
-      ...prepared.state,
-      lastSaved: resolved.lastSaved || Date.now(),
-      isDeployed: resolved.isDeployed || false,
-      deployedAt: resolved.deployedAt,
-    } as WorkflowState
-
-    await assertWorkflowGraphIdsUnclaimed(tx, workflowId, collectWorkflowGraphIds(prepared.state))
-
-    let result: Awaited<ReturnType<typeof saveWorkflowToNormalizedTables>>
-    try {
-      result = await saveWorkflowToNormalizedTables(
-        workflowId,
-        workflowState,
-        { workspaceId, subjectUserId },
-        tx
-      )
-    } catch (error) {
-      if (isGraphIdUniqueViolation(error)) {
-        throw new OrchestrationError(
-          'conflict',
-          'Another workflow claimed one of the submitted block, edge, or subflow ids while this write was in flight'
-        )
+        .limit(1)
+        .for('update')
+      if (!locked) {
+        throw new OrchestrationError('not_found', 'Workflow not found')
       }
+
+      await lockWorkflowDraft(tx, workflowId, input.expectedRevision)
+
+      const resolved = typeof state === 'function' ? await state(tx) : state
+      const prepared = prepareWorkflowStateForPersistence({
+        blocks: resolved.blocks,
+        edges: resolved.edges,
+      })
+      preparedState = prepared.state
+      warnings = prepared.warnings
+      workflowState = {
+        ...prepared.state,
+        lastSaved: resolved.lastSaved || Date.now(),
+        isDeployed: resolved.isDeployed || false,
+        deployedAt: resolved.deployedAt,
+      } as WorkflowState
+
+      await assertWorkflowGraphIdsUnclaimed(tx, workflowId, collectWorkflowGraphIds(prepared.state))
+
+      let result: Awaited<ReturnType<typeof saveWorkflowToNormalizedTables>>
+      try {
+        result = await saveWorkflowToNormalizedTables(
+          workflowId,
+          workflowState,
+          { workspaceId, subjectUserId },
+          tx
+        )
+      } catch (error) {
+        if (isGraphIdUniqueViolation(error)) {
+          throw new OrchestrationError(
+            'conflict',
+            'Another workflow claimed one of the submitted block, edge, or subflow ids while this write was in flight'
+          )
+        }
+        throw error
+      }
+      if (!result.success) return result
+
+      const updateData: Partial<typeof workflow.$inferInsert> = {
+        lastSynced: new Date(),
+        updatedAt: new Date(),
+      }
+      if (resolved.variables !== undefined) {
+        updateData.variables = resolved.variables
+      }
+
+      await tx.update(workflow).set(updateData).where(eq(workflow.id, workflowId))
+
+      return result
+    })
+    .catch((error: unknown) => {
+      if (error instanceof WorkflowDraftError)
+        throw new OrchestrationError(error.code, error.message)
       throw error
-    }
-    if (!result.success) return result
-
-    const updateData: Partial<typeof workflow.$inferInsert> = {
-      lastSynced: new Date(),
-      updatedAt: new Date(),
-    }
-    if (resolved.variables !== undefined) {
-      updateData.variables = resolved.variables
-    }
-
-    await tx.update(workflow).set(updateData).where(eq(workflow.id, workflowId))
-
-    return result
-  })
+    })
 
   if (!saveResult.success) {
     logger.error(`${logPrefix}Failed to save workflow ${workflowId} state`, {
@@ -364,5 +379,10 @@ export async function replaceWorkflowNormalizedState(
     })
   }
 
-  return { warnings, state: preparedState }
+  return {
+    warnings,
+    state: preparedState,
+    baseRevision: saveResult.baseRevision,
+    draftRevision: saveResult.draftRevision,
+  }
 }

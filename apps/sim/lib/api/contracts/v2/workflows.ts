@@ -1,3 +1,5 @@
+// Modified by Memlia: require the common draft revision for v2 graph writes and expose receipts.
+import { WorkflowProposalSchema } from '@memlia/contracts'
 import {
   BLOCK_RETRY_MAX_TRIES,
   BLOCK_RETRY_MAX_WAIT_MS,
@@ -2839,11 +2841,17 @@ export const v2WorkflowVariableSchema = workflowVariableSchema('WorkflowVariable
  * element would turn any block, edge, or variable carrying a key this surface
  * has not published yet into a `500` on a plain read. Stripping instead makes
  * the read the canonical projection, which is also what makes a read-modify-write
- * round trip closed: what a caller reads back is exactly the set of keys it may
- * send.
+ * round trip closed for graph elements. Rename the envelope draftRevision to
+ * expectedRevision when writing the corresponding graph.
  */
+// Reuse the canonical Memlia Revision instance, already exported through the proposal schema.
+const workflowDraftRevisionSchema = WorkflowProposalSchema.shape.expectedRevision
+
 export const v2WorkflowGraphSchema = z
   .object({
+    draftRevision: workflowDraftRevisionSchema.describe(
+      'Server revision of this exact draft snapshot. Send it as expectedRevision when writing this graph.'
+    ),
     blocks: z
       .record(z.string(), v2WorkflowBlockSchema)
       .describe('Blocks keyed by block id.')
@@ -2899,9 +2907,14 @@ const v2WorkflowVariableInputSchema = workflowVariableSchema('WorkflowVariableIn
  * Replace body. `loops` and `parallels` are accepted but ignored — both are
  * derived from the blocks on write, so declaring them optional keeps a
  * read-modify-write round trip working without promising they are honoured.
+ * Rename the GET envelope draftRevision to expectedRevision; a missing or stale
+ * revision never authorizes a replacement.
  */
 export const v2ReplaceWorkflowStateBodySchema = z
   .object({
+    expectedRevision: workflowDraftRevisionSchema.describe(
+      'Revision of the draft that was read. A stale revision returns 409 without changing the draft; read and reconcile before retrying.'
+    ),
     blocks: z
       .record(z.string(), v2WorkflowBlockInputSchema)
       .describe('Blocks keyed by block id.')
@@ -2931,13 +2944,17 @@ export const v2ReplaceWorkflowStateBodySchema = z
     id: 'ReplaceWorkflowStateRequest',
     title: 'Replace workflow state request',
     description: 'A complete replacement draft graph for a workflow.',
-    examples: [{ blocks: {}, edges: [] }],
+    examples: [{ blocks: {}, edges: [], expectedRevision: 0 }],
   })
 
 export type V2ReplaceWorkflowStateBody = z.input<typeof v2ReplaceWorkflowStateBodySchema>
 
 const v2WorkflowGraphWriteResultSchema = z
   .object({
+    baseRevision: workflowDraftRevisionSchema.describe('Revision compared before this write.'),
+    draftRevision: workflowDraftRevisionSchema.describe(
+      'Committed draft revision, or the unchanged baseRevision for a dry run.'
+    ),
     id: z.string().describe('Identifier of the workflow whose draft graph was written.'),
     warnings: z
       .array(z.string())
@@ -3491,6 +3508,9 @@ export type V2WorkflowOperation = z.input<typeof v2WorkflowOperationSchema>
 
 export const v2ApplyWorkflowOperationsBodySchema = z
   .object({
+    expectedRevision: workflowDraftRevisionSchema.describe(
+      'Revision of the draft these operations were prepared against. A stale revision returns 409 without applying the batch.'
+    ),
     operations: z
       .array(v2WorkflowOperationSchema)
       .min(1, 'operations cannot be empty')
@@ -3538,6 +3558,7 @@ export const v2ApplyWorkflowOperationsBodySchema = z
     description: 'A batch of semantic edits against a workflow graph.',
     examples: [
       {
+        expectedRevision: 0,
         operations: [
           {
             operation_type: 'add',

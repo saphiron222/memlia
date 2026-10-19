@@ -1,3 +1,4 @@
+// Modified by Memlia: reserve each controlled Responses transport attempt.
 import { createHash } from 'node:crypto'
 import type { Logger } from '@sim/logger'
 import { getErrorMessage, toError } from '@sim/utils/errors'
@@ -25,7 +26,7 @@ import {
   createOpenAIUsageAccumulator,
 } from '@/providers/openai/usage'
 import { fetchWithProviderRetry } from '@/providers/retry'
-import { executeProviderTool } from '@/providers/runtime-context'
+import { beforeProviderModelCall, executeProviderTool } from '@/providers/runtime-context'
 import { createStreamingExecution } from '@/providers/streaming-execution'
 import { isAbortError, parseToolArguments } from '@/providers/streaming-tool-loop-shared'
 import { adaptOpenAIChatToolSchema } from '@/providers/tool-schema-adapter'
@@ -459,13 +460,15 @@ export async function executeResponsesProviderRequest(
     const body = JSON.stringify(await prepareConversationGeneration(request, 'responses', payload))
     try {
       return await fetchWithProviderRetry(
-        () =>
-          fetchImpl(config.endpoint, {
+        () => {
+          const options = beforeProviderModelCall(abortSignal)
+          return fetchImpl(config.endpoint, {
             method: 'POST',
             headers: config.headers,
             body,
-            signal: abortSignal,
-          }),
+            signal: options?.signal,
+          })
+        },
         { logger, label: config.providerLabel, abortSignal }
       )
     } catch (error) {

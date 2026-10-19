@@ -1,3 +1,4 @@
+// Modified by Memlia: preserve snapshot revision and route expected revision to the native CAS.
 import type { BlockState, WorkflowState } from '@sim/workflow-types/workflow'
 import {
   v2GetWorkflowStateContract,
@@ -33,8 +34,8 @@ export const GET = defineV2JsonRoute({
   errorPolicy: v2WorkflowErrorPolicies.concealWorkflowAuthorization,
   mapInput: ({ params }) => ({ workflowId: params.workflowId }),
   useCase: readWorkflowGraph,
-  present: ({ blocks, edges, loops, parallels, variables }) => ({
-    data: { blocks, edges, loops, parallels, variables },
+  present: ({ blocks, edges, loops, parallels, variables, draftRevision }) => ({
+    data: { blocks, edges, loops, parallels, variables, draftRevision },
   }),
 })
 
@@ -59,13 +60,30 @@ export const PUT = defineV2JsonRoute({
   mapInput: ({ params, query, body }) => ({
     workflowId: params.workflowId,
     dryRun: query.dryRun,
+    expectedRevision: body.expectedRevision,
     // double-cast-allowed: the wire schema leaves sub-block `type` an open string, which the domain type narrows to the block registry's union; the persistence layer re-validates every sub-block.
     blocks: body.blocks as unknown as Record<string, BlockState>,
     edges: body.edges as WorkflowState['edges'],
     variables: body.variables,
   }),
   useCase: replaceWorkflowState,
-  present: ({ workflowId, warnings, needsRedeployment, lint, dryRun }) => ({
-    data: { id: workflowId, warnings, needsRedeployment, lint: presentWorkflowLint(lint), dryRun },
+  present: ({
+    workflowId,
+    warnings,
+    needsRedeployment,
+    lint,
+    dryRun,
+    baseRevision,
+    draftRevision,
+  }) => ({
+    data: {
+      id: workflowId,
+      warnings,
+      needsRedeployment,
+      lint: presentWorkflowLint(lint),
+      dryRun,
+      baseRevision,
+      draftRevision,
+    },
   }),
 })

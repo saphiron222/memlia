@@ -1,3 +1,4 @@
+// Modified by Memlia: verify internal draft revision projection.
 import { createMockRequest } from '@sim/testing'
 import { createSessionPrincipal } from '@sim/testing/factories/principal.factory'
 import { createRouteContext } from '@sim/testing/helpers/http'
@@ -87,6 +88,41 @@ describe('/api/workflows/[id] application adapters', () => {
       workflow: { id: 'workflow-1', name: 'Workflow', locked: true, forkSyncExcluded: false },
       workspaceId: 'workspace-1',
       changes: ['locked'],
+    })
+  })
+
+  it('preserves the draft revision through the real GET presenter and wire schema', () => {
+    const result = Reflect.get(
+      GET,
+      'present'
+    )({
+      workflow: {
+        id: 'workflow-1',
+        userId: 'reader',
+        workspaceId: 'workspace-1',
+        folderId: null,
+        sortOrder: 0,
+        name: 'Snapshot fixture',
+        description: null,
+        lastSynced: new Date('2026-10-19T00:00:00Z'),
+        createdAt: new Date('2026-10-19T00:00:00Z'),
+        updatedAt: new Date('2026-10-19T00:00:00Z'),
+        isDeployed: false,
+        deployedAt: null,
+        isPublicApi: false,
+        locked: false,
+        runCount: 0,
+        lastRunAt: null,
+        archivedAt: null,
+        draftRevision: 7,
+        variables: { threshold: { id: 'threshold', name: 'threshold', type: 'number', value: 3 } },
+      },
+      state: { blocks: {}, edges: [], loops: {}, parallels: {} },
+    })
+    expect(result.data).toMatchObject({
+      draftRevision: 7,
+      state: { blocks: {}, edges: [] },
+      variables: { threshold: { value: 3, workflowId: 'workflow-1' } },
     })
   })
 

@@ -1,3 +1,4 @@
+// Modified by Memlia (2026): optional single-workflow private-copy action.
 'use client'
 
 import { useRef } from 'react'
@@ -55,6 +56,8 @@ interface ContextMenuProps {
   renameInputRef?: React.RefObject<HTMLInputElement | null>
   onCreate?: () => void
   onCreateFolder?: () => void
+  onPrivateCopy?: () => void
+  showPrivateCopy?: boolean
   onDuplicate?: () => void
   onExport?: () => void
   onDelete?: () => void
@@ -130,6 +133,8 @@ export function ContextMenu({
   renameInputRef,
   onCreate,
   onCreateFolder,
+  onPrivateCopy,
+  showPrivateCopy = false,
   onDuplicate,
   onExport,
   onDelete,
@@ -181,6 +186,7 @@ export function ContextMenu({
     (showCreateFolder && onCreateFolder) ||
     (showLock && onToggleLock) ||
     (showUploadLogo && onUploadLogo) ||
+    (showPrivateCopy && selectedCount === 1 && onPrivateCopy) ||
     (showDuplicate && onDuplicate) ||
     (showExport && onExport)
   const hasDestructiveSection =
@@ -354,6 +360,17 @@ export function ContextMenu({
           </DropdownMenuItem>
         )}
 
+        {showPrivateCopy && selectedCount === 1 && onPrivateCopy && (
+          <DropdownMenuItem
+            onSelect={() => {
+              onPrivateCopy()
+              onClose()
+            }}
+          >
+            <Duplicate />
+            Créer une copie privée
+          </DropdownMenuItem>
+        )}
         {showDuplicate && onDuplicate && (
           <DropdownMenuItem
             disabled={disableDuplicate}

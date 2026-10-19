@@ -1,3 +1,4 @@
+// Modified by Memlia: add optional server controls before model requests and tool dispatch.
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { createLogger } from '@sim/logger'
 import { getErrorMessage } from '@sim/utils/errors'
@@ -29,6 +30,15 @@ import { getToolParams } from '@/tools/metadata'
 import type { ToolResponse } from '@/tools/types'
 
 export interface ProviderRuntimeContext {
+  /** Optional trusted request controls; never populated from a provider/model payload. */
+  controlledRun?: {
+    signal: AbortSignal
+    beforeModelCall(): void
+    executeTool(
+      toolId: string,
+      params: Record<string, unknown>
+    ): Promise<ProviderToolExecutionResult>
+  }
   agentConversation?: AgentConversationSession
   agentMemoryContext?: { historyTokens?: number }
   agentMemoryRetrieval?: AgentMemoryRetrievalBinding
@@ -63,6 +73,19 @@ export function runWithProviderRuntimeContext<T>(
   callback: () => T
 ): T {
   return providerRuntimeContext.run(context, callback)
+}
+
+/** Reserve immediately before a physical request; SDK retries are disabled per call only. */
+export function beforeProviderModelCall(signal?: AbortSignal) {
+  const controls = providerRuntimeContext.getStore()?.controlledRun
+  if (!controls) return signal ? { signal } : undefined
+  controls.signal.throwIfAborted()
+  signal?.throwIfAborted()
+  controls.beforeModelCall()
+  return {
+    maxRetries: 0,
+    signal: signal ? AbortSignal.any([signal, controls.signal]) : controls.signal,
+  }
 }
 
 function toProviderModelResponse(
@@ -169,6 +192,10 @@ export async function executeProviderTool(
   options: ExecuteProviderToolOptions = {}
 ): Promise<ProviderToolExecutionResult> {
   const runtimeContext = providerRuntimeContext.getStore()
+  if (runtimeContext?.controlledRun) {
+    options.signal?.throwIfAborted()
+    return runtimeContext.controlledRun.executeTool(toolId, params)
+  }
   const invocationId =
     isRecordLike(params._context) && typeof params._context.invocationId === 'string'
       ? params._context.invocationId

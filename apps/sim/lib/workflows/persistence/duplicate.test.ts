@@ -1,3 +1,4 @@
+// Modified by Memlia: common workflow draft revision and regression coverage.
 import {
   dbChainMockFns,
   queueTableRows,
@@ -31,6 +32,7 @@ function queueDuplicateFixtures(options: {
 }) {
   queueTableRows(schemaMock.workflow, [options.sourceWorkflow])
   queueTableRows(schemaMock.workflow, options.workflowMin ?? [])
+  queueTableRows(schemaMock.workflow, [{ draftRevision: 0 }])
   queueTableRows(schemaMock.folder, options.folderMin ?? [])
   queueTableRows(schemaMock.workflowBlocks, options.blocks ?? [])
   queueTableRows(schemaMock.workflowEdges, options.edges ?? [])
@@ -51,6 +53,7 @@ function insertedValuesFor(table: unknown): unknown[] {
 describe('duplicateWorkflow ordering', () => {
   beforeEach(() => {
     resetDbChainMock()
+    dbChainMockFns.returning.mockResolvedValue([{ draftRevision: 1 }])
     queueTableRows(schemaMock.workspace, [
       { archivedAt: null, forkSyncNewWorkflowsExcluded: false },
     ])

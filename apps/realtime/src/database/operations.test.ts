@@ -1,3 +1,4 @@
+// Modified by Memlia: common workflow draft revision and regression coverage.
 import { OPERATION_TARGETS, SUBBLOCK_OPERATIONS } from '@sim/realtime-protocol/constants'
 import { auditMock } from '@sim/testing/mocks/audit.mock'
 import { databaseMock, drizzleOrmMock } from '@sim/testing/mocks/database.mock'
@@ -32,7 +33,17 @@ import { persistWorkflowOperation } from '@/database/operations'
 workflowAuthzMockFns.mockGetActiveWorkflowContext.mockResolvedValue({ id: 'workflow-1' })
 
 const transaction = {
-  select: () => ({ from: () => ({ where: mockSelectWhere }) }),
+  rollback: () => {
+    throw new Error('rollback')
+  },
+  select: (projection?: Record<string, unknown>) =>
+    projection && 'draftRevision' in projection
+      ? {
+          from: () => ({
+            where: () => ({ limit: () => ({ for: async () => [{ draftRevision: 0 }] }) }),
+          }),
+        }
+      : { from: () => ({ where: mockSelectWhere }) },
   update: () => ({ set: mockSet }),
   delete: vi.fn(),
   insert: vi.fn(),
@@ -52,7 +63,12 @@ describe('search replacement persistence', () => {
     mockTransaction.mockImplementation(
       async (callback: (tx: typeof transaction) => Promise<void>) => callback(transaction)
     )
-    mockSet.mockReturnValue({ where: vi.fn().mockResolvedValue(undefined) })
+    mockSet.mockReturnValue({
+      where: () =>
+        Object.assign(Promise.resolve(undefined), {
+          returning: async () => [{ draftRevision: 1 }],
+        }),
+    })
   })
 
   function replaceTools(stored: unknown, expectedValue: unknown = expected) {
@@ -85,7 +101,7 @@ describe('search replacement persistence', () => {
     ]
 
     await expect(replaceTools(stored)).resolves.toBeUndefined()
-    expect(mockSet).toHaveBeenLastCalledWith(
+    expect(mockSet).toHaveBeenCalledWith(
       expect.objectContaining({
         subBlocks: { tools: { id: 'tools', type: 'tool-input', value: replacement } },
       })
@@ -116,7 +132,12 @@ describe('subblock update with canonical modes persistence', () => {
     mockTransaction.mockImplementation(
       async (callback: (tx: typeof transaction) => Promise<void>) => callback(transaction)
     )
-    mockSet.mockReturnValue({ where: vi.fn().mockResolvedValue(undefined) })
+    mockSet.mockReturnValue({
+      where: () =>
+        Object.assign(Promise.resolve(undefined), {
+          returning: async () => [{ draftRevision: 1 }],
+        }),
+    })
   })
 
   function updateTools(block: Record<string, unknown>) {
@@ -140,8 +161,9 @@ describe('subblock update with canonical modes persistence', () => {
   it('writes the subblock value and replaces canonical modes in one block update', async () => {
     await expect(updateTools({})).resolves.toBeUndefined()
 
-    expect(mockSet).toHaveBeenCalledTimes(2)
-    expect(mockSet).toHaveBeenLastCalledWith(
+    expect(mockSet).toHaveBeenCalledTimes(3)
+    expect(mockSet).toHaveBeenLastCalledWith({ draftRevision: 1 })
+    expect(mockSet).toHaveBeenCalledWith(
       expect.objectContaining({
         subBlocks: { tools: { id: 'tools', type: 'tool-input', value: tools } },
         data: { width: 350, canonicalModes },

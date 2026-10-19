@@ -1,3 +1,4 @@
+// Modified by Memlia: model coherent draft reads, revision writes and distinct native transactions.
 /**
  * Database Helpers Unit Tests
  *
@@ -74,7 +75,7 @@ import * as dbHelpers from '@/lib/workflows/persistence/utils'
 const mockWorkflowId = 'test-workflow-123'
 
 /**
- * Queues the four table-routed result sets consumed by
+ * Queues the short workflow share lock, then the four result sets consumed by
  * `loadWorkflowFromNormalizedTablesRaw` (blocks, edges, subflows, workflow row).
  */
 function queueLoadFixtures(options: {
@@ -86,7 +87,10 @@ function queueLoadFixtures(options: {
   queueTableRows(schemaMock.workflowBlocks, options.blocks)
   queueTableRows(schemaMock.workflowEdges, options.edges ?? [])
   queueTableRows(schemaMock.workflowSubflows, options.subflows ?? [])
-  queueTableRows(schemaMock.workflow, [{ workspaceId: options.workspaceId ?? 'test-workspace-id' }])
+  queueTableRows(schemaMock.workflow, [{ id: mockWorkflowId }])
+  queueTableRows(schemaMock.workflow, [
+    { workspaceId: options.workspaceId ?? 'test-workspace-id', draftRevision: 0 },
+  ])
 }
 
 /**
@@ -507,12 +511,16 @@ describe('Database Helpers', () => {
       staleWorkflowState.loops = {}
       staleWorkflowState.parallels = {}
 
-      await dbHelpers.saveWorkflowToNormalizedTables(
+      queueTableRows(schemaMock.workflow, [{ id: mockWorkflowId }])
+      queueTableRows(schemaMock.workflow, [{ draftRevision: 0 }])
+      dbChainMockFns.returning.mockResolvedValueOnce([{ draftRevision: 1 }])
+      const result = await dbHelpers.saveWorkflowToNormalizedTables(
         mockWorkflowId,
         asAppState(staleWorkflowState),
         UNGOVERNED
       )
 
+      expect(result).toEqual({ success: true, baseRevision: 0, draftRevision: 1 })
       const [capturedSubflowInserts = []] = insertedRowsFor(schemaMock.workflowSubflows)
 
       expect(capturedSubflowInserts).toHaveLength(2)
@@ -560,9 +568,13 @@ describe('Database Helpers', () => {
         ])
       )
       expect(dbChainMockFns.delete).toHaveBeenCalledTimes(2)
-      expect(onUndeployTransaction).toHaveBeenCalledWith(dbChainMock.db, {
-        deploymentVersionIds: ['dv-1', 'dv-2'],
-      })
+      expect(onUndeployTransaction).toHaveBeenCalledWith(
+        expect.objectContaining({ ...dbChainMock.db, rollback: expect.any(Function) }),
+        {
+          deploymentVersionIds: ['dv-1', 'dv-2'],
+        }
+      )
+      expect(onUndeployTransaction.mock.calls[0][0]).not.toBe(dbChainMock.db)
     })
   })
 

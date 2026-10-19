@@ -1,3 +1,4 @@
+// Modified by Memlia: preserve the source draft revision in read-only sanitized responses.
 import { createEmbeddedClient } from 'sim/embed'
 import { describe, expect, it } from 'vitest'
 import { runEngine } from '@/lib/mothership/agent-cli/engines'
@@ -6,6 +7,7 @@ import { isReadOnlyCliRequest, readOnlyCliTransport } from '@/lib/mothership/age
 describe('benchmark reference workspace inspection', () => {
   it('removes credential bindings from graph reads while retaining workspace mappings and code', async () => {
     const graph = {
+      draftRevision: 7,
       blocks: {
         step: {
           id: 'step',
@@ -33,6 +35,7 @@ describe('benchmark reference workspace inspection', () => {
     const transport = readOnlyCliTransport(async () => Response.json({ data: graph }))
     const response = await transport('https://sim.test/api/v2/workflows/workflow/state')
     const body = await response.text()
+    expect(JSON.parse(body).data.draftRevision).toBe(7)
     expect(body).not.toContain('private-credential-id')
     expect(body).toContain('escalation-table')
     expect(body).toContain('Support')

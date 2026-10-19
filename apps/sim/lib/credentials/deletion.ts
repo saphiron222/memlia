@@ -1,7 +1,9 @@
+// Modified by Memlia: revision-guarded draft credential cleanup.
 import { AuditAction, AuditResourceType, recordAudit } from '@sim/audit'
 import { db } from '@sim/db'
 import * as schema from '@sim/db/schema'
 import { createLogger } from '@sim/logger'
+import { advanceWorkflowDraft } from '@sim/workflow-persistence/revision'
 import { and, eq, inArray, isNull, notExists, or, sql } from 'drizzle-orm'
 import type { AnyPgColumn, PgTable } from 'drizzle-orm/pg-core'
 import type { NextRequest } from 'next/server'
@@ -220,23 +222,47 @@ async function clearInWorkflowBlocks(
   workspaceId: string,
   needle: string
 ): Promise<void> {
-  const rows = await readWorkspaceCredentialRefs(workspaceId, needle, {
-    table: schema.workflowBlocks,
-    id: schema.workflowBlocks.id,
-    workflowId: schema.workflowBlocks.workflowId,
-    value: schema.workflowBlocks.subBlocks,
-  })
-
+  // Discover IDs only; never write a subblock snapshot read before its workflow lock.
+  const workflows = await db
+    .select({ id: schema.workflow.id })
+    .from(schema.workflow)
+    .where(eq(schema.workflow.workspaceId, workspaceId))
+    .orderBy(schema.workflow.id)
   let updated = 0
-  for (const row of rows) {
-    const next = clearCredentialInValue(row.value, credentialId)
-    if (next.changed) {
-      await db
-        .update(schema.workflowBlocks)
-        .set({ subBlocks: next.value, updatedAt: new Date() })
-        .where(eq(schema.workflowBlocks.id, row.id))
-      updated += 1
-    }
+  for (const candidate of workflows) {
+    updated += await db.transaction(async (tx) => {
+      // Credential revocation also cleans archived drafts. Their row uses the same lock/counter.
+      const [locked] = await tx
+        .select({ draftRevision: schema.workflow.draftRevision })
+        .from(schema.workflow)
+        .where(
+          and(eq(schema.workflow.id, candidate.id), eq(schema.workflow.workspaceId, workspaceId))
+        )
+        .limit(1)
+        .for('update')
+      if (!locked) return 0
+      const rows = await tx
+        .select({ id: schema.workflowBlocks.id, value: schema.workflowBlocks.subBlocks })
+        .from(schema.workflowBlocks)
+        .where(
+          and(
+            eq(schema.workflowBlocks.workflowId, candidate.id),
+            sql`${schema.workflowBlocks.subBlocks}::text LIKE ${needle}`
+          )
+        )
+      let changed = 0
+      for (const row of rows) {
+        const next = clearCredentialInValue(row.value, credentialId)
+        if (!next.changed) continue
+        await tx
+          .update(schema.workflowBlocks)
+          .set({ subBlocks: next.value, updatedAt: new Date() })
+          .where(eq(schema.workflowBlocks.id, row.id))
+        changed++
+      }
+      if (changed > 0) await advanceWorkflowDraft(tx, candidate.id, locked.draftRevision)
+      return changed
+    })
   }
   if (updated > 0) {
     logger.info('Cleared credential refs in workflow_blocks', {

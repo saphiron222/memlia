@@ -1,5 +1,11 @@
+// Modified by Memlia: verify internal draft revision projection.
 import { describe, expect, it } from 'vitest'
-import { executeWorkflowBodySchema, workflowStateSchema } from '@/lib/api/contracts/workflows'
+import {
+  executeWorkflowBodySchema,
+  getWorkflowResponseDataSchema,
+  workflowStateResponseSchema,
+  workflowStateSchema,
+} from '@/lib/api/contracts/workflows'
 import { PRIVATE_SECRET_PROVENANCE_FIELD } from '@/lib/execution/private-tool-metadata'
 
 describe('workflow contracts', () => {
@@ -107,4 +113,52 @@ describe('workflow contracts', () => {
       ).success
     ).toBe(true)
   })
+})
+
+const normalized = { blocks: {}, edges: [], loops: {}, parallels: {}, variables: {} }
+const envelope = {
+  id: 'workflow-1',
+  userId: 'reader',
+  workspaceId: 'workspace-1',
+  folderId: null,
+  sortOrder: 0,
+  name: 'Revision fixture',
+  description: null,
+  lastSynced: '2026-10-19T00:00:00Z',
+  createdAt: '2026-10-19T00:00:00Z',
+  updatedAt: '2026-10-19T00:00:00Z',
+  isDeployed: false,
+  deployedAt: null,
+  isPublicApi: false,
+  locked: false,
+  runCount: 0,
+  lastRunAt: null,
+  archivedAt: null,
+  state: normalized,
+  variables: {},
+}
+describe('internal draft read revisions', () => {
+  for (const [name, schema, fixture] of [
+    ['envelope', getWorkflowResponseDataSchema, envelope],
+    ['normalized', workflowStateResponseSchema, normalized],
+  ] as const) {
+    it.each([0, 7, Number.MAX_SAFE_INTEGER])(
+      `retains the canonical revision in ${name} reads: %s`,
+      (draftRevision) => {
+        expect(schema.parse({ ...fixture, draftRevision })).toMatchObject({ draftRevision })
+      }
+    )
+    it.each([
+      undefined,
+      null,
+      -1,
+      1.5,
+      Number.MAX_SAFE_INTEGER + 1,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      '7',
+    ])(`rejects missing or invalid ${name} revision: %s`, (draftRevision) => {
+      expect(schema.safeParse({ ...fixture, draftRevision }).success).toBe(false)
+    })
+  }
 })

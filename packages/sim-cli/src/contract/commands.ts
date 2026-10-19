@@ -1,4 +1,4 @@
-// Modified by Memlia in 2026. Upstream Apache-2.0 license and notices retained.
+// Modified by Memlia: remove overlays for retired contracts; other retired routes remain hidden.
 import type { CliContract, ColumnSpec, CommandVariantSpec } from './types'
 
 const ORGANIZATION_FLAG = {
@@ -12,14 +12,6 @@ const PERMISSION_GROUP_MEMBER_FLAGS = {
 const DEFAULT_FLAG = {
   isDefault: { name: 'default', boolean: true, negatable: true },
 } as const
-
-const ACCESS_REQUEST_COLUMNS: ColumnSpec[] = [
-  { header: 'id' },
-  { header: 'target', path: 'targetLabel' },
-  { header: 'status' },
-  { header: 'requester', path: 'requester.email' },
-  { header: 'created', path: 'createdAt', format: 'timestamp' },
-]
 
 const FILE_SHARE_FIELDS: ColumnSpec[] = [
   { header: 'shared', path: 'isActive', format: 'bool' },
@@ -1163,86 +1155,6 @@ export const CLI_CONTRACT: CliContract = {
       { header: 'description' },
       { header: 'built-in', path: 'readOnly', format: 'bool' },
     ],
-  },
-  discoverWorkspaceAccessRequests: {
-    hidden: true,
-    command: 'workspaces access-requests discover',
-    profileWorkspacePath: true,
-    columns: [
-      { header: 'label' },
-      { header: 'target' },
-      { header: 'state' },
-      { header: 'pending', path: 'pendingRequestId' },
-    ],
-  },
-  listMyWorkspaceAccessRequests: {
-    hidden: true,
-    command: 'workspaces access-requests mine',
-    profileWorkspacePath: true,
-    columns: ACCESS_REQUEST_COLUMNS,
-  },
-  createWorkspaceAccessRequest: {
-    hidden: true,
-    command: 'workspaces access-requests create',
-    profileWorkspacePath: true,
-  },
-  cancelWorkspaceAccessRequest: {
-    hidden: true,
-    command: 'workspaces access-requests cancel',
-    profileWorkspacePath: true,
-  },
-  discoverOrganizationAccessRequests: {
-    hidden: true,
-    command: 'organizations access-requests discover',
-    pathFlags: ORGANIZATION_FLAG,
-    columns: [
-      { header: 'label' },
-      { header: 'target' },
-      { header: 'state' },
-      { header: 'pending', path: 'pendingRequestId' },
-    ],
-  },
-  listMyOrganizationAccessRequests: {
-    hidden: true,
-    command: 'organizations access-requests mine',
-    pathFlags: ORGANIZATION_FLAG,
-    columns: ACCESS_REQUEST_COLUMNS,
-  },
-  createOrganizationAccessRequest: {
-    hidden: true,
-    command: 'organizations access-requests create',
-    pathFlags: ORGANIZATION_FLAG,
-  },
-  cancelOrganizationAccessRequest: {
-    hidden: true,
-    command: 'organizations access-requests cancel',
-    pathFlags: ORGANIZATION_FLAG,
-  },
-  listOrganizationAccessRequests: {
-    hidden: true,
-    command: 'organizations access-requests list',
-    pathFlags: ORGANIZATION_FLAG,
-    columns: ACCESS_REQUEST_COLUMNS,
-  },
-  previewOrganizationAccessRequest: {
-    hidden: true,
-    command: 'organizations access-requests preview',
-    pathFlags: ORGANIZATION_FLAG,
-  },
-  resolveOrganizationAccessRequest: {
-    hidden: true,
-    command: 'organizations access-requests resolve',
-    pathFlags: ORGANIZATION_FLAG,
-  },
-  getOrganizationAccessRequestSettings: {
-    hidden: true,
-    command: 'organizations access-requests settings get',
-    pathFlags: ORGANIZATION_FLAG,
-  },
-  updateOrganizationAccessRequestSettings: {
-    hidden: true,
-    command: 'organizations access-requests settings update',
-    pathFlags: ORGANIZATION_FLAG,
   },
   createWorkspaceInvitations: {
     command: 'workspaces invitations create',

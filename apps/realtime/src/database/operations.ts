@@ -1,3 +1,4 @@
+// Modified by Memlia: serialize draft mutations and read graph/revision in one snapshot.
 import { isDeepStrictEqual } from 'node:util'
 import { AuditAction, AuditResourceType, recordAudit } from '@sim/audit'
 import * as schema from '@sim/db'
@@ -25,6 +26,7 @@ import {
 } from '@sim/realtime-protocol/constants'
 import { randomFloat } from '@sim/utils/random'
 import { loadWorkflowFromNormalizedTablesRaw } from '@sim/workflow-persistence/load'
+import { advanceWorkflowDraft, lockWorkflowDraft } from '@sim/workflow-persistence/revision'
 import { mergeSubBlockValues } from '@sim/workflow-persistence/subblocks'
 import type { DbOrTx } from '@sim/workflow-persistence/types'
 import {
@@ -372,17 +374,22 @@ export async function updateSubflowNodeList(dbOrTx: any, workflowId: string, par
 
 export async function getWorkflowState(workflowId: string) {
   try {
-    const workflowData = await db
-      .select()
-      .from(workflow)
-      .where(and(eq(workflow.id, workflowId), isNull(workflow.archivedAt)))
-      .limit(1)
+    // Keep row metadata, variables, revision and graph in one short read snapshot.
+    const { workflowData, normalizedData } = await db.transaction(async (tx) => {
+      await tx.execute(sql`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`)
+      const workflowData = await tx
+        .select()
+        .from(workflow)
+        .where(and(eq(workflow.id, workflowId), isNull(workflow.archivedAt)))
+        .limit(1)
 
-    if (!workflowData.length) {
-      throw new Error(`Workflow ${workflowId} not found`)
-    }
+      if (!workflowData.length) {
+        throw new Error(`Workflow ${workflowId} not found`)
+      }
 
-    const normalizedData = await loadWorkflowFromNormalizedTablesRaw(workflowId)
+      const normalizedData = await loadWorkflowFromNormalizedTablesRaw(workflowId, tx)
+      return { workflowData, normalizedData }
+    })
 
     if (normalizedData) {
       const finalState = {
@@ -431,6 +438,7 @@ export async function persistWorkflowOperation(workflowId: string, operation: an
     }
 
     await db.transaction(async (tx) => {
+      const baseRevision = await lockWorkflowDraft(tx, workflowId)
       // This UPDATE is also this workflow's write-serialization point, not
       // just a timestamp bump: it takes a row lock on `workflow` for the
       // rest of the transaction, so two concurrent persistWorkflowOperation
@@ -473,6 +481,7 @@ export async function persistWorkflowOperation(workflowId: string, operation: an
         default:
           throw new Error(`Unknown operation target: ${target}`)
       }
+      await advanceWorkflowDraft(tx, workflowId, baseRevision)
     })
 
     if (

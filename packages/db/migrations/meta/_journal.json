@@ -1,4 +1,5 @@
 {
+  "x-memlia-modifications": "Modified by Memlia in 2026. Upstream Apache-2.0 license and notices retained.",
   "version": "7",
   "dialect": "postgresql",
   "entries": [
@@ -3038,6 +3039,20 @@
       "version": "7",
       "when": 1792204592687,
       "tag": "0434_sentinel_data_drain",
+      "breakpoints": true
+    },
+    {
+      "idx": 435,
+      "version": "7",
+      "when": 1792391229071,
+      "tag": "0435_memlia_workflow_copy",
+      "breakpoints": true
+    },
+    {
+      "idx": 436,
+      "version": "7",
+      "when": 1792394919379,
+      "tag": "0436_workflow_draft_revision",
       "breakpoints": true
     }
   ]

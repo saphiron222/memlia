@@ -1,3 +1,4 @@
+// Modified by Memlia: preserve the real request-control helper in the provider mock.
 /**
  * Pins the non-streaming status/error gate, and pins its `incomplete` policy to the one
  * `streamResponsesTurn` applies so the two paths cannot silently diverge.
@@ -43,7 +44,8 @@ const { mockExecuteProviderTool } = vi.hoisted(() => ({
 
 vi.mock('@/providers/conversation-history', () => providersConversationHistoryMock)
 
-vi.mock('@/providers/runtime-context', () => ({
+vi.mock('@/providers/runtime-context', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/providers/runtime-context')>()),
   executeProviderTool: mockExecuteProviderTool,
 }))
 

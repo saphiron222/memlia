@@ -1,5 +1,6 @@
+// Modified by Memlia: prepare edits from a coherent draft snapshot and compare its revision at commit.
 import { AuditAction, AuditResourceType } from '@sim/audit'
-import { type Principal, resolvePrincipalAttribution } from '@sim/auth/principal'
+import { resolvePrincipalAttribution } from '@sim/auth/principal'
 import { db } from '@sim/db'
 import { createLogger } from '@sim/logger'
 import { toError } from '@sim/utils/errors'
@@ -17,7 +18,6 @@ import { resolvePermissionGroupConfig } from '@/lib/permission-groups/config-sco
 import { notifyWorkflowUpdated } from '@/lib/realtime/notify'
 import { defineAuthorizedWorkflowUseCase } from '@/lib/workflows/application/authorized-workflow-use-case'
 import { withWorkflowBlockScope } from '@/lib/workflows/application/block-scope'
-import type { ActiveWorkflowApplicationContext } from '@/lib/workflows/application/context'
 import { requireMutableWorkflow } from '@/lib/workflows/application/mutability'
 import { workflowOperations } from '@/lib/workflows/application/operations'
 import { WorkflowOperationsNotAppliedError } from '@/lib/workflows/application/operations-error'
@@ -54,7 +54,7 @@ import {
   collectWorkflowGraphIds,
   replaceWorkflowNormalizedState,
 } from '@/lib/workflows/persistence/replace-normalized-state'
-import { loadWorkflowFromNormalizedTables } from '@/lib/workflows/persistence/utils'
+import { loadWorkflowDraftSnapshot } from '@/lib/workflows/persistence/utils'
 import { validateWorkflowState } from '@/lib/workflows/sanitization/validation'
 import { withBlockVisibility } from '@/blocks/visibility/server-context'
 import { normalizeWorkflowState } from '@/stores/workflows/workflow/validation'
@@ -70,6 +70,7 @@ export interface WorkflowBlockEnabledChange {
 export interface ApplyWorkflowOperationsInput {
   workflowId: string
   assertedWorkspaceId?: string
+  expectedRevision?: number
   operations: EditWorkflowOperation[]
   /** Refuse the whole batch, writing nothing, when any operation is declined. */
   atomic?: boolean
@@ -95,6 +96,8 @@ export interface ApplyWorkflowOperationsInput {
 }
 
 export interface ApplyWorkflowOperationsResult {
+  baseRevision: number
+  draftRevision: number
   workflowId: string
   workflowName: string
   workspaceId: string
@@ -145,8 +148,9 @@ function asGraph(value: Record<string, unknown>): Pick<WorkflowState, 'blocks' |
  * graph. A null result therefore remains a hard failure rather than becoming a
  * fallback graph that a write could persist after a failed read.
  */
-async function loadStoredGraph(workflowId: string): Promise<Record<string, unknown>> {
-  const normalized = await loadWorkflowFromNormalizedTables(workflowId)
+async function loadStoredGraph(workflowId: string) {
+  const snapshot = await loadWorkflowDraftSnapshot(workflowId)
+  const normalized = snapshot.state
   if (!normalized) {
     throw new OrchestrationError('validation', `Workflow ${workflowId} has no normalized state`)
   }
@@ -163,7 +167,10 @@ async function loadStoredGraph(workflowId: string): Promise<Record<string, unkno
     })
   }
   // double-cast-allowed: the edit engine takes an open record; `normalizeWorkflowState` returns the canonical interface, which has no index signature.
-  return state as unknown as Record<string, unknown>
+  return {
+    graph: state as unknown as Record<string, unknown>,
+    draftRevision: snapshot.draftRevision,
+  }
 }
 
 /**
@@ -229,15 +236,6 @@ function applyBlockEnabledChanges(
   return { blocks: current, applied }
 }
 
-async function resolveBaseGraph(
-  principal: Principal,
-  input: ApplyWorkflowOperationsInput,
-  context: ActiveWorkflowApplicationContext
-): Promise<Record<string, unknown>> {
-  if (input.baseGraph && principal.kind === 'delegated') return input.baseGraph
-  return loadStoredGraph(context.workflowId)
-}
-
 /**
  * The one semantic edit operation on a workflow graph.
  *
@@ -258,6 +256,21 @@ export const applyWorkflowOperations = defineAuthorizedWorkflowUseCase({
     if (input.operations.length === 0) {
       throw new OrchestrationError('validation', 'operations cannot be empty')
     }
+    if (
+      input.expectedRevision !== undefined &&
+      (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0)
+    ) {
+      throw new OrchestrationError(
+        'validation',
+        'Workflow revision must be a non-negative safe integer'
+      )
+    }
+    if (input.baseGraph && principal.kind === 'delegated' && input.expectedRevision === undefined) {
+      throw new OrchestrationError(
+        'validation',
+        'A delegated base graph requires its expected revision'
+      )
+    }
     await requireMutableWorkflow(context.workflowId)
 
     return withWorkflowBlockScope(context, async () => {
@@ -274,7 +287,16 @@ export const applyWorkflowOperations = defineAuthorizedWorkflowUseCase({
       const subjectUserId = attribution.attributedUserId
 
       input.checkAborted?.()
-      const baseGraph = await resolveBaseGraph(principal, input, context)
+      const snapshot = await loadStoredGraph(context.workflowId)
+      const baseRevision = snapshot.draftRevision
+      if (input.expectedRevision !== undefined && input.expectedRevision !== baseRevision) {
+        throw new OrchestrationError(
+          'conflict',
+          'Workflow draft changed; refresh the proposal before applying it'
+        )
+      }
+      const baseGraph =
+        input.baseGraph && principal.kind === 'delegated' ? input.baseGraph : snapshot.graph
 
       const [permissionConfig, blockVisibility] = await Promise.all([
         resolvePermissionGroupConfig(
@@ -427,6 +449,8 @@ export const applyWorkflowOperations = defineAuthorizedWorkflowUseCase({
           ],
           needsRedeployment: await checkNeedsRedeployment(context.workflowId),
           dryRun: true,
+          baseRevision,
+          draftRevision: baseRevision,
         }
       }
 
@@ -440,6 +464,7 @@ export const applyWorkflowOperations = defineAuthorizedWorkflowUseCase({
          * governed subject are the same human and cannot diverge here.
          */
         subjectUserId,
+        expectedRevision: baseRevision,
         state: { blocks: graph.blocks, edges: graph.edges },
       })
 
@@ -467,6 +492,8 @@ export const applyWorkflowOperations = defineAuthorizedWorkflowUseCase({
         warnings: [...validation.warnings, ...persisted.warnings],
         needsRedeployment: await checkNeedsRedeployment(context.workflowId),
         dryRun: false,
+        baseRevision: persisted.baseRevision,
+        draftRevision: persisted.draftRevision,
       }
     })
   },

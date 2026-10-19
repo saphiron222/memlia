@@ -12,6 +12,10 @@ Le code Sim réutilisé conserve sa licence Apache-2.0 et les conditions propres
 
 ## Vérification de compilation Linux
 
-Une mesure GitHub Actions est prévue sur un runner Linux standard public. Elle doit relever la RAM effectivement disponible, le pic du groupe de compilation, la durée et le résultat complet. Aucun artefact de production n’est publié par cette mesure. Le garde mémoire macOS de développement demeure dans [scripts/dev](scripts/dev/README.md).
+Quatre mesures de compilation sur le runner Linux public standard de 16 Go ont échoué : Webpack avec tas de 8 et 10 Gio, Turbopack avec tas de 10 Gio, puis Webpack avec cache mémoire. [Le dernier essai](https://github.com/saphiron222/memlia/actions/runs/39223549449) atteint la limite V8 après 579,133 secondes, avec un pic cgroup de 11,872 Gio. Ces mesures portent sur le témoin Next16.4.0 ; elles ne qualifient pas le build des sources actuelles, passées depuis à Next16.4.2.
+
+Le runner de 16 Go n'est donc pas qualifié pour ce build complet. Une machine de 24–32 Go reste une hypothèse de prochain essai, pas un minimum mesuré ni une recommandation de dimensionnement du serveur d'un cabinet. Aucun runner payant n'est activé. Le garde mémoire macOS de développement demeure dans [scripts/dev](scripts/dev/README.md).
+
+Un [contrôle Linux distinct](scripts/ci/README.linux-validation.md) permet de vérifier les types et bundles natifs sans lancer Next build. Sa réussite ne satisfait pas le check `build` obligatoire et ne produit pas de standalone qualifié. Aucun artefact de production, journal brut, cache ou dépendance n'est publié par ces workflows.
 
 L’installation frozen utilise les versions figées dans le verrou. Les licences des dépendances installées et des artefacts finaux nécessitent leurs contrôles distincts avant toute livraison commerciale. Les règles de publication se trouvent dans [compliance](compliance/README.md).

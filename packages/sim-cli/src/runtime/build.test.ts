@@ -1,4 +1,4 @@
-// Modified by Memlia in 2026. Upstream Apache-2.0 license and notices retained.
+// Modified by Memlia: require and preserve the caller's observed draft revision for graph writes.
 import { Command } from 'commander'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { V2_OPERATIONS } from '../generated/v2-api'
@@ -242,7 +242,18 @@ describe('commands parsed through commander', () => {
   describe('destructive confirmation and --dry-run', () => {
     it('refuses a graph replace without --yes', async () => {
       await expect(
-        run(['workflows', 'state', 'replace', 'wf-1', '--blocks', '{}', '--edges', '[]'])
+        run([
+          'workflows',
+          'state',
+          'replace',
+          'wf-1',
+          '--blocks',
+          '{}',
+          '--edges',
+          '[]',
+          '--expected-revision',
+          '7',
+        ])
       ).rejects.toThrow(/--yes/)
       expect(mockRequest).not.toHaveBeenCalled()
     })
@@ -257,9 +268,40 @@ describe('commands parsed through commander', () => {
         '{}',
         '--edges',
         '[]',
+        '--expected-revision',
+        '7',
         '--dry-run',
       ])
 
+      expect(options.query).toMatchObject({ dryRun: true })
+    })
+  })
+
+  describe('Memlia observed draft revision', () => {
+    const graphWrites = [
+      ['workflows', 'state', 'replace', 'wf-1', '--blocks', '{}', '--edges', '[]'],
+      [
+        'workflows',
+        'operations',
+        'apply',
+        'wf-1',
+        '--operations',
+        '[{"operation_type":"delete","block_id":"fixture"}]',
+      ],
+    ]
+
+    it.each(graphWrites)(
+      'refuses an unversioned graph write before HTTP: %s %s %s',
+      async (...args) => {
+        mockRequest.mockReset()
+        await expect(run([...args, '--yes'])).rejects.toThrow(/expected-revision/)
+        expect(mockRequest).not.toHaveBeenCalled()
+      }
+    )
+
+    it.each(graphWrites)('sends the observed revision unchanged: %s %s %s', async (...args) => {
+      const [, options] = await run([...args, '--expected-revision', '7', '--dry-run'])
+      expect(options.body).toMatchObject({ expectedRevision: 7 })
       expect(options.query).toMatchObject({ dryRun: true })
     })
   })

@@ -1,3 +1,4 @@
+// Modified by Memlia: coherent draft reads and revision invalidation for persisted migrations.
 import { db, workflow, workflowBlocks, workflowEdges, workflowSubflows } from '@sim/db'
 import { createLogger } from '@sim/logger'
 import type { BlockRetryConfig, BlockState, Loop, Parallel } from '@sim/workflow-types/workflow'
@@ -10,6 +11,7 @@ import {
 } from '@sim/workflow-types/workflow'
 import type { Edge } from '@xyflow/react'
 import { and, eq, getTableColumns, isNull, sql } from 'drizzle-orm'
+import { assertWorkflowRevision, withWorkflowDraftMutation } from './revision'
 import { clampParallelBatchSize } from './subflow-helpers'
 import type { DbOrTx, NormalizedWorkflowData } from './types'
 
@@ -77,6 +79,7 @@ function normalizeStoredBlockRetry(stored: unknown): BlockRetryConfig | undefine
 }
 
 export interface RawNormalizedWorkflow extends NormalizedWorkflowData {
+  draftRevision: number
   workspaceId: string
   /**
    * Each block row's `updated_at` rendered by Postgres as text, preserving the
@@ -107,7 +110,18 @@ export async function loadWorkflowFromNormalizedTablesRaw(
   externalTx?: DbOrTx
 ): Promise<RawNormalizedWorkflow | null> {
   try {
-    const tx = externalTx ?? db
+    if (!externalTx) {
+      return await db.transaction(async (tx) => {
+        await tx
+          .select({ id: workflow.id })
+          .from(workflow)
+          .where(eq(workflow.id, workflowId))
+          .limit(1)
+          .for('share')
+        return loadWorkflowFromNormalizedTablesRaw(workflowId, tx)
+      })
+    }
+    const tx = externalTx
     const [blocks, edges, subflows, [workflowRow]] = await Promise.all([
       tx
         .select({
@@ -119,7 +133,7 @@ export async function loadWorkflowFromNormalizedTablesRaw(
       tx.select().from(workflowEdges).where(eq(workflowEdges.workflowId, workflowId)),
       tx.select().from(workflowSubflows).where(eq(workflowSubflows.workflowId, workflowId)),
       tx
-        .select({ workspaceId: workflow.workspaceId })
+        .select({ workspaceId: workflow.workspaceId, draftRevision: workflow.draftRevision })
         .from(workflow)
         .where(eq(workflow.id, workflowId))
         .limit(1),
@@ -255,6 +269,7 @@ export async function loadWorkflowFromNormalizedTablesRaw(
       parallels,
       isFromNormalizedTables: true,
       workspaceId: workflowRow.workspaceId,
+      draftRevision: workflowRow.draftRevision,
       blockUpdatedAtById,
     }
   } catch (error) {
@@ -276,8 +291,8 @@ export async function loadWorkflowFromNormalizedTablesRaw(
  * compare-and-set: a concurrent write stamps a new `updated_at` and the guard
  * fails closed (skipped, logged, retried on the next load). Residual, inherent
  * limit: a concurrent app write whose JS `new Date()` collides with the stored
- * value at exact precision is indistinguishable; a version column would be
- * required to close that fully.
+ * value at exact precision is indistinguishable by timestamp alone. The caller
+ * also supplies the common revision from the same raw snapshot to close that race.
  */
 function updatedAtMatches(expectedText: string) {
   return eq(workflowBlocks.updatedAt, sql`${expectedText}::timestamp`)
@@ -287,42 +302,61 @@ export async function persistMigratedBlocks(
   workflowId: string,
   originalBlocks: Record<string, BlockState>,
   migratedBlocks: Record<string, BlockState>,
-  blockUpdatedAtById: Record<string, string | null> = {}
+  blockUpdatedAtById: Record<string, string | null>,
+  expectedRevision: number
 ): Promise<void> {
   try {
-    for (const [blockId, block] of Object.entries(migratedBlocks)) {
-      if (block !== originalBlocks[blockId]) {
-        const hasExpectedUpdatedAt = Object.hasOwn(blockUpdatedAtById, blockId)
-        const expectedUpdatedAt = blockUpdatedAtById[blockId]
-        const whereClause = hasExpectedUpdatedAt
-          ? and(
-              eq(workflowBlocks.id, blockId),
-              eq(workflowBlocks.workflowId, workflowId),
-              expectedUpdatedAt === null
-                ? isNull(workflowBlocks.updatedAt)
-                : updatedAtMatches(expectedUpdatedAt)
-            )
-          : and(eq(workflowBlocks.id, blockId), eq(workflowBlocks.workflowId, workflowId))
+    // Validate before the no-op path too; malformed/legacy calls must fail closed.
+    assertWorkflowRevision(expectedRevision)
+    if (!Object.entries(migratedBlocks).some(([id, block]) => block !== originalBlocks[id])) return
+    await db.transaction(async (tx) =>
+      withWorkflowDraftMutation(
+        tx,
+        workflowId,
+        async () => {
+          let changed = false
+          for (const [blockId, block] of Object.entries(migratedBlocks)) {
+            if (block !== originalBlocks[blockId]) {
+              const hasExpectedUpdatedAt = Object.hasOwn(blockUpdatedAtById, blockId)
+              const expectedUpdatedAt = blockUpdatedAtById[blockId]
+              const whereClause = hasExpectedUpdatedAt
+                ? and(
+                    eq(workflowBlocks.id, blockId),
+                    eq(workflowBlocks.workflowId, workflowId),
+                    expectedUpdatedAt === null
+                      ? isNull(workflowBlocks.updatedAt)
+                      : updatedAtMatches(expectedUpdatedAt)
+                  )
+                : and(eq(workflowBlocks.id, blockId), eq(workflowBlocks.workflowId, workflowId))
 
-        const persisted = await db
-          .update(workflowBlocks)
-          .set({
-            subBlocks: block.subBlocks,
-            data: block.data,
-            updatedAt: new Date(),
-          })
-          .where(whereClause)
-          .returning({ id: workflowBlocks.id })
+              const persisted = await tx
+                .update(workflowBlocks)
+                .set({
+                  subBlocks: block.subBlocks,
+                  data: block.data,
+                  updatedAt: new Date(),
+                })
+                .where(whereClause)
+                .returning({ id: workflowBlocks.id })
 
-        if (persisted.length === 0) {
-          logger.warn('Skipped persisting block migration (row changed since read or missing)', {
-            workflowId,
-            blockId,
-            expectedUpdatedAt,
-          })
-        }
-      }
-    }
+              changed ||= persisted.length > 0
+              if (persisted.length === 0) {
+                logger.warn(
+                  'Skipped persisting block migration (row changed since read or missing)',
+                  {
+                    workflowId,
+                    blockId,
+                    expectedUpdatedAt,
+                  }
+                )
+              }
+            }
+          }
+          return { changed, value: undefined }
+        },
+        expectedRevision
+      )
+    )
   } catch (err) {
     logger.warn('Failed to persist block migrations', { workflowId, error: err })
   }
