@@ -1,4 +1,4 @@
-// Modified by Memlia: reserve each controlled Responses transport attempt.
+// Modified by Memlia: reserve controlled Responses attempts and reject their redirects.
 import { createHash } from 'node:crypto'
 import type { Logger } from '@sim/logger'
 import { getErrorMessage, toError } from '@sim/utils/errors'
@@ -26,7 +26,11 @@ import {
   createOpenAIUsageAccumulator,
 } from '@/providers/openai/usage'
 import { fetchWithProviderRetry } from '@/providers/retry'
-import { beforeProviderModelCall, executeProviderTool } from '@/providers/runtime-context'
+import {
+  beforeProviderModelCall,
+  executeProviderTool,
+  getProviderRuntimeContext,
+} from '@/providers/runtime-context'
 import { createStreamingExecution } from '@/providers/streaming-execution'
 import { isAbortError, parseToolArguments } from '@/providers/streaming-tool-loop-shared'
 import { adaptOpenAIChatToolSchema } from '@/providers/tool-schema-adapter'
@@ -457,6 +461,8 @@ export async function executeResponsesProviderRequest(
     abortSignal: AbortSignal | undefined,
     startedAt: number
   ): Promise<Response> => {
+    // Capture the trusted ALS policy before preparation awaits; keep it on every physical attempt.
+    const rejectRedirects = !!getProviderRuntimeContext()?.controlledRun
     const body = JSON.stringify(await prepareConversationGeneration(request, 'responses', payload))
     try {
       return await fetchWithProviderRetry(
@@ -467,6 +473,7 @@ export async function executeResponsesProviderRequest(
             headers: config.headers,
             body,
             signal: options?.signal,
+            ...(rejectRedirects ? { redirect: 'error' as const } : {}),
           })
         },
         { logger, label: config.providerLabel, abortSignal }

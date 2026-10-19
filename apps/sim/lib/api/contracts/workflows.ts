@@ -774,11 +774,14 @@ export const putWorkflowNormalizedStateContract = defineRouteContract({
   method: 'PUT',
   path: '/api/workflows/[id]/state',
   params: workflowIdParamsSchema,
-  body: workflowStateSchema,
+  // Transitional legacy omission only; supplied revisions use the canonical strict validator.
+  body: workflowStateSchema.extend({ expectedRevision: workflowDraftRevisionSchema.optional() }),
   response: {
     mode: 'json',
     schema: z.object({
       success: z.literal(true),
+      baseRevision: workflowDraftRevisionSchema,
+      draftRevision: workflowDraftRevisionSchema,
       warnings: z.array(z.string()).default([]),
     }),
   },

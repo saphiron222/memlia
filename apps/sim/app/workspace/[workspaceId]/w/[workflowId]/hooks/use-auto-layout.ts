@@ -1,4 +1,7 @@
+// Modified by Memlia: report layout failures once at the shared UI boundary.
+
 import { useCallback } from 'react'
+import { toast } from '@sim/emcn'
 import { createLogger } from '@sim/logger'
 import { getErrorMessage } from '@sim/utils/errors'
 import { useReactFlow } from '@xyflow/react'
@@ -54,15 +57,15 @@ export function useAutoLayout(workflowId: string | null, options?: CanvasViewpor
         })
       } else {
         logger.error('Auto layout failed:', result.error)
+        toast({ message: result.error || 'Auto-layout failed. Please try again.' })
       }
 
       return result
     } catch (error) {
       logger.error('Auto layout error:', error)
-      return {
-        success: false,
-        error: getErrorMessage(error, 'Unknown error'),
-      }
+      const message = getErrorMessage(error, 'Unknown error')
+      toast({ message })
+      return { success: false, error: message }
     }
   }, [applyAutoLayoutAndUpdateStore, fitViewToBounds])
 

@@ -1,3 +1,4 @@
+// Modified by Memlia: forward optional internal CAS and preserve the native revision receipt.
 import { createLogger } from '@sim/logger'
 import {
   assertWorkflowMutable,
@@ -25,7 +26,7 @@ import type { BlockState, WorkflowState } from '@/stores/workflows/workflow/type
 const logger = createLogger('WorkflowStatePersistence')
 
 export type SaveWorkflowNormalizedStateResult =
-  | { success: true; warnings: string[] }
+  | { success: true; warnings: string[]; baseRevision: number; draftRevision: number }
   | { success: false; status: number; error: string; details?: string }
 
 /**
@@ -60,6 +61,7 @@ export async function saveWorkflowNormalizedState(params: {
   workflowId: string
   userId: string
   state: WorkflowStateContractOutput
+  expectedRevision?: number
   authorization?: WorkflowWorkspaceAuthorizationResult
 }): Promise<SaveWorkflowNormalizedStateResult> {
   const { requestId, workflowId, userId, state } = params
@@ -94,11 +96,12 @@ export async function saveWorkflowNormalizedState(params: {
     throw error
   }
 
-  let warnings: string[]
+  let receipt: { warnings: string[]; baseRevision: number; draftRevision: number }
   try {
     const saved = await replaceWorkflowNormalizedState({
       requestId,
       workflowId,
+      expectedRevision: params.expectedRevision,
       workspaceId: workflowData.workspaceId ?? null,
       attributedUserId: userId,
       /**
@@ -119,7 +122,11 @@ export async function saveWorkflowNormalizedState(params: {
         deployedAt: state.deployedAt,
       },
     })
-    warnings = saved.warnings
+    receipt = {
+      warnings: saved.warnings,
+      baseRevision: saved.baseRevision,
+      draftRevision: saved.draftRevision,
+    }
   } catch (error) {
     if (error instanceof WorkflowStatePersistenceError) {
       return {
@@ -154,5 +161,5 @@ export async function saveWorkflowNormalizedState(params: {
 
   await notifyWorkflowUpdated(workflowId)
 
-  return { success: true, warnings }
+  return { success: true, ...receipt }
 }

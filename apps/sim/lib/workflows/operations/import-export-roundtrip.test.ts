@@ -1,3 +1,4 @@
+// Modified by Memlia: qualify imports through native revision-aware HTTP contracts.
 /**
  * End-to-end round trip through the REAL sanitizer and importer — no mocks of
  * either — pinning the property the export/import API pair exists to provide:
@@ -9,8 +10,12 @@
  * mock-heavy route tests cannot catch.
  */
 
-import { describe, expect, it } from 'vitest'
-import { parseWorkflowJson } from '@/lib/workflows/operations/import-export'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { ApiClientError } from '@/lib/api/client/errors'
+import {
+  parseWorkflowJson,
+  persistImportedWorkflow,
+} from '@/lib/workflows/operations/import-export'
 import { sanitizeForExport } from '@/lib/workflows/sanitization/json-sanitizer'
 
 /**
@@ -19,6 +24,9 @@ import { sanitizeForExport } from '@/lib/workflows/sanitization/json-sanitizer'
  * the same symbol has to feed both the fixture and the assertion — spelling the string twice is
  * how that sweep silently starts passing vacuously.
  */
+vi.unmock('@/lib/api/client/request')
+afterEach(() => vi.unstubAllGlobals())
+
 const TABLE_ONLY_ENV_REF = '{{TABLE_ONLY_TOKEN}}'
 
 function makeSourceState() {
@@ -230,4 +238,177 @@ describe('workflow export -> import round trip', () => {
     expect(data).not.toBeNull()
     expect(elapsed).toBeLessThan(2000)
   })
+})
+
+// Real importer, sanitizer, requestJson and Zod contracts; only HTTP is simulated.
+describe('import through the native HTTP client contracts', () => {
+  function snapshot(draftRevision: unknown = 31) {
+    return {
+      data: {
+        id: 'new-import',
+        userId: 'fixture-user',
+        workspaceId: 'target-space',
+        folderId: null,
+        sortOrder: 0,
+        name: 'Imported',
+        description: '',
+        lastSynced: '2026-01-01T00:00:00Z',
+        createdAt: '2026-01-01T00:00:00Z',
+        updatedAt: '2026-01-01T00:00:00Z',
+        isDeployed: false,
+        deployedAt: null,
+        isPublicApi: false,
+        locked: false,
+        runCount: 0,
+        lastRunAt: null,
+        archivedAt: null,
+        draftRevision,
+        state: { blocks: {}, edges: [], loops: {}, parallels: {}, variables: {} },
+        variables: {},
+      },
+    }
+  }
+  function options() {
+    return {
+      content: JSON.stringify(sanitizeForExport(makeSourceState() as any)),
+      filename: 'round-trip.json',
+      workspaceId: 'target-space',
+      createWorkflow: async () => ({ id: 'new-import' }),
+    }
+  }
+  it('serializes the remapped graph and imported variables in a single revision-bound PUT', async () => {
+    const requests: Array<{ url: string; method: string; body: any }> = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init: RequestInit) => {
+        requests.push({
+          url,
+          method: init.method!,
+          body: init.body ? JSON.parse(String(init.body)) : undefined,
+        })
+        return Response.json(
+          init.method === 'GET'
+            ? snapshot()
+            : { success: true, baseRevision: 31, draftRevision: 32, warnings: [] }
+        )
+      })
+    )
+    await expect(persistImportedWorkflow(options())).resolves.toEqual({
+      workflowId: 'new-import',
+      workflowName: 'Round Trip',
+    })
+    expect(requests.map(({ url, method }) => [method, url])).toEqual([
+      ['GET', '/api/workflows/new-import'],
+      ['PUT', '/api/workflows/new-import/state'],
+    ])
+    const body = requests[1].body
+    expect(body.expectedRevision).toBe(31)
+    expect(body.variables).toEqual({
+      v1: { id: 'v1', name: 'apiHost', type: 'string', value: 'https://example.com' },
+    })
+    const ids = new Set(Object.keys(body.blocks))
+    expect(ids.size).toBe(7)
+    expect(ids.has('starter')).toBe(false)
+    for (const edge of body.edges) {
+      expect(ids.has(edge.source)).toBe(true)
+      expect(ids.has(edge.target)).toBe(true)
+      expect(edge.targetHandle).not.toBeNull()
+    }
+    for (const block of Object.values(body.blocks) as any[])
+      if (block.data?.parentId) expect(ids.has(block.data.parentId)).toBe(true)
+    expect(JSON.stringify(body)).not.toContain(TABLE_ONLY_ENV_REF)
+    const apiBlock = (Object.values(body.blocks) as any[]).find((block) => block.type === 'api')
+    expect(apiBlock.subBlocks.headers.value).toBeNull()
+  })
+
+  it('preserves a real client 409 without retrying, deleting or replacing the newer simulated server graph', async () => {
+    const methods: string[] = []
+    const humanState = { blocks: { human: { value: 'newer edit' } }, variables: { human: 42 } }
+    let serverState: unknown = structuredClone(humanState)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init: RequestInit) => {
+        methods.push(init.method!)
+        if (init.method === 'GET') return Response.json(snapshot())
+        if (init.method === 'DELETE') serverState = { blocks: {}, variables: {} }
+        return Response.json(
+          { error: 'Workflow changed', code: 'DRAFT_REVISION_CONFLICT' },
+          { status: 409 }
+        )
+      })
+    )
+    await expect(persistImportedWorkflow(options())).rejects.toMatchObject({
+      status: 409,
+      code: 'DRAFT_REVISION_CONFLICT',
+    })
+    expect(methods).toEqual(['GET', 'PUT'])
+    expect(serverState).toEqual(humanState)
+  })
+
+  it('leaves a committed import and a later human edit intact when the PUT response is lost', async () => {
+    const methods: string[] = []
+    const lost = new TypeError('Synthetic connection lost after commit')
+    let stored: {
+      blocks: Record<string, unknown>
+      variables: Record<string, unknown>
+      humanEdit?: string
+    } = { blocks: {}, variables: {} }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init: RequestInit) => {
+        methods.push(init.method!)
+        if (init.method === 'GET') return Response.json(snapshot())
+        if (init.method === 'PUT') {
+          const body = JSON.parse(String(init.body))
+          stored = {
+            blocks: body.blocks,
+            variables: body.variables,
+            humanEdit: 'retained after commit',
+          }
+          throw lost
+        }
+        if (init.method === 'DELETE') stored = { blocks: {}, variables: {} }
+        return Response.json({ success: true, baseRevision: 31, draftRevision: 32, warnings: [] })
+      })
+    )
+    await expect(persistImportedWorkflow(options())).rejects.toBe(lost)
+    expect(methods).toEqual(['GET', 'PUT'])
+    expect(Object.keys(stored.blocks)).toHaveLength(7)
+    expect(stored.variables).toMatchObject({ v1: { value: 'https://example.com' } })
+    expect(stored.humanEdit).toBe('retained after commit')
+  })
+
+  it('sends empty imported variables explicitly instead of retaining destination defaults', async () => {
+    let body: any
+    const request = options()
+    request.content = JSON.stringify({ blocks: {}, edges: [] })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init: RequestInit) => {
+        if (init.method === 'GET') return Response.json(snapshot())
+        body = JSON.parse(String(init.body))
+        return Response.json({ success: true, baseRevision: 31, draftRevision: 32, warnings: [] })
+      })
+    )
+    await persistImportedWorkflow(request)
+    expect(body).toMatchObject({ blocks: {}, edges: [], variables: {}, expectedRevision: 31 })
+  })
+
+  it.each([undefined, -1, '31', 1.5])(
+    'does not fall back to a legacy PUT when GET revision is %s',
+    async (revision) => {
+      const methods: string[] = []
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (_url: string, init: RequestInit) => {
+          methods.push(init.method!)
+          const response = snapshot(31)
+          response.data.draftRevision = revision
+          return Response.json(response)
+        })
+      )
+      await expect(persistImportedWorkflow(options())).rejects.toBeInstanceOf(ApiClientError)
+      expect(methods).toEqual(['GET'])
+    }
+  )
 })

@@ -85,6 +85,14 @@ function jsonCopy(value: unknown, depth = 0, parents = new Set<object>()): Json 
   }
 }
 
+/** Snapshot caller data before asynchronous authority reads, using admission's lossless JSON boundary. */
+export function copyPgBossAdmissionJson<T>(value: T): T {
+  const copy = jsonCopy(value)
+  if (Buffer.byteLength(JSON.stringify(copy)) > MAX_ADMISSION_BYTES)
+    throw new PgBossAdmissionError('admission_too_large')
+  return copy as T
+}
+
 function canonical(value: unknown): string {
   const encoded = JSON.stringify(jsonCopy(value))
   if (Buffer.byteLength(encoded) > MAX_ADMISSION_BYTES)

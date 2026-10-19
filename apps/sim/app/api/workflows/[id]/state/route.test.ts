@@ -8,9 +8,15 @@ import {
   workflowAuthzMockFns,
 } from '@sim/testing'
 import { NextRequest } from 'next/server'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { workflowStateResponseSchema } from '@/lib/api/contracts/workflows'
-import { GET } from './route'
+
+const writer = vi.hoisted(() => ({ save: vi.fn() }))
+vi.mock('@/lib/workflows/persistence/save-normalized-state', () => ({
+  saveWorkflowNormalizedState: writer.save,
+}))
+
+import { GET, PUT } from './route'
 
 // Real GET handler, loader/migrations and serialization; database/auth are native unit doubles.
 const workflowId = 'workflow-1'
@@ -117,5 +123,49 @@ describe('GET internal normalized workflow state', () => {
     const response = await GET(request(), context())
     expect(response.status).toBe(500)
     expect(await response.json()).toEqual({ error: 'Internal server error' })
+  })
+})
+
+describe('PUT internal CAS transport (writer/auth doubles)', () => {
+  const put = (body: unknown) =>
+    new NextRequest(`http://localhost:3000/api/workflows/${workflowId}/state`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+  it('passes expectedRevision and returns the same mutation receipt', async () => {
+    writer.save.mockResolvedValue({
+      success: true,
+      warnings: [],
+      baseRevision: 7,
+      draftRevision: 8,
+    })
+    const response = await PUT(put({ blocks: {}, edges: [], expectedRevision: 7 }), context())
+    expect(response.status).toBe(200)
+    expect(writer.save).toHaveBeenCalledWith(expect.objectContaining({ expectedRevision: 7 }))
+    expect(await response.json()).toEqual({
+      success: true,
+      warnings: [],
+      baseRevision: 7,
+      draftRevision: 8,
+    })
+  })
+  it('rejects invalid supplied revision before writing', async () => {
+    const response = await PUT(put({ blocks: {}, edges: [], expectedRevision: '7' }), context())
+    expect(response.status).toBe(400)
+    expect(writer.save).not.toHaveBeenCalled()
+  })
+  it('does not turn a conflict into success or retry', async () => {
+    writer.save.mockResolvedValue({ success: false, status: 409, error: 'Workflow draft changed' })
+    const response = await PUT(put({ blocks: {}, edges: [], expectedRevision: 7 }), context())
+    expect(response.status).toBe(409)
+    expect(await response.json()).toEqual({ error: 'Workflow draft changed' })
+    expect(writer.save).toHaveBeenCalledOnce()
+  })
+  it('keeps authentication denial ahead of any save', async () => {
+    hybridAuthMockFns.mockCheckSessionOrInternalAuth.mockResolvedValueOnce({ success: false })
+    const response = await PUT(put({ blocks: {}, edges: [], expectedRevision: 7 }), context())
+    expect(response.status).toBe(401)
+    expect(writer.save).not.toHaveBeenCalled()
   })
 })

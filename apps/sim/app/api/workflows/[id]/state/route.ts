@@ -114,6 +114,7 @@ export const PUT = withRouteHandler(
         workflowId,
         userId,
         state: parsed.data.body,
+        expectedRevision: parsed.data.body.expectedRevision,
       })
 
       if (!result.success) {
@@ -129,7 +130,15 @@ export const PUT = withRouteHandler(
       const elapsed = Date.now() - startTime
       logger.info(`[${requestId}] Successfully saved workflow ${workflowId} state in ${elapsed}ms`)
 
-      return NextResponse.json({ success: true, warnings: result.warnings }, { status: 200 })
+      return NextResponse.json(
+        {
+          success: true,
+          warnings: result.warnings,
+          baseRevision: result.baseRevision,
+          draftRevision: result.draftRevision,
+        },
+        { status: 200 }
+      )
     } catch (error: any) {
       const elapsed = Date.now() - startTime
       logger.error(

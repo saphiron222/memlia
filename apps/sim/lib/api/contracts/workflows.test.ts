@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   executeWorkflowBodySchema,
   getWorkflowResponseDataSchema,
+  putWorkflowNormalizedStateContract,
   workflowStateResponseSchema,
   workflowStateSchema,
 } from '@/lib/api/contracts/workflows'
@@ -161,4 +162,24 @@ describe('internal draft read revisions', () => {
       expect(schema.safeParse({ ...fixture, draftRevision }).success).toBe(false)
     })
   }
+})
+
+describe('transitional internal full-state CAS contract', () => {
+  const state = { blocks: {}, edges: [] }
+  it.each([0, 7, Number.MAX_SAFE_INTEGER])('retains expectedRevision%s', (revision) => {
+    expect(
+      putWorkflowNormalizedStateContract.body.parse({ ...state, expectedRevision: revision })
+    ).toMatchObject({ expectedRevision: revision })
+  })
+  it.each([null, -1, 1.5, '7', Number.MAX_SAFE_INTEGER + 1, Number.NaN, Number.POSITIVE_INFINITY])(
+    'rejects a supplied invalid revision%s',
+    (expectedRevision) => {
+      expect(
+        putWorkflowNormalizedStateContract.body.safeParse({ ...state, expectedRevision }).success
+      ).toBe(false)
+    }
+  )
+  it('temporarily preserves legacy omission only', () => {
+    expect(putWorkflowNormalizedStateContract.body.safeParse(state).success).toBe(true)
+  })
 })

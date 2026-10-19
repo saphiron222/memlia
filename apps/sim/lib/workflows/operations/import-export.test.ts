@@ -1,8 +1,9 @@
+// Modified by Memlia: qualify revision-bound imports and atomic variables.
 import {
   apiClientRequestMock,
   apiClientRequestMockFns,
 } from '@sim/testing/mocks/api-client-request.mock'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 /**
  * Import parsing migrates sub-block ids against each block's declared config,
@@ -21,15 +22,33 @@ vi.mock('@/blocks/registry-maps', async () => {
 
 vi.mock('@/lib/api/client/request', () => apiClientRequestMock)
 
+import { ApiClientError } from '@/lib/api/client/errors'
 import { requestJson } from '@/lib/api/client/request'
-import type { WorkflowStateContractInput } from '@/lib/api/contracts/workflows'
+import {
+  getWorkflowStateContract,
+  type WorkflowStateContractInput,
+} from '@/lib/api/contracts/workflows'
 import {
   parseWorkflowJson,
   persistImportedWorkflow,
   sanitizePathSegment,
 } from '@/lib/workflows/operations/import-export'
 
-apiClientRequestMockFns.mockRequestJson.mockResolvedValue({})
+beforeEach(() => {
+  apiClientRequestMockFns.mockRequestJson.mockReset()
+  apiClientRequestMockFns.mockRequestJson.mockImplementation(async (contract, input) =>
+    contract === getWorkflowStateContract
+      ? {
+          data: {
+            id: input.params.id,
+            workspaceId: 'ws-1',
+            draftRevision: 7,
+            state: createLegacyState(),
+          },
+        }
+      : { success: true, baseRevision: 7, draftRevision: 8, warnings: [] }
+  )
+})
 
 function createLegacyState() {
   return {
@@ -211,5 +230,145 @@ describe('persistImportedWorkflow description handling', () => {
 describe('sanitizePathSegment', () => {
   it('should preserve Korean characters (BUG REPRODUCTION)', () => {
     expect(sanitizePathSegment('한글')).toBe('한글')
+  })
+})
+
+describe('import revision and atomic replacement', () => {
+  function input() {
+    return {
+      content: JSON.stringify({
+        state: {
+          ...createLegacyState(),
+          variables: [
+            { id: 'limit', name: 'Limit', type: 'number', value: 3 },
+            { id: 'odd', name: 'Odd', type: 'unsupported', value: 'kept' },
+          ],
+        },
+      }),
+      filename: 'owned.json',
+      workspaceId: 'ws-1',
+      createWorkflow: vi.fn().mockResolvedValue({ id: 'new-destination' }),
+    }
+  }
+
+  it.each([0, 27])(
+    'uses revision %i of the created destination and writes variables with the graph once',
+    async (revision) => {
+      const options = input()
+      apiClientRequestMockFns.mockRequestJson.mockImplementation(async (contract, request) => {
+        if (contract === getWorkflowStateContract)
+          return {
+            data: {
+              id: request.params.id,
+              workspaceId: 'ws-1',
+              draftRevision: revision,
+              state: createLegacyState(),
+            },
+          }
+        return { success: true, baseRevision: revision, draftRevision: revision + 1, warnings: [] }
+      })
+      await expect(persistImportedWorkflow(options)).resolves.toMatchObject({
+        workflowId: 'new-destination',
+      })
+      const calls = vi.mocked(requestJson).mock.calls
+      expect(
+        calls.map(([contract, request]) => [contract.method, (request.params as { id: string }).id])
+      ).toEqual([
+        ['GET', 'new-destination'],
+        ['PUT', 'new-destination'],
+      ])
+      expect(calls[1][1].body).toMatchObject({
+        expectedRevision: revision,
+        variables: {
+          limit: { id: 'limit', name: 'Limit', type: 'number', value: 3 },
+          odd: { id: 'odd', name: 'Odd', type: 'string', value: 'kept' },
+        },
+      })
+      expect(Object.keys((calls[1][1].body as WorkflowStateContractInput).blocks)).not.toContain(
+        'start-1'
+      )
+    }
+  )
+
+  it.each([
+    { id: 'other', workspaceId: 'ws-1' },
+    { id: 'new-destination', workspaceId: 'other' },
+  ])('rejects a snapshot for another destination %j before PUT', async (identity) => {
+    apiClientRequestMockFns.mockRequestJson.mockResolvedValue({
+      data: { ...identity, draftRevision: 9, state: createLegacyState() },
+    })
+    await expect(persistImportedWorkflow(input())).rejects.toThrow()
+    expect(vi.mocked(requestJson).mock.calls.map(([contract]) => contract.method)).toEqual(['GET'])
+  })
+
+  it.each([409, 503])(
+    'preserves HTTP %i and never retries or deletes the destination',
+    async (status) => {
+      const error = new ApiClientError({
+        status,
+        message: 'Cannot save now',
+        body: { error: 'Cannot save now' },
+      })
+      apiClientRequestMockFns.mockRequestJson.mockImplementation(async (contract) => {
+        if (contract === getWorkflowStateContract)
+          return {
+            data: {
+              id: 'new-destination',
+              workspaceId: 'ws-1',
+              draftRevision: 7,
+              state: createLegacyState(),
+            },
+          }
+        throw error
+      })
+      await expect(persistImportedWorkflow(input())).rejects.toBe(error)
+      expect(vi.mocked(requestJson).mock.calls.map(([contract]) => contract.method)).toEqual([
+        'GET',
+        'PUT',
+      ])
+    }
+  )
+
+  it('owns the import intent and created identity while creation and GET are suspended', async () => {
+    const options = input()
+    let created!: (value: { id: string }) => void
+    let read!: (value: unknown) => void
+    const createdResponse = { id: 'new-destination' }
+    options.createWorkflow.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          created = resolve
+        })
+    )
+    apiClientRequestMockFns.mockRequestJson.mockImplementation((contract) => {
+      if (contract === getWorkflowStateContract)
+        return new Promise((resolve) => {
+          read = resolve
+        })
+      return Promise.resolve({ success: true, baseRevision: 23, draftRevision: 24, warnings: [] })
+    })
+    const pending = persistImportedWorkflow(options)
+    options.content = JSON.stringify({ blocks: {}, edges: [], variables: {} })
+    options.workspaceId = 'other-space'
+    options.filename = 'changed.json'
+    created(createdResponse)
+    await vi.waitFor(() => expect(read).toBeTypeOf('function'))
+    createdResponse.id = 'other-workflow'
+    read({
+      data: {
+        id: 'new-destination',
+        workspaceId: 'ws-1',
+        draftRevision: 23,
+        state: createLegacyState(),
+      },
+    })
+    await expect(pending).resolves.toMatchObject({
+      workflowId: 'new-destination',
+      workflowName: 'Wrapped Workflow',
+    })
+    const request = vi.mocked(requestJson).mock.calls.at(-1)![1]
+    expect(request.params).toEqual({ id: 'new-destination' })
+    expect(request.body).toMatchObject({ expectedRevision: 23, variables: { limit: { value: 3 } } })
+    expect(Object.keys((request.body as WorkflowStateContractInput).blocks)).toHaveLength(1)
   })
 })

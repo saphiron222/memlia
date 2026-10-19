@@ -1,6 +1,8 @@
+// Modified by Memlia: save an attested layout before applying it, without stale rollback.
 import { createLogger } from '@sim/logger'
 import { getErrorMessage } from '@sim/utils/errors'
 import type { Edge } from '@xyflow/react'
+import { ApiClientError } from '@/lib/api/client/errors'
 import { requestJson } from '@/lib/api/client/request'
 import {
   putWorkflowNormalizedStateContract,
@@ -12,6 +14,14 @@ import {
   DEFAULT_LAYOUT_PADDING,
   DEFAULT_VERTICAL_SPACING,
 } from '@/lib/workflows/autolayout/constants'
+import { useVariablesStore } from '@/stores/variables/store'
+import { applyWorkflowStateToStores } from '@/stores/workflow-diff/utils'
+import { useSubBlockStore } from '@/stores/workflows/subblock/store'
+import {
+  canApplyDraftSnapshot,
+  captureDraftVersions,
+  getAttestedDraftRevision,
+} from '@/stores/workflows/sync-local-draft'
 import { mergeSubblockState } from '@/stores/workflows/utils'
 import { useWorkflowStore } from '@/stores/workflows/workflow/store'
 import type { BlockState } from '@/stores/workflows/workflow/types'
@@ -46,8 +56,44 @@ export async function applyAutoLayoutAndUpdateStore(
   error?: string
 }> {
   try {
+    const expectedRevision = getAttestedDraftRevision(workflowId)
+    if (expectedRevision === null) {
+      return { success: false, error: 'Synchronize the workflow before applying auto-layout.' }
+    }
+    const versions = captureDraftVersions(workflowId)
     const workflowStore = useWorkflowStore.getState()
-    const { blocks, edges, loops = {}, parallels = {} } = workflowStore
+    const subblocks = useSubBlockStore.getState().workflowValues[workflowId]
+    const variables = useVariablesStore.getState().variables
+    const capturedState = structuredClone({
+      ...workflowStore.getWorkflowState(),
+      blocks: mergeSubblockState(workflowStore.blocks, workflowId),
+      variables: Object.fromEntries(
+        Object.entries(variables).filter(([, variable]) => variable.workflowId === workflowId)
+      ),
+    })
+    const isCurrent = () => {
+      const current = useWorkflowStore.getState()
+      return (
+        getAttestedDraftRevision(workflowId) === expectedRevision &&
+        canApplyDraftSnapshot(workflowId, versions) &&
+        current.blocks === workflowStore.blocks &&
+        current.edges === workflowStore.edges &&
+        current.loops === workflowStore.loops &&
+        current.parallels === workflowStore.parallels &&
+        useSubBlockStore.getState().workflowValues[workflowId] === subblocks &&
+        useVariablesStore.getState().variables === variables
+      )
+    }
+    const invalidateCapturedRevision = () => {
+      const current = useWorkflowStore.getState()
+      if (
+        current.draftRevisionAttestation?.workflowId === workflowId &&
+        current.draftRevisionAttestation.revision === expectedRevision
+      ) {
+        current.invalidateDraftRevisionAttestation()
+      }
+    }
+    const { blocks, edges, loops = {}, parallels = {} } = capturedState
 
     logger.info('Auto layout store data:', {
       workflowId,
@@ -110,24 +156,18 @@ export async function applyAutoLayoutAndUpdateStore(
     // narrows it to the editor's per-input value union. The contract's
     // shape is structurally a supertype of the store's, so this is a
     // single safe widening cast (store -> wire) on the way back in.
-    const layoutedBlocks: Record<string, BlockState> =
+    const layoutedBlocks: Record<string, BlockState> = structuredClone(
       (result.data.layoutedBlocks as Record<string, BlockState>) || blocks
-    const mergedBlocks = mergeSubblockState(layoutedBlocks, workflowId)
-
-    const newWorkflowState = {
-      ...workflowStore.getWorkflowState(),
-      blocks: mergedBlocks,
-      lastSaved: Date.now(),
+    )
+    if (!isCurrent()) {
+      return {
+        success: false,
+        error: 'Workflow changed during auto-layout. Synchronize before retrying.',
+      }
     }
+    const newWorkflowState = { ...capturedState, blocks: layoutedBlocks, lastSaved: Date.now() }
 
-    useWorkflowStore.getState().replaceWorkflowState(newWorkflowState)
-
-    logger.info('Successfully updated workflow store with auto layout', { workflowId })
-
-    // Persist the changes to the database optimistically
     try {
-      useWorkflowStore.getState().updateLastSaved()
-
       const { dragStartPosition, ...stateToSave } = newWorkflowState
 
       type ContractEdgeInput = WorkflowStateContractInput['edges'][number]
@@ -158,28 +198,35 @@ export async function applyAutoLayoutAndUpdateStore(
 
       await requestJson(putWorkflowNormalizedStateContract, {
         params: { id: workflowId },
-        body: cleanedWorkflowState,
+        body: { ...cleanedWorkflowState, expectedRevision },
       })
 
-      logger.info('Auto layout successfully persisted to database', { workflowId })
+      // A receipt alone does not attest a client graph. Preserve any intervening local edit.
+      if (!isCurrent()) {
+        invalidateCapturedRevision()
+        return {
+          success: false,
+          error: 'Layout was saved, but the workflow changed locally. Synchronize before retrying.',
+        }
+      }
+      applyWorkflowStateToStores(workflowId, newWorkflowState)
+      logger.info('Auto layout successfully persisted and applied', { workflowId })
       return { success: true }
     } catch (saveError) {
-      logger.error('Failed to save auto layout to database, reverting store changes:', {
+      if (saveError instanceof ApiClientError && saveError.status === 409) {
+        invalidateCapturedRevision()
+        return {
+          success: false,
+          error: 'Workflow changed on the server. Synchronize before retrying auto-layout.',
+        }
+      }
+      logger.error('Failed to save auto layout; local workflow preserved', {
         workflowId,
         error: saveError,
       })
-
-      // Revert the store changes since database save failed
-      const revertBlocks = mergeSubblockState(blocks, workflowId)
-      useWorkflowStore.getState().replaceWorkflowState({
-        ...workflowStore.getWorkflowState(),
-        blocks: revertBlocks,
-        lastSaved: workflowStore.lastSaved,
-      })
-
       return {
         success: false,
-        error: `Failed to save positions to database: ${getErrorMessage(saveError, 'Unknown error')}`,
+        error: `Failed to save positions: ${getErrorMessage(saveError, 'Unknown error')}`,
       }
     }
   } catch (error) {

@@ -1,4 +1,4 @@
-// Modified by Memlia in 2026. Upstream Apache-2.0 license and notices retained.
+// Modified by Memlia: centralize auto-layout error notification in its shared hook.
 'use client'
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -582,10 +582,7 @@ export const Panel = memo(function Panel() {
 
     setIsAutoLayouting(true)
     try {
-      const result = await autoLayoutWithFitView()
-      if (!result.success && result.error) {
-        toast({ message: result.error })
-      }
+      await autoLayoutWithFitView()
     } finally {
       setIsAutoLayouting(false)
     }

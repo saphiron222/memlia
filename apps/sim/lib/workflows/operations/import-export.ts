@@ -1,3 +1,4 @@
+// Modified by Memlia: bind imports and variables to the created workflow revision.
 import { createLogger } from '@sim/logger'
 import { getErrorMessage } from '@sim/utils/errors'
 import { isRecordLike } from '@sim/utils/object'
@@ -8,7 +9,6 @@ import {
   getWorkflowVariablesContract,
   putWorkflowNormalizedStateContract,
   type WorkflowStateContractInput,
-  workflowVariablesContract,
 } from '@/lib/api/contracts/workflows'
 import { getMeaningfulWorkflowDescription } from '@/lib/mcp/workflow-tool-schema'
 import { migrateSubblockIds } from '@/lib/workflows/migrations/subblock-migrations'
@@ -667,19 +667,6 @@ export async function persistImportedWorkflow({
 
   const workflowName = nameOverride || extractWorkflowName(content, filename)
 
-  const createdWorkflow = await createWorkflow({
-    name: workflowName,
-    description:
-      getMeaningfulWorkflowDescription(descriptionOverride, workflowName) ??
-      getMeaningfulWorkflowDescription(workflowData.metadata?.description, workflowName) ??
-      '',
-    workspaceId,
-    folderId,
-    sortOrder,
-  })
-
-  const newWorkflowId = createdWorkflow.id
-
   type ContractEdgeInput = WorkflowStateContractInput['edges'][number]
 
   // Imported workflow JSON may carry nullable sourceHandle / targetHandle
@@ -699,33 +686,43 @@ export async function persistImportedWorkflow({
     return sanitized
   })
 
+  // Parsing owns the JSON graph; normalize the complete intent before any caller await.
   const stateBody: WorkflowStateContractInput = {
     ...workflowData,
     loops: workflowData.loops || {},
     parallels: workflowData.parallels || {},
     edges: sanitizedEdges,
+    variables: normalizeImportedVariables(workflowData.variables),
   }
 
-  try {
-    await requestJson(putWorkflowNormalizedStateContract, {
-      params: { id: newWorkflowId },
-      body: stateBody,
-    })
-  } catch {
-    throw new Error(`Failed to save workflow state for ${newWorkflowId}`)
-  }
+  const createdWorkflow = await createWorkflow({
+    name: workflowName,
+    description:
+      getMeaningfulWorkflowDescription(descriptionOverride, workflowName) ??
+      getMeaningfulWorkflowDescription(workflowData.metadata?.description, workflowName) ??
+      '',
+    workspaceId,
+    folderId,
+    sortOrder,
+  })
 
-  const variablesRecord = normalizeImportedVariables(workflowData.variables)
-  if (Object.keys(variablesRecord).length > 0) {
-    try {
-      await requestJson(workflowVariablesContract, {
-        params: { id: newWorkflowId },
-        body: { variables: variablesRecord },
-      })
-    } catch {
-      throw new Error(`Failed to save variables for ${newWorkflowId}`)
-    }
+  const newWorkflowId = createdWorkflow.id
+
+  // Read the NEW destination, never the active canvas or an assumed initial revision.
+  const { data: destination } = await requestJson(getWorkflowStateContract, {
+    params: { id: newWorkflowId },
+  })
+  if (destination.id !== newWorkflowId || destination.workspaceId !== workspaceId) {
+    throw new Error('Imported workflow destination does not match its created identity')
   }
+  const expectedRevision = destination.draftRevision
+
+  // Graph and variables share one CAS. Preserve 409/unknown outcomes for native callers;
+  // retrying or deleting here could overwrite or remove a concurrently edited workflow.
+  await requestJson(putWorkflowNormalizedStateContract, {
+    params: { id: newWorkflowId },
+    body: { ...stateBody, expectedRevision },
+  })
 
   logger.info(`Imported workflow: ${workflowName}`)
   return { workflowId: newWorkflowId, workflowName }

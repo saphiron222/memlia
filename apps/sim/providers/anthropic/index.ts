@@ -1,9 +1,12 @@
+// Modified by Memlia: isolate the official Anthropic client during controlled server runs.
 import Anthropic from '@anthropic-ai/sdk'
 import { createLogger } from '@sim/logger'
 import type { StreamingExecution } from '@/executor/types'
+import { createControlledAnthropicClient } from '@/providers/anthropic/controlled-client'
 import { executeAnthropicProviderRequest } from '@/providers/anthropic/core'
 import { getCachedProviderClient } from '@/providers/client-cache'
 import { getProviderDefaultModel, getProviderModels } from '@/providers/models'
+import { getProviderRuntimeContext } from '@/providers/runtime-context'
 import { PROVIDER_MAX_RETRIES } from '@/providers/transport'
 import type { ProviderConfig, ProviderRequest, ProviderResponse } from '@/providers/types'
 
@@ -24,6 +27,8 @@ export const anthropicProvider: ProviderConfig = {
       providerId: 'anthropic',
       providerLabel: 'Anthropic',
       createClient: (apiKey) => {
+        if (getProviderRuntimeContext()?.controlledRun)
+          return createControlledAnthropicClient(apiKey)
         const cacheKey = `anthropic::${apiKey}`
         return getCachedProviderClient(
           cacheKey,

@@ -1,16 +1,16 @@
-import { serializePrincipal, type WorkflowExecutionPrincipal } from '@sim/auth/principal'
+// Modified by Memlia: share native workflow payload preparation without changing enqueue decisions.
 import { createLogger } from '@sim/logger'
 import { toError } from '@sim/utils/errors'
 import { releaseExecutionSlot } from '@/lib/billing/calculations/usage-reservation'
-import type { BillingAttributionSnapshot } from '@/lib/billing/core/attribution'
 import { getJobQueue, shouldExecuteInline } from '@/lib/core/async-jobs'
 import { isAsyncJobEnqueueError } from '@/lib/core/async-jobs/types'
 import { toTriggerMaxDurationSeconds } from '@/lib/core/execution-limits'
-import { captureRequestAttribution } from '@/lib/core/utils/request-attribution'
 import { WORKFLOW_EXECUTION_JOB_ID_PREFIX } from '@/lib/workflows/executor/execution-job-ids'
-import { executeWorkflowJob, type WorkflowExecutionPayload } from '@/background/workflow-execution'
-import type { ResolvedSecretTraceProvenanceV1 } from '@/executor/utils/resolved-secret-trace-registry'
-import type { CoreTriggerType } from '@/stores/logs/filters/types'
+import { executeWorkflowJob } from '@/background/workflow-execution'
+import {
+  type EnqueueWorkflowExecutionParams,
+  prepareWorkflowExecutionPayload,
+} from './workflow-execution-payload'
 
 const logger = createLogger('WorkflowEnqueueExecution')
 
@@ -20,26 +20,7 @@ export {
   RESUME_EXECUTION_JOB_ID_PREFIX,
   WORKFLOW_EXECUTION_JOB_ID_PREFIX,
 } from '@/lib/workflows/executor/execution-job-ids'
-
-export interface EnqueueWorkflowExecutionParams {
-  requestId: string
-  workflowId: string
-  principal: WorkflowExecutionPrincipal
-  userId: string
-  billingAttribution: BillingAttributionSnapshot
-  workspaceId: string
-  input: unknown
-  triggerType: CoreTriggerType
-  triggerBlockId?: string
-  executionId: string
-  copilotToolCallId?: string
-  callChain?: string[]
-  executionTimeoutMs: number
-  trustedInitialResolvedSecretTraceProvenance?: ResolvedSecretTraceProvenanceV1
-  /** Identity decisions the enqueuing surface made; the worker cannot re-derive them. */
-  enforceCredentialAccess?: boolean
-  isPublicApiAccess?: boolean
-}
+export type { EnqueueWorkflowExecutionParams } from './workflow-execution-payload'
 
 /**
  * Outcome of an async enqueue attempt. Slot/claim semantics are encoded here,
@@ -69,24 +50,7 @@ export type EnqueueWorkflowExecutionResult =
 export async function enqueueWorkflowExecution(
   params: EnqueueWorkflowExecutionParams
 ): Promise<EnqueueWorkflowExecutionResult> {
-  const {
-    requestId,
-    workflowId,
-    principal,
-    userId,
-    billingAttribution,
-    workspaceId,
-    input,
-    triggerType,
-    triggerBlockId,
-    executionId,
-    copilotToolCallId,
-    callChain,
-    executionTimeoutMs,
-    trustedInitialResolvedSecretTraceProvenance,
-    enforceCredentialAccess,
-    isPublicApiAccess,
-  } = params
+  const { requestId, workflowId, userId, workspaceId, executionId, executionTimeoutMs } = params
   const asyncLogger = logger.withMetadata({
     requestId,
     workflowId,
@@ -95,36 +59,7 @@ export async function enqueueWorkflowExecution(
     executionId,
   })
 
-  const correlation = {
-    executionId,
-    requestId,
-    source: 'workflow' as const,
-    workflowId,
-    ...(copilotToolCallId ? { copilotToolCallId } : {}),
-    triggerType,
-  }
-
-  const payload: WorkflowExecutionPayload = {
-    workflowId,
-    principal: serializePrincipal(principal),
-    userId,
-    billingAttribution,
-    workspaceId,
-    input,
-    triggerType,
-    triggerBlockId,
-    executionId,
-    requestId,
-    correlation,
-    callChain,
-    attribution: captureRequestAttribution(),
-    enforceCredentialAccess,
-    isPublicApiAccess,
-    executionMode: 'async',
-    admissionCompleted: true,
-    executionTimeoutMs,
-    trustedInitialResolvedSecretTraceProvenance,
-  }
+  const { payload, correlation } = prepareWorkflowExecutionPayload(params)
 
   let jobQueue: Awaited<ReturnType<typeof getJobQueue>>
   try {

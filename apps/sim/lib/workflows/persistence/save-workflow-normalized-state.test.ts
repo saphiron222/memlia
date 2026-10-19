@@ -1,3 +1,4 @@
+// Modified by Memlia: test internal CAS forwarding and receipts.
 /**
  * Characterization of the legacy internal door's wire behavior. It now delegates
  * the write to `replaceWorkflowNormalizedState`, so these assertions are what
@@ -73,7 +74,12 @@ describe('saveWorkflowNormalizedState', () => {
       workspacePermission: 'write',
     })
     workflowAuthzMockFns.mockAssertWorkflowMutable.mockResolvedValue(undefined)
-    mocks.replace.mockResolvedValue({ warnings: ['dropped an edge'], state: STATE })
+    mocks.replace.mockResolvedValue({
+      warnings: ['dropped an edge'],
+      state: STATE,
+      baseRevision: 7,
+      draftRevision: 8,
+    })
     mockGetUserPermissionConfig.mockResolvedValue(null)
   })
 
@@ -209,6 +215,37 @@ describe('saveWorkflowNormalizedState', () => {
     mocks.replace.mockRejectedValue(new Error('pool exhausted'))
 
     await expect(saveWorkflowNormalizedState(params())).rejects.toThrow('pool exhausted')
+    expect(mockNotify).not.toHaveBeenCalled()
+  })
+})
+
+describe('internal CAS forwarding', () => {
+  it('passes expected revision and returns the actual write receipt', async () => {
+    workflowAuthzMockFns.mockAuthorizeWorkflowByWorkspacePermission.mockResolvedValue({
+      allowed: true,
+      workflow: { id: 'workflow-1', workspaceId: 'workspace-1' },
+    })
+    mocks.replace.mockResolvedValue({
+      warnings: [],
+      state: STATE,
+      baseRevision: 7,
+      draftRevision: 8,
+    })
+    const result = await saveWorkflowNormalizedState(params({ expectedRevision: 7 }))
+    expect(mocks.replace).toHaveBeenCalledWith(expect.objectContaining({ expectedRevision: 7 }))
+    expect(result).toEqual({ success: true, warnings: [], baseRevision: 7, draftRevision: 8 })
+    expect(mockNotify).toHaveBeenCalledOnce()
+  })
+  it('preserves a stale revision refusal and never notifies on409', async () => {
+    workflowAuthzMockFns.mockAuthorizeWorkflowByWorkspacePermission.mockResolvedValue({
+      allowed: true,
+      workflow: { id: 'workflow-1', workspaceId: 'workspace-1' },
+    })
+    mocks.replace.mockRejectedValue(new OrchestrationError('conflict', 'Workflow draft changed'))
+    expect(await saveWorkflowNormalizedState(params({ expectedRevision: 7 }))).toMatchObject({
+      success: false,
+      status: 409,
+    })
     expect(mockNotify).not.toHaveBeenCalled()
   })
 })
