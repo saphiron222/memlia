@@ -8,6 +8,7 @@ import { PrivateCopyDialog } from './private-copy-dialog'
 
 const state = vi.hoisted(() => ({
   userId: 'human',
+  userPresent: true,
   workspaces: [] as Array<Record<string, unknown>>,
   loading: false,
   error: false,
@@ -15,7 +16,10 @@ const state = vi.hoisted(() => ({
   close: vi.fn(),
 }))
 vi.mock('@/lib/auth/client', () => ({
-  useSession: () => ({ data: { user: { id: state.userId } }, isPending: false }),
+  useSession: () => ({
+    data: { user: state.userPresent ? { id: state.userId } : null },
+    isPending: false,
+  }),
 }))
 vi.mock('@/hooks/queries/workspace', () => ({
   useWorkspacesQuery: () => ({
@@ -166,6 +170,7 @@ function success() {
 beforeEach(() => {
   ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
   state.userId = 'human'
+  state.userPresent = true
   state.loading = false
   state.error = false
   state.workspaces = [
@@ -242,6 +247,24 @@ it('offers only an owned active personal destination and explains removed settin
   expect(container.textContent).toContain('Aucune exécution')
   expect(container.querySelector('input')?.maxLength).toBe(100)
   expect(button('Créer une copie privée').disabled).toBe(true)
+})
+
+it('offers no destination and cannot submit when the session user is null', () => {
+  const fetch = vi.fn()
+  vi.stubGlobal('fetch', fetch)
+  state.userPresent = false
+
+  expect(() => render()).not.toThrow()
+
+  expect(Array.from(container.querySelectorAll('option')).map((option) => option.value)).toEqual([
+    '',
+  ])
+  expect(container.querySelector('select')?.disabled).toBe(true)
+  expect(button('Créer une copie privée').disabled).toBe(true)
+  expect(container.textContent).toContain('Aucun espace personnel')
+  submit()
+  expect(fetch).not.toHaveBeenCalled()
+  expect(state.push).not.toHaveBeenCalled()
 })
 
 it('blocks missing destination, empty name, lost eligibility and loading/error states', () => {

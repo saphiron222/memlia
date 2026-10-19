@@ -1,3 +1,4 @@
+// Modified by Memlia: bind draft revision attestations to applied client snapshots.
 /**
  * Focused tests for the registry store's `loadWorkflowState` after the
  * workflow-state cache collapse: it hydrates the shared
@@ -12,18 +13,26 @@ const { sharedQueryClient } = vi.hoisted(() => ({
   sharedQueryClient: { current: null as unknown },
 }))
 
-const { replaceWorkflowState, initializeFromWorkflow, setVariablesState, clearError } = vi.hoisted(
-  () => ({
+const { replaceWorkflowState, initializeFromWorkflow, setVariablesState, clearError, queueState } =
+  vi.hoisted(() => ({
     replaceWorkflowState: vi.fn(),
     initializeFromWorkflow: vi.fn(),
     setVariablesState: vi.fn(),
     clearError: vi.fn(),
-  })
-)
+    queueState: {
+      hasPendingOperations: vi.fn(() => false),
+      workflowOperationVersions: {} as Record<string, number>,
+      remoteApplyVersions: {} as Record<string, number>,
+    },
+  }))
 
 vi.mock('@/stores/workflows/workflow/store', () => ({
   useWorkflowStore: {
-    getState: () => ({ replaceWorkflowState, blocks: {} }),
+    getState: () => ({
+      replaceWorkflowState,
+      invalidateDraftRevisionAttestation: vi.fn(),
+      blocks: {},
+    }),
     setState: vi.fn(),
   },
 }))
@@ -44,7 +53,7 @@ vi.mock('@/stores/variables/store', () => ({
 
 vi.mock('@/stores/operation-queue/store', () => ({
   useOperationQueueStore: {
-    getState: () => ({ clearError }),
+    getState: () => ({ clearError, ...queueState }),
   },
 }))
 
@@ -96,6 +105,7 @@ afterAll(() => {
 function makeEnvelope(overrides: Record<string, unknown> = {}) {
   return {
     id: 'wf-1',
+    draftRevision: 7,
     isDeployed: true,
     deployedAt: new Date('2026-01-01T00:00:00.000Z'),
     isPublicApi: false,
@@ -112,6 +122,9 @@ function makeEnvelope(overrides: Record<string, unknown> = {}) {
 
 describe('registry store loadWorkflowState (collapsed cache)', () => {
   beforeEach(() => {
+    queueState.hasPendingOperations.mockReturnValue(false)
+    queueState.workflowOperationVersions = {}
+    queueState.remoteApplyVersions = {}
     getQueryClientSpy.mockImplementation(() => sharedQueryClient.current as QueryClient)
     // The store dispatches an `active-workflow-changed` CustomEvent on the
     // window; provide a minimal stub under the node environment.
@@ -132,6 +145,18 @@ describe('registry store loadWorkflowState (collapsed cache)', () => {
         error: null,
       },
     })
+  })
+
+  it('keeps the local graph and operations when an edit is queued while hydration fetches', async () => {
+    mockRequestJson.mockImplementationOnce(async () => {
+      queueState.hasPendingOperations.mockReturnValue(true)
+      queueState.workflowOperationVersions['wf-1'] = 1
+      return { data: makeEnvelope() }
+    })
+    await useWorkflowRegistry.getState().loadWorkflowState('wf-1')
+    expect(replaceWorkflowState).not.toHaveBeenCalled()
+    expect(initializeFromWorkflow).not.toHaveBeenCalled()
+    expect(useWorkflowRegistry.getState().hydration.phase).not.toBe('ready')
   })
 
   it('preserves the cached in-flight deployment attempt across envelope hydration', async () => {
@@ -183,13 +208,25 @@ describe('registry store loadWorkflowState (collapsed cache)', () => {
 
     mockRequestJson
       .mockImplementationOnce(() => firstPending)
-      .mockImplementationOnce(() => Promise.resolve({ data: makeEnvelope({ id: 'wf-2' }) }))
+      .mockImplementationOnce(() =>
+        Promise.resolve({ data: makeEnvelope({ id: 'wf-2', draftRevision: 22 }) })
+      )
 
     const firstLoad = useWorkflowRegistry.getState().loadWorkflowState('wf-1')
     const secondLoad = useWorkflowRegistry.getState().loadWorkflowState('wf-2')
     await secondLoad
 
     expect(useWorkflowRegistry.getState().activeWorkflowId).toBe('wf-2')
+    expect(replaceWorkflowState).toHaveBeenLastCalledWith(
+      expect.objectContaining({ currentWorkflowId: 'wf-2' }),
+      {
+        draftRevisionAttestation: {
+          workflowId: 'wf-2',
+          revision: 22,
+          versions: { localOperation: 0, remoteApply: 0, remoteUpdate: 0 },
+        },
+      }
+    )
     const projectionsAfterSecond = replaceWorkflowState.mock.calls.length
 
     resolveFirst({ data: makeEnvelope({ id: 'wf-1' }) })
@@ -207,7 +244,7 @@ describe('registry store loadWorkflowState (collapsed cache)', () => {
     })
     mockRequestJson
       .mockImplementationOnce(() => firstPending)
-      .mockResolvedValueOnce({ data: makeEnvelope({ id: 'wf-2' }) })
+      .mockResolvedValueOnce({ data: makeEnvelope({ id: 'wf-2', draftRevision: 22 }) })
 
     const firstLoad = useWorkflowRegistry.getState().setActiveWorkflow('wf-1')
     await useWorkflowRegistry.getState().setActiveWorkflow('wf-2')

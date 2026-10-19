@@ -6,6 +6,14 @@ import { blockVisibilityMock } from '@sim/testing/mocks/block-visibility.mock'
 import { customBlockOperationsMock } from '@sim/testing/mocks/custom-block-operations.mock'
 import { integrationsAvailabilityMock } from '@sim/testing/mocks/integrations-availability.mock'
 import { toolsMock, toolsMockFns } from '@sim/testing/mocks/tools.mock'
+import {
+  workflowContextMock,
+  workflowContextMockFns,
+} from '@sim/testing/mocks/workflow-context.mock'
+import {
+  workflowsQueriesMock,
+  workflowsQueriesMockFns,
+} from '@sim/testing/mocks/workflows-queries.mock'
 import { workspaceAuthzMock, workspaceAuthzMockFns } from '@sim/testing/mocks/workspace-authz.mock'
 import {
   workspaceContextMock,
@@ -18,6 +26,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 vi.mock('@/providers', () => ({ MAX_TOOL_ITERATIONS: 1 }))
 vi.mock('@/tools', () => toolsMock)
 vi.mock('@/lib/workspaces/application/context', () => workspaceContextMock)
+vi.mock('@/lib/workflows/application/context', () => workflowContextMock)
+vi.mock('@/lib/workflows/queries', () => workflowsQueriesMock)
 vi.mock('@sim/platform-authz/workspace', () => workspaceAuthzMock)
 vi.mock('@sim/audit', () => auditMock)
 vi.mock('@/lib/core/config/block-visibility', () => blockVisibilityMock)
@@ -35,6 +45,8 @@ vi.mock('@/blocks/visibility/server-context', () => ({
 }))
 
 import { afterEach } from 'vitest'
+import { OrchestrationError } from '@/lib/core/orchestration/types'
+import { getBlock } from '@/blocks/registry'
 import { anthropicProvider } from '@/providers/anthropic'
 import { clearProviderClientCacheForTests } from '@/providers/client-cache'
 import { openaiProvider } from '@/providers/openai'
@@ -72,7 +84,10 @@ function sse(value: ReturnType<typeof response>) {
     headers: { 'Content-Type': 'text/event-stream' },
   })
 }
-function toolCall(name = 'list_blocks', args = { search: 'Loop', limit: 1 }) {
+function toolCall(
+  name = 'list_blocks',
+  args: Record<string, unknown> = { search: 'Loop', limit: 1 }
+) {
   return {
     type: 'function_call',
     id: 'fc_1',
@@ -92,7 +107,7 @@ function answer() {
     ])
   )
 }
-function anthropicSse(tool = false) {
+function anthropicSse(tool = false, call?: { name: string; input: Record<string, unknown> }) {
   const events = [
     {
       type: 'message_start',
@@ -111,14 +126,17 @@ function anthropicSse(tool = false) {
       type: 'content_block_start',
       index: 0,
       content_block: tool
-        ? { type: 'tool_use', id: 'tool_1', name: 'list_blocks', input: {} }
+        ? { type: 'tool_use', id: 'tool_1', name: call?.name ?? 'list_blocks', input: {} }
         : { type: 'text', text: '' },
     },
     {
       type: 'content_block_delta',
       index: 0,
       delta: tool
-        ? { type: 'input_json_delta', partial_json: '{"search":"Loop","limit":1}' }
+        ? {
+            type: 'input_json_delta',
+            partial_json: JSON.stringify(call?.input ?? { search: 'Loop', limit: 1 }),
+          }
         : { type: 'text_delta', text: 'Loop is available.' },
     },
     { type: 'content_block_stop', index: 0 },
@@ -155,6 +173,591 @@ beforeEach(() => {
   workspaceContextMockFns.mockLoadActiveWorkspaceApplicationContext.mockClear()
   toolsMockFns.mockExecuteTool.mockClear()
   clearProviderClientCacheForTests()
+})
+
+describe('optional workflow reads — real provider parsers with HTTP and DB lookup doubles', () => {
+  const load = workflowsQueriesMockFns.mockLoadWorkflowReadSnapshot
+  const resolve = workflowContextMockFns.mockResolveActiveWorkflowApplicationContext
+  async function turn(
+    provider: 'openai' | 'anthropic',
+    input: Record<string, unknown>,
+    policy: 'summary_only' | 'sanitized_details' = 'summary_only',
+    name = 'read_workflow'
+  ) {
+    clearProviderClientCacheForTests()
+    const http = vi
+      .fn()
+      .mockResolvedValueOnce(
+        provider === 'openai'
+          ? sse(response([toolCall(name, input)]))
+          : anthropicSse(true, { name, input })
+      )
+      .mockResolvedValueOnce(provider === 'openai' ? answer() : anthropicSse())
+    vi.stubGlobal('fetch', http)
+    const run = runCatalogProvider({
+      ...scope,
+      provider,
+      request: { ...modelRequest, model: provider === 'openai' ? 'gpt-4.1' : 'claude-sonnet-4-5' },
+      workflow: { workflowId: 'bound-workflow', policy },
+    })
+    const events = await collect(run.stream)
+    const body = JSON.parse(http.mock.calls[1][1].body)
+    const output =
+      provider === 'openai'
+        ? body.input.find((item: { type: string }) => item.type === 'function_call_output').output
+        : body.messages
+            .flatMap((message: { content: unknown[] }) => message.content)
+            .find((item: { type: string }) => item.type === 'tool_result').content
+    return { output: JSON.parse(output), body, run, events, http }
+  }
+  beforeEach(() => {
+    resolve.mockReset().mockResolvedValue({
+      workflowId: 'bound-workflow',
+      workflow: { id: 'bound-workflow', workspaceId: 'workspace-1' },
+      workspaceId: 'workspace-1',
+      workspaceOrganizationId: null,
+      allowPersonalApiKeys: true,
+      billedAccountUserId: 'other-payer',
+    })
+    load.mockReset().mockResolvedValue({
+      workflowRecord: {
+        id: 'bound-workflow',
+        draftRevision: 7,
+        variables: {
+          v1: {
+            id: 'v1',
+            name: 'Variable',
+            type: 'string',
+            value: 'FICTIVE_VARIABLE_NOT_TO_MODEL',
+          },
+        },
+      },
+      normalizedData: {
+        blocks: {
+          b1: {
+            id: 'b1',
+            type: 'fixture',
+            name: 'Fixture',
+            enabled: true,
+            position: { x: 0, y: 0 },
+            subBlocks: {
+              password: {
+                id: 'password',
+                type: 'short-input',
+                value: 'FICTIVE_PASSWORD_NOT_TO_MODEL',
+              },
+              oauth: { id: 'oauth', type: 'oauth-input', value: 'FICTIVE_OAUTH_NOT_TO_MODEL' },
+              credentialId: {
+                id: 'credentialId',
+                type: 'short-input',
+                value: 'FICTIVE_BINDING_NOT_TO_MODEL',
+              },
+              headers: {
+                id: 'headers',
+                type: 'table',
+                value: [{ key: 'Authorization', value: 'FICTIVE_HEADER_NOT_TO_MODEL' }],
+              },
+              code: { id: 'code', type: 'code', value: 'return "FICTIVE_LITERAL_SECRET_REMAINS"' },
+            },
+            outputs: {},
+          },
+        },
+        edges: [],
+        loops: {},
+        parallels: {},
+      },
+    })
+    vi.mocked(getBlock).mockReturnValue({
+      name: 'Fixture',
+      description: '',
+      outputs: {},
+      subBlocks: [
+        { id: 'password', type: 'short-input', password: true },
+        { id: 'oauth', type: 'oauth-input' },
+        { id: 'headers', type: 'table' },
+        { id: 'code', type: 'code' },
+      ],
+    } as never)
+  })
+
+  it.each(['openai', 'anthropic'] as const)(
+    'transmits a nonempty native summary schema and its result through %s',
+    async (provider) => {
+      const params = { request: { view: 'summary', section: 'blocks' } }
+      const http = vi
+        .fn()
+        .mockResolvedValueOnce(
+          provider === 'openai'
+            ? sse(response([toolCall('read_workflow', params)]))
+            : anthropicSse(true, { name: 'read_workflow', input: params })
+        )
+        .mockResolvedValueOnce(provider === 'openai' ? answer() : anthropicSse())
+      vi.stubGlobal('fetch', http)
+      const run = runCatalogProvider({
+        ...scope,
+        provider,
+        request: {
+          ...modelRequest,
+          model: provider === 'openai' ? 'gpt-4.1' : 'claude-sonnet-4-5',
+        },
+        workflow: { workflowId: 'bound-workflow', policy: 'summary_only' },
+      })
+      await collect(run.stream)
+      const first = JSON.parse(http.mock.calls[0][1].body)
+      expect(first.tools.map((tool: { name: string }) => tool.name).sort()).toEqual([
+        'get_block',
+        'get_tool',
+        'list_blocks',
+        'list_tools',
+        'read_workflow',
+      ])
+      const wireTool = first.tools.find((tool: { name: string }) => tool.name === 'read_workflow')
+      const schema = provider === 'openai' ? wireTool.parameters : wireTool.input_schema
+      expect(schema).toMatchObject({
+        required: ['request'],
+        properties: {
+          request: {
+            properties: {
+              view: { type: 'string', const: 'summary' },
+              section: { enum: ['blocks', 'edges', 'variables', 'loops', 'parallels'] },
+            },
+          },
+        },
+      })
+      const second = JSON.parse(http.mock.calls[1][1].body)
+      const output =
+        provider === 'openai'
+          ? second.input.find((item: { type: string }) => item.type === 'function_call_output')
+              .output
+          : second.messages
+              .flatMap((message: { content: unknown[] }) => message.content)
+              .find((item: { type: string }) => item.type === 'tool_result').content
+      expect(JSON.parse(output)).toMatchObject({
+        draftRevision: 7,
+        section: 'blocks',
+        entries: { b1: { id: 'b1', type: 'fixture' } },
+      })
+      expect(JSON.stringify(second)).not.toContain('FICTIVE_VARIABLE_NOT_TO_MODEL')
+      expect(load).toHaveBeenCalledWith('bound-workflow', 'workspace-1')
+      expect(run.usage()).toEqual({ modelCalls: 2, toolCalls: 1 })
+      expect(toolsMockFns.mockExecuteTool).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each([
+    ['openai', 'read_workflow'],
+    ['openai', 'read_workflow_block'],
+    ['anthropic', 'read_workflow'],
+    ['anthropic', 'read_workflow_block'],
+  ] as const)('retains native schemas and sanitized %s/%s results', async (provider, name) => {
+    load.mockClear()
+    const input =
+      name === 'read_workflow'
+        ? { view: 'full', expectedRevision: 7 }
+        : { blockId: 'b1', expectedRevision: 7 }
+    const params = { request: input }
+    const http = vi
+      .fn()
+      .mockResolvedValueOnce(
+        provider === 'openai'
+          ? sse(response([toolCall(name, params)]))
+          : anthropicSse(true, { name, input: params })
+      )
+      .mockResolvedValueOnce(provider === 'openai' ? answer() : anthropicSse())
+    vi.stubGlobal('fetch', http)
+    const run = runCatalogProvider({
+      ...scope,
+      provider,
+      request: { ...modelRequest, model: provider === 'openai' ? 'gpt-4.1' : 'claude-sonnet-4-5' },
+      workflow: { workflowId: 'bound-workflow', policy: 'sanitized_details' },
+    })
+    await collect(run.stream)
+    const first = JSON.parse(http.mock.calls[0][1].body)
+    expect(first.tools.map((tool: { name: string }) => tool.name).sort()).toEqual([
+      'get_block',
+      'get_tool',
+      'list_blocks',
+      'list_tools',
+      'read_workflow',
+      'read_workflow_block',
+    ])
+    const findSchema = (id: string) => {
+      const tool = first.tools.find((tool: { name: string }) => tool.name === id)
+      return provider === 'openai' ? tool.parameters : tool.input_schema
+    }
+    expect(findSchema('read_workflow').properties.request.oneOf).toMatchObject([
+      {
+        properties: { view: { const: 'full' }, expectedRevision: { type: 'integer', minimum: 0 } },
+      },
+      {
+        properties: {
+          view: { const: 'summary' },
+          offset: { type: 'integer', minimum: 0 },
+          limit: { maximum: 100 },
+        },
+      },
+    ])
+    expect(findSchema('read_workflow_block')).toMatchObject({
+      required: ['request'],
+      properties: {
+        request: {
+          required: ['blockId'],
+          properties: { blockId: { type: 'string', maxLength: 512 } },
+        },
+      },
+    })
+    expect(JSON.stringify(first)).not.toContain('bound-workflow')
+    const second = JSON.parse(http.mock.calls[1][1].body)
+    const output =
+      provider === 'openai'
+        ? second.input.find((item: { type: string }) => item.type === 'function_call_output').output
+        : second.messages
+            .flatMap((message: { content: unknown[] }) => message.content)
+            .find((item: { type: string }) => item.type === 'tool_result').content
+    const result = JSON.parse(output)
+    expect(result).toMatchObject({ draftRevision: 7 })
+    const node = name === 'read_workflow' ? result.blocks.b1 : result.block
+    expect(node.subBlocks).toMatchObject({
+      password: { value: null },
+      oauth: { value: null },
+      credentialId: { value: null },
+      headers: { value: null },
+      code: { value: 'return "FICTIVE_LITERAL_SECRET_REMAINS"' },
+    })
+    expect(JSON.stringify(second)).not.toContain('NOT_TO_MODEL')
+    expect(load).toHaveBeenCalledTimes(1)
+    expect(run.usage()).toEqual({ modelCalls: 2, toolCalls: 1 })
+    expect(toolsMockFns.mockExecuteTool).not.toHaveBeenCalled()
+  })
+
+  it.each(['openai', 'anthropic'] as const)(
+    'refuses detailed views under summary_only before native reads with %s',
+    async (provider) => {
+      const result = await turn(provider, { request: { view: 'full' } })
+      expect(result.output).toEqual({
+        ok: false,
+        error: { code: 'forbidden', message: 'Workflow read could not complete.' },
+      })
+      expect(result.events).toContainEqual(
+        expect.objectContaining({ type: 'tool_call_end', status: 'error' })
+      )
+      expect(resolve).not.toHaveBeenCalled()
+      expect(load).not.toHaveBeenCalled()
+      expect(toolsMockFns.mockExecuteTool).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each([
+    { request: { view: 'summary', section: 'blocks' }, workflowId: 'foreign' },
+    { request: { view: 'summary', section: 'blocks' }, policy: 'sanitized_details' },
+    { request: { view: 'summary', section: 'blocks' }, _context: { userId: 'owner' } },
+    { request: { view: 'full', workflowId: 'foreign' } },
+    { request: { view: 'summary', section: 'blocks', principal: { userId: 'owner' } } },
+    { request: { view: 'summary', section: 'blocks', policy: 'sanitized_details' } },
+    { view: 'summary', section: 'blocks' },
+    { request: { view: 'summary', section: 'blocks', offset: 1 } },
+  ])(
+    'rejects model-owned identity/policy/extra wrapper fields or invalid pages: %j',
+    async (input) => {
+      const result = await turn('openai', input)
+      expect(result.output).toEqual({
+        ok: false,
+        error: { code: 'invalid_input', message: 'Workflow read could not complete.' },
+      })
+      expect(resolve).not.toHaveBeenCalled()
+      expect(load).not.toHaveBeenCalled()
+    }
+  )
+
+  it('preserves exact native revisions on pages and returns a fixed conflict on changed revision', async () => {
+    const page = await turn('openai', {
+      request: { view: 'summary', section: 'blocks', offset: 1, expectedRevision: 7 },
+    })
+    expect(page.output).toMatchObject({
+      draftRevision: 7,
+      entries: {},
+      page: { total: 1, nextOffset: null },
+    })
+    const conflict = await turn('openai', {
+      request: { view: 'summary', section: 'blocks', offset: 1, expectedRevision: 0 },
+    })
+    expect(conflict.output).toMatchObject({
+      error: { code: 'revision_conflict', message: 'Workflow read could not complete.' },
+    })
+  })
+
+  it.each(['openai', 'anthropic'] as const)(
+    'reauthorizes the workflow and withholds private failures with %s',
+    async (provider) => {
+      workspaceAuthzMockFns.mockResolveEffectiveWorkspacePermission.mockResolvedValue(null)
+      const denied = await turn(provider, { request: { view: 'summary', section: 'blocks' } })
+      expect(denied.output).toMatchObject({ error: { code: 'forbidden' } })
+      expect(load).not.toHaveBeenCalled()
+      expect(
+        workspaceAuthzMockFns.mockResolveEffectiveWorkspacePermission.mock.calls.at(-1)?.slice(0, 2)
+      ).toEqual(['catalog-reader', 'workspace-1'])
+      resolve.mockRejectedValue(
+        new OrchestrationError('not_found', 'FICTIVE_PRIVATE_WORKFLOW_NOT_TO_MODEL')
+      )
+      const missing = await turn(provider, { request: { view: 'summary', section: 'blocks' } })
+      expect(missing.output).toMatchObject({
+        error: { code: 'not_found', message: 'Workflow read could not complete.' },
+      })
+      expect(JSON.stringify(missing.body)).not.toContain('NOT_TO_MODEL')
+    }
+  )
+
+  it.each([
+    {},
+    { workflowId: 'bound-workflow' },
+    { policy: 'summary_only' },
+    { workflowId: '', policy: 'summary_only' },
+    { workflowId: 'bound-workflow', policy: 'all' },
+    { workflowId: 'bound-workflow', policy: 'summary_only', workspaceId: 'foreign' },
+    null,
+  ])('requires explicit valid server workflow/policy before any model request: %j', (workflow) => {
+    const http = vi.fn()
+    vi.stubGlobal('fetch', http)
+    expect(() =>
+      runCatalogProvider({ ...scope, provider: 'openai', request: modelRequest, workflow } as never)
+    ).toThrow('Invalid workflow read binding.')
+    expect(http).not.toHaveBeenCalled()
+    expect(resolve).not.toHaveBeenCalled()
+  })
+
+  it.each(['openai', 'anthropic'] as const)(
+    'does not expose or execute a block tool under summary_only with %s',
+    async (provider) => {
+      const result = await turn(
+        provider,
+        { request: { blockId: 'b1' } },
+        'summary_only',
+        'read_workflow_block'
+      )
+      expect(result.events).toContainEqual(
+        expect.objectContaining({ type: 'tool_call_end', status: 'error' })
+      )
+      expect(result.run.usage().toolCalls).toBe(0)
+      expect(resolve).not.toHaveBeenCalled()
+      expect(load).not.toHaveBeenCalled()
+      expect(toolsMockFns.mockExecuteTool).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each(['openai', 'anthropic'] as const)(
+    'preserves native catalogue refusals even with a linked workflow through %s',
+    async (provider) => {
+      const result = await turn(provider, { workspaceId: 'foreign' }, 'summary_only', 'list_blocks')
+      expect(result.output).toEqual({
+        error: true,
+        message: 'Catalog read could not complete.',
+        tool: 'list_blocks',
+      })
+      expect(result.events).toContainEqual(
+        expect.objectContaining({ type: 'tool_call_end', status: 'error' })
+      )
+      expect(resolve).not.toHaveBeenCalled()
+      expect(load).not.toHaveBeenCalled()
+    }
+  )
+
+  it('copies the explicit server policy before a caller can mutate its object during the run', async () => {
+    const workflow: { workflowId: string; policy: 'summary_only' | 'sanitized_details' } = {
+      workflowId: 'bound-workflow',
+      policy: 'summary_only',
+    }
+    const http = vi
+      .fn()
+      .mockResolvedValueOnce(
+        sse(response([toolCall('read_workflow', { request: { view: 'full' } })]))
+      )
+      .mockResolvedValueOnce(answer())
+    vi.stubGlobal('fetch', http)
+    const run = runCatalogProvider({
+      ...scope,
+      provider: 'openai',
+      request: modelRequest,
+      workflow,
+    })
+    workflow.policy = 'sanitized_details'
+    workflow.workflowId = 'foreign-workflow'
+    await collect(run.stream)
+    const second = JSON.parse(http.mock.calls[1][1].body)
+    expect(
+      JSON.parse(
+        second.input.find((item: { type: string }) => item.type === 'function_call_output').output
+      )
+    ).toEqual({
+      ok: false,
+      error: { code: 'forbidden', message: 'Workflow read could not complete.' },
+    })
+    expect(resolve).not.toHaveBeenCalled()
+  })
+
+  it('reauthorizes concurrent workflow reads independently rather than caching an initial grant', async () => {
+    workspaceAuthzMockFns.mockResolveEffectiveWorkspacePermission
+      .mockResolvedValueOnce('read')
+      .mockResolvedValueOnce(null)
+    const input = { request: { view: 'summary', section: 'blocks' } }
+    const http = vi
+      .fn()
+      .mockResolvedValueOnce(
+        sse(
+          response([
+            toolCall('read_workflow', input),
+            { ...toolCall('read_workflow', input), id: 'fc_2', call_id: 'call_2' },
+          ])
+        )
+      )
+      .mockResolvedValueOnce(answer())
+    vi.stubGlobal('fetch', http)
+    const run = runCatalogProvider({
+      ...scope,
+      provider: 'openai',
+      request: modelRequest,
+      workflow: { workflowId: 'bound-workflow', policy: 'summary_only' },
+    })
+    const events = await collect(run.stream)
+    const second = JSON.parse(http.mock.calls[1][1].body)
+    const outputs = second.input
+      .filter((item: { type: string }) => item.type === 'function_call_output')
+      .map((item: { output: string }) => JSON.parse(item.output))
+    expect(outputs).toMatchObject([
+      { draftRevision: 7 },
+      { ok: false, error: { code: 'forbidden' } },
+    ])
+    expect(load).toHaveBeenCalledTimes(1)
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: 'tool_call_end', status: 'error' })
+    )
+    expect(run.usage()).toEqual({ modelCalls: 2, toolCalls: 2 })
+  })
+
+  it.each(['openai', 'anthropic'] as const)(
+    'preserves model and tool budgets around linked reads with %s',
+    async (provider) => {
+      for (const boundary of ['model', 'tool']) {
+        clearProviderClientCacheForTests()
+        load.mockClear()
+        resolve.mockClear()
+        const input = { request: { view: 'summary', section: 'blocks' } }
+        const http = vi
+          .fn()
+          .mockResolvedValueOnce(
+            provider === 'openai'
+              ? sse(response([toolCall('read_workflow', input)]))
+              : anthropicSse(true, { name: 'read_workflow', input })
+          )
+        vi.stubGlobal('fetch', http)
+        const run = runCatalogProvider({
+          ...scope,
+          provider,
+          request: {
+            ...modelRequest,
+            model: provider === 'openai' ? 'gpt-4.1' : 'claude-sonnet-4-5',
+          },
+          workflow: { workflowId: 'bound-workflow', policy: 'summary_only' },
+          limits: boundary === 'model' ? { maxModelCalls: 1 } : { maxToolCalls: 0 },
+        })
+        await expect(collect(run.stream)).rejects.toMatchObject({
+          code: boundary === 'model' ? 'model_calls' : 'tool_calls',
+        })
+        expect(http).toHaveBeenCalledTimes(1)
+        expect(run.usage()).toEqual({ modelCalls: 1, toolCalls: boundary === 'model' ? 1 : 0 })
+        if (boundary === 'tool') expect(resolve).not.toHaveBeenCalled()
+      }
+    }
+  )
+
+  it.each(['openai', 'anthropic'] as const)(
+    'propagates cancellation during a pending workflow read without synthesis with %s',
+    async (provider) => {
+      const snapshot = await load()
+      let finish!: (value: unknown) => void
+      load.mockReset().mockImplementation(
+        () =>
+          new Promise((done) => {
+            finish = done
+          })
+      )
+      const input = { request: { view: 'summary', section: 'blocks' } }
+      const http = vi
+        .fn()
+        .mockResolvedValueOnce(
+          provider === 'openai'
+            ? sse(response([toolCall('read_workflow', input)]))
+            : anthropicSse(true, { name: 'read_workflow', input })
+        )
+      vi.stubGlobal('fetch', http)
+      const abort = new AbortController()
+      const run = runCatalogProvider({
+        ...scope,
+        provider,
+        signal: abort.signal,
+        request: {
+          ...modelRequest,
+          model: provider === 'openai' ? 'gpt-4.1' : 'claude-sonnet-4-5',
+        },
+        workflow: { workflowId: 'bound-workflow', policy: 'summary_only' },
+      })
+      const pending = collect(run.stream)
+      try {
+        await vi.waitFor(() => expect(load).toHaveBeenCalledTimes(1))
+        abort.abort(new DOMException('Fictitious cancellation', 'AbortError'))
+        await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+        expect(http).toHaveBeenCalledTimes(1)
+        expect(run.usage()).toEqual({ modelCalls: 1, toolCalls: 1 })
+      } finally {
+        finish?.(snapshot)
+      }
+    }
+  )
+
+  it('returns fixed unavailable and too-large refusals without forwarding raw contents', async () => {
+    const snapshot = await load()
+    load.mockResolvedValueOnce({
+      ...snapshot,
+      workflowRecord: { ...snapshot.workflowRecord, draftRevision: -1 },
+    })
+    const malformed = await turn('openai', { request: { view: 'full' } }, 'sanitized_details')
+    expect(malformed.output).toEqual({
+      ok: false,
+      error: { code: 'unavailable', message: 'Workflow read could not complete.' },
+    })
+    snapshot.normalizedData.blocks.b1.name = 'é'.repeat(140 * 1024)
+    const large = await turn('openai', { request: { view: 'summary', section: 'blocks' } })
+    expect(large.output).toEqual({
+      ok: false,
+      error: { code: 'result_too_large', message: 'Workflow read could not complete.' },
+    })
+    expect(JSON.stringify(large.body)).not.toContain('é'.repeat(100))
+  })
+
+  it.each(['openai', 'anthropic'] as const)(
+    'keeps exactly four tools with no workflow binding through %s',
+    async (provider) => {
+      const http = vi.fn().mockResolvedValueOnce(provider === 'openai' ? answer() : anthropicSse())
+      vi.stubGlobal('fetch', http)
+      const run = runCatalogProvider({
+        ...scope,
+        provider,
+        request: {
+          ...modelRequest,
+          model: provider === 'openai' ? 'gpt-4.1' : 'claude-sonnet-4-5',
+        },
+      })
+      await collect(run.stream)
+      const first = JSON.parse(http.mock.calls[0][1].body)
+      expect(first.tools.map((tool: { name: string }) => tool.name).sort()).toEqual([
+        'get_block',
+        'get_tool',
+        'list_blocks',
+        'list_tools',
+      ])
+      expect(resolve).not.toHaveBeenCalled()
+      expect(load).not.toHaveBeenCalled()
+    }
+  )
 })
 
 afterEach(() => vi.unstubAllGlobals())

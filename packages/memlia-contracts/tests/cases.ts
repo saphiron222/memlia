@@ -21,6 +21,36 @@ for (const name of Object.keys(fixtures) as ContractName[]) {
     v.accessToken = 'FAKE-CANARY-NOT-A-SECRET'
   })
 }
+// Exercise the shared scope through every wire contract, including nested job authority.
+for (const name of Object.keys(fixtures) as ContractName[]) {
+  const value: any = structuredClone(fixtures[name])
+  const scope = name === 'JobEnvelope' ? value.authority : value
+  scope.organizationId = null
+  cases.push({
+    name,
+    label: `${name} accepts explicit personal organization null`,
+    value,
+    valid: true,
+  })
+  for (const field of ['organizationId', 'workspaceId'] as const) {
+    bad(name, `${name} requires ${field} even for a personal scope`, (v) => {
+      const scope = name === 'JobEnvelope' ? v.authority : v
+      scope.organizationId = null
+      delete scope[field]
+    })
+    const invalidValues = [
+      '', ' ', 'invalid/id', 0, false, {}, [],
+      ...(field === 'workspaceId' ? [null] : []),
+    ]
+    for (const invalid of invalidValues) {
+      bad(name, `${name} rejects scope ${field}=${JSON.stringify(invalid)}`, (v) => {
+        const scope = name === 'JobEnvelope' ? v.authority : v
+        scope.organizationId = null
+        scope[field] = invalid
+      })
+    }
+  }
+}
 bad('Principal', 'actorless schedule requires explicit grant', (v) => {
   v.actor.principal = {
     kind: 'system',

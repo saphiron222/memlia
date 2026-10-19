@@ -4,6 +4,7 @@ import { user, workflow, workflowBlocks, workspace } from '@sim/db/schema'
 import { deleteWorkspaceFixture, insertWorkspaceFixture } from '@sim/db/testing/workspace-fixtures'
 import { getPostgresErrorCode } from '@sim/utils/errors'
 import { generateId } from '@sim/utils/id'
+import type { BlockState, WorkflowState } from '@sim/workflow-types/workflow'
 import {
   loadWorkflowFromNormalizedTablesRaw,
   persistMigratedBlocks,
@@ -16,6 +17,7 @@ import {
 } from '@sim/workflow-persistence/revision'
 import { saveWorkflowToNormalizedTables as rawSave } from '@sim/workflow-persistence/save'
 import { eq, sql } from 'drizzle-orm'
+import { drizzle } from 'drizzle-orm/postgres-js'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { clearCredentialRefs } from '@/lib/credentials/deletion'
 import { withPermissionGroupScope } from '@/lib/permission-groups/request-scope.server'
@@ -29,7 +31,7 @@ const ownerId = generateId()
 const workspaceId = generateId()
 const workflowId = generateId()
 const blockId = generateId()
-const state = (name: string) => ({
+const state = (name: string): WorkflowState => ({
   blocks: {
     [blockId]: {
       id: blockId,
@@ -42,6 +44,8 @@ const state = (name: string) => ({
     },
   },
   edges: [],
+  loops: {},
+  parallels: {},
 })
 const write = (name: string, expectedRevision?: number) =>
   withPermissionGroupScope(() =>
@@ -187,7 +191,7 @@ describe('common draft revision with real PostgreSQL', () => {
   it('invalidates proposals when load-time migrations persist and leaves a stale migration inert', async () => {
     const original = await loadWorkflowFromNormalizedTablesRaw(workflowId)
     expect(original).not.toBeNull()
-    const changed = {
+    const changed: Record<string, BlockState> = {
       ...original!.blocks,
       [blockId]: {
         ...original!.blocks[blockId],
@@ -224,7 +228,7 @@ describe('common draft revision with real PostgreSQL', () => {
       .where(eq(workflowBlocks.id, blockId))
     const original = await loadWorkflowFromNormalizedTablesRaw(workflowId)
     expect(original).not.toBeNull()
-    const changed = {
+    const changed: Record<string, BlockState> = {
       ...original!.blocks,
       [blockId]: {
         ...original!.blocks[blockId],
@@ -432,7 +436,8 @@ describe('common draft revision with real PostgreSQL', () => {
     const credentialId = generateId()
     const migrate = () =>
       applyPreparedCredential({
-        db,
+        // Match the standalone migration's schema-free Drizzle wrapper on the same fixture client.
+        db: drizzle(db.$client),
         workspaceId,
         workspaceOwnerId: ownerId,
         memberUserIds: [],

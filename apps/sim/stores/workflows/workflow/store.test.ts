@@ -1,3 +1,4 @@
+// Modified by Memlia: bind draft revision attestations to applied client snapshots.
 /**
  * Comprehensive tests for the workflow store.
  *
@@ -886,5 +887,73 @@ describe('workflow store', () => {
       const state = useWorkflowStore.getState()
       expect(state.blocks.block2.name).toBe('Unique Name')
     })
+  })
+})
+
+describe('server draft revision attestation', () => {
+  const graph = () => ({
+    currentWorkflowId: 'workflow-a',
+    blocks: {},
+    edges: [],
+    loops: {},
+    parallels: {},
+  })
+  const attestation = () => ({
+    workflowId: 'workflow-a',
+    revision: 0,
+    versions: { localOperation: 0, remoteApply: 0, remoteUpdate: 0 },
+  })
+  it('applies graph and revision together without retaining mutable caller metadata', () => {
+    const supplied = attestation()
+    useWorkflowStore
+      .getState()
+      .replaceWorkflowState(graph(), { draftRevisionAttestation: supplied })
+    supplied.revision = 99
+    supplied.versions.remoteApply = 99
+    expect(useWorkflowStore.getState().draftRevisionAttestation).toEqual(attestation())
+    expect(useWorkflowStore.getState().currentWorkflowId).toBe('workflow-a')
+    expect(useWorkflowStore.getState().getWorkflowState()).not.toHaveProperty(
+      'draftRevisionAttestation'
+    )
+  })
+  it('does not attach the old revision to a replacement without an attestation', () => {
+    useWorkflowStore
+      .getState()
+      .replaceWorkflowState(graph(), { draftRevisionAttestation: attestation() })
+    useWorkflowStore.getState().replaceWorkflowState(graph())
+    expect(useWorkflowStore.getState().draftRevisionAttestation).toBeNull()
+  })
+  it.each(['clear', 'navigation'] as const)('invalidates on %s', (action) => {
+    useWorkflowStore
+      .getState()
+      .replaceWorkflowState(graph(), { draftRevisionAttestation: attestation() })
+    if (action === 'clear') useWorkflowStore.getState().clear()
+    else useWorkflowStore.getState().setCurrentWorkflowId('workflow-b')
+    expect(useWorkflowStore.getState().draftRevisionAttestation).toBeNull()
+  })
+  it.each([-1, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1])(
+    'does not attest invalid revision %s',
+    (revision) => {
+      useWorkflowStore
+        .getState()
+        .replaceWorkflowState(graph(), { draftRevisionAttestation: { ...attestation(), revision } })
+      expect(useWorkflowStore.getState().draftRevisionAttestation).toBeNull()
+    }
+  )
+  it('does not attach an attestation from another workflow', () => {
+    useWorkflowStore.getState().replaceWorkflowState(graph(), {
+      draftRevisionAttestation: { ...attestation(), workflowId: 'workflow-b' },
+    })
+    expect(useWorkflowStore.getState().draftRevisionAttestation).toBeNull()
+  })
+  it('does not attest a graph whose invalid edges were removed during normalization', () => {
+    useWorkflowStore
+      .getState()
+      .replaceWorkflowState(
+        { ...graph(), edges: [{ id: 'dangling', source: 'missing', target: 'missing' }] },
+        { draftRevisionAttestation: attestation() }
+      )
+    expect(useWorkflowStore.getState().edges).toEqual([])
+    expect(useWorkflowStore.getState().draftRevisionAttestation).toBeNull()
   })
 })

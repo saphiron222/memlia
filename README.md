@@ -16,6 +16,8 @@ Quatre mesures de compilation sur le runner Linux public standard de 16 Go ont �
 
 Le runner de 16 Go n'est donc pas qualifié pour ce build complet. Une machine de 24–32 Go reste une hypothèse de prochain essai, pas un minimum mesuré ni une recommandation de dimensionnement du serveur d'un cabinet. Aucun runner payant n'est activé. Le garde mémoire macOS de développement demeure dans [scripts/dev](scripts/dev/README.md).
 
+Le contrôle Linux du snapshot précédent a terminé TypeScript sans OOM en 48,532 secondes, avec huit diagnostics localisés dans trois fichiers. Les correctifs ciblés et les nouvelles tranches revues sont présents dans ces sources ; leur validation globale reste à exécuter. Les régressions ciblées ont été rejouées avant intégration, sans API IA ou Microsoft réelle.
+
 Un [contrôle Linux distinct](scripts/ci/README.linux-validation.md) permet de vérifier les types et bundles natifs sans lancer Next build. Sa réussite ne satisfait pas le check `build` obligatoire et ne produit pas de standalone qualifié. Aucun artefact de production, journal brut, cache ou dépendance n'est publié par ces workflows.
 
 L’installation frozen utilise les versions figées dans le verrou. Les licences des dépendances installées et des artefacts finaux nécessitent leurs contrôles distincts avant toute livraison commerciale. Les règles de publication se trouvent dans [compliance](compliance/README.md).

@@ -40,7 +40,7 @@ export function PrivateCopyDialog({
   const [error, setError] = useState<string | null>(null)
   const inFlight = useRef(false)
   const generation = useRef(0)
-  const userId = session?.user.id
+  const userId = session?.user?.id
   useEffect(() => {
     generation.current++
     return () => {

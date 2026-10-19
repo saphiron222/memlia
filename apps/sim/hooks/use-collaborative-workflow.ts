@@ -1,3 +1,4 @@
+// Modified by Memlia: bind draft revision attestations to applied client snapshots.
 import { useCallback, useEffect, useRef } from 'react'
 import { toast } from '@sim/emcn'
 import { createLogger } from '@sim/logger'
@@ -237,6 +238,11 @@ export function useCollaborativeWorkflow() {
 
       // Apply the operation to local state
       isApplyingRemoteChange.current = true
+
+      // A failed partial application cannot keep attesting the previous graph.
+      const unappliedPositionFrame =
+        target === OPERATION_TARGETS.BLOCK && operation === BLOCK_OPERATIONS.UPDATE_POSITION
+      if (!unappliedPositionFrame) useWorkflowStore.getState().invalidateDraftRevisionAttestation()
 
       try {
         if (target === OPERATION_TARGETS.BLOCK) {
@@ -592,6 +598,8 @@ export function useCollaborativeWorkflow() {
 
       isApplyingRemoteChange.current = true
 
+      useWorkflowStore.getState().invalidateDraftRevisionAttestation()
+
       try {
         useSubBlockStore.getState().setValue(blockId, subblockId, value)
         useWorkflowStore.getState().syncDynamicHandleSubblockValue(blockId, subblockId, value)
@@ -628,6 +636,8 @@ export function useCollaborativeWorkflow() {
       logger.info(`Received variable update from user ${userId}: ${variableId}.${field}`)
 
       isApplyingRemoteChange.current = true
+
+      useWorkflowStore.getState().invalidateDraftRevisionAttestation()
 
       try {
         const isKnownField = field === 'name' || field === 'value' || field === 'type'
@@ -1291,6 +1301,7 @@ export function useCollaborativeWorkflow() {
         useWorkflowStore.getState().batchRemoveEdges(edgeIdsToRemove)
       }
 
+      useWorkflowStore.getState().invalidateDraftRevisionAttestation()
       // Batch update positions and parents
       useWorkflowStore.getState().batchUpdateBlocksWithParent(
         updates.map((u) => ({
@@ -1370,6 +1381,7 @@ export function useCollaborativeWorkflow() {
         return
       }
 
+      useWorkflowStore.getState().invalidateDraftRevisionAttestation()
       useWorkflowStore.getState().setBlockCanonicalMode(id, canonicalId, canonicalMode)
 
       if (!activeWorkflowId) {
@@ -1597,6 +1609,7 @@ export function useCollaborativeWorkflow() {
         return
       }
 
+      useWorkflowStore.getState().invalidateDraftRevisionAttestation()
       // ALWAYS update local store first for immediate UI feedback
       useSubBlockStore.getState().setValue(blockId, subblockId, value)
       useWorkflowStore.getState().syncDynamicHandleSubblockValue(blockId, subblockId, value)
@@ -1664,6 +1677,7 @@ export function useCollaborativeWorkflow() {
         return
       }
 
+      useWorkflowStore.getState().invalidateDraftRevisionAttestation()
       applySubblockValueWithCanonicalModes(blockId, subblockId, value, canonicalModes)
 
       if (!activeWorkflowId) return
@@ -1752,6 +1766,7 @@ export function useCollaborativeWorkflow() {
         (update) => !isSyntheticToolSubBlockId(update.subblockId)
       )
 
+      useWorkflowStore.getState().invalidateDraftRevisionAttestation()
       if (updates.length > 0) {
         updates.forEach((update) => {
           useSubBlockStore.getState().setValue(update.blockId, update.subblockId, update.value)
@@ -1804,6 +1819,7 @@ export function useCollaborativeWorkflow() {
         return
       }
 
+      useWorkflowStore.getState().invalidateDraftRevisionAttestation()
       // Apply locally first (immediate UI feedback)
       useSubBlockStore.getState().setValue(blockId, subblockId, value)
       useWorkflowStore.getState().syncDynamicHandleSubblockValue(blockId, subblockId, value)
@@ -2108,6 +2124,7 @@ export function useCollaborativeWorkflow() {
     (variableData: { name: string; type: any; value: any; workflowId: string }) => {
       const id = generateId()
 
+      useWorkflowStore.getState().invalidateDraftRevisionAttestation()
       // Optimistically add to local store first
       useVariablesStore.getState().addVariable(variableData, id)
       const processedVariable = useVariablesStore.getState().variables[id]

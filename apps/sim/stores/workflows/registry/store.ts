@@ -1,3 +1,4 @@
+// Modified by Memlia: bind draft revision attestations to applied client snapshots.
 import { createLogger } from '@sim/logger'
 import { getErrorMessage } from '@sim/utils/errors'
 import { generateRandomHex } from '@sim/utils/random'
@@ -15,6 +16,10 @@ import { useVariablesStore } from '@/stores/variables/store'
 import type { Variable } from '@/stores/variables/types'
 import type { HydrationState, WorkflowRegistry } from '@/stores/workflows/registry/types'
 import { useSubBlockStore } from '@/stores/workflows/subblock/store'
+import {
+  canApplyHydrationSnapshot,
+  captureDraftVersions,
+} from '@/stores/workflows/sync-local-draft'
 import { getUniqueBlockName, regenerateBlockIds } from '@/stores/workflows/utils'
 import { useWorkflowStore } from '@/stores/workflows/workflow/store'
 import type { BlockState, Loop, Parallel, WorkflowState } from '@/stores/workflows/workflow/types'
@@ -33,6 +38,7 @@ const createRequestId = () => `${Date.now()}-${generateRandomHex(8)}`
 function resetWorkflowStores() {
   useWorkflowStore.setState({
     currentWorkflowId: null,
+    draftRevisionAttestation: null,
     blocks: {},
     edges: [],
     loops: {},
@@ -86,6 +92,7 @@ export const useWorkflowRegistry = create<WorkflowRegistry>()(
         }
 
         const requestId = createRequestId()
+        const versionsAtStart = captureDraftVersions(workflowId)
 
         set((state) => ({
           error: null,
@@ -99,11 +106,13 @@ export const useWorkflowRegistry = create<WorkflowRegistry>()(
         }))
 
         try {
-          const workflowData = await getQueryClient().fetchQuery({
-            queryKey: workflowKeys.state(workflowId),
-            queryFn: ({ signal }) => fetchWorkflowEnvelope(workflowId, signal),
-            staleTime: 0,
-          })
+          const workflowData = structuredClone(
+            await getQueryClient().fetchQuery({
+              queryKey: workflowKeys.state(workflowId),
+              queryFn: ({ signal }) => fetchWorkflowEnvelope(workflowId, signal),
+              staleTime: 0,
+            })
+          )
 
           const deployedAt = workflowData.deployedAt ? workflowData.deployedAt.toISOString() : null
 
@@ -167,11 +176,20 @@ export const useWorkflowRegistry = create<WorkflowRegistry>()(
             return
           }
 
-          useWorkflowStore.getState().replaceWorkflowState(workflowState)
+          if (!canApplyHydrationSnapshot(workflowId, versionsAtStart)) {
+            const message =
+              'Workflow changed while loading. Keep local edits and retry synchronization.'
+            set((state) => ({
+              error: message,
+              hydration: { ...state.hydration, phase: 'error', error: message },
+            }))
+            return
+          }
+          useWorkflowStore.getState().invalidateDraftRevisionAttestation()
           useSubBlockStore.getState().initializeFromWorkflow(workflowId, workflowState.blocks || {})
 
           const wireVariables = workflowData.variables
-          if (wireVariables) {
+          if (Object.hasOwn(workflowData, 'variables')) {
             useVariablesStore.setState((state) => {
               const withoutWorkflow = Object.fromEntries(
                 Object.entries(state.variables).filter(
@@ -181,11 +199,23 @@ export const useWorkflowRegistry = create<WorkflowRegistry>()(
               return {
                 variables: {
                   ...withoutWorkflow,
-                  ...(wireVariables as Record<string, Variable>),
+                  ...((wireVariables ?? {}) as Record<string, Variable>),
                 },
               }
             })
           }
+
+          useWorkflowStore.getState().replaceWorkflowState(workflowState, {
+            ...(Object.hasOwn(workflowData, 'variables')
+              ? {
+                  draftRevisionAttestation: {
+                    workflowId,
+                    revision: workflowData.draftRevision,
+                    versions: versionsAtStart,
+                  },
+                }
+              : {}),
+          })
 
           window.dispatchEvent(
             new CustomEvent('active-workflow-changed', {

@@ -1,3 +1,4 @@
+// Modified by Memlia: narrow the native draft-save receipt before reading its error.
 import { mkdir, rm, writeFile } from 'node:fs/promises'
 import http from 'node:http'
 import https from 'node:https'
@@ -156,7 +157,7 @@ async function savedWorkflow(
   const state: WorkflowState = { blocks, edges, loops: {}, parallels: {} }
   configure?.(state, blockIds)
   const saved = await saveWorkflowToNormalizedTables(workflowId, state)
-  expect(saved.success, saved.error).toBe(true)
+  expect(saved.success, saved.success ? undefined : saved.error).toBe(true)
   return { workflowId, blockIds }
 }
 

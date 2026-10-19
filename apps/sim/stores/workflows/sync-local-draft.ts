@@ -1,3 +1,4 @@
+// Modified by Memlia: bind draft revision attestations to applied client snapshots.
 import { createLogger } from '@sim/logger'
 import { sleep } from '@sim/utils/helpers'
 import { getQueryClient } from '@/app/_shell/providers/get-query-client'
@@ -7,16 +8,16 @@ import { useOperationQueueStore } from '@/stores/operation-queue/store'
 import { useWorkflowDiffStore } from '@/stores/workflow-diff/store'
 import { applyWorkflowStateToStores } from '@/stores/workflow-diff/utils'
 import { useWorkflowRegistry } from '@/stores/workflows/registry/store'
-import type { WorkflowState } from '@/stores/workflows/workflow/types'
+import { useWorkflowStore } from '@/stores/workflows/workflow/store'
+import type { DraftSyncVersions, WorkflowState } from '@/stores/workflows/workflow/types'
 
 const logger = createLogger('SyncLocalDraft')
 
 /**
  * A remote collaborator's edit applied mid-fetch means the fetched snapshot may
  * predate that edit's persist (the realtime server debounces writes), so the
- * sync refetches. Bounded: a persistently busy session keeps converging through
- * op broadcasts anyway, so after the last attempt the latest snapshot is
- * applied rather than leaving a reconnecting client on stale state.
+ * sync refetches. After the bounded retry budget, preserve the graph already
+ * updated by broadcasts rather than overwrite it with an older snapshot.
  */
 const MAX_SYNC_FETCH_ATTEMPTS = 3
 const SYNC_RETRY_DELAY_MS = 50
@@ -28,11 +29,7 @@ const SYNC_RETRY_DELAY_MS = 50
  * - `remoteApply`: remote collaborator ops applied to the stores
  * - `remoteUpdate`: external full reloads (workflow-updated / revert)
  */
-export interface DraftSyncVersions {
-  localOperation: number
-  remoteApply: number
-  remoteUpdate: number
-}
+export type { DraftSyncVersions } from '@/stores/workflows/workflow/types'
 
 /** Captures the current {@link DraftSyncVersions} for a workflow. */
 export function captureDraftVersions(workflowId: string): DraftSyncVersions {
@@ -54,9 +51,10 @@ export function captureDraftVersions(workflowId: string): DraftSyncVersions {
  */
 function canApplyServerSnapshot(
   workflowId: string,
-  expected: Pick<DraftSyncVersions, 'localOperation' | 'remoteUpdate'>
+  expected: Pick<DraftSyncVersions, 'localOperation' | 'remoteUpdate'>,
+  requireActive = true
 ): boolean {
-  if (useWorkflowRegistry.getState().activeWorkflowId !== workflowId) return false
+  if (requireActive && useWorkflowRegistry.getState().activeWorkflowId !== workflowId) return false
   const operationQueueState = useOperationQueueStore.getState()
   if (operationQueueState.hasPendingOperations(workflowId)) return false
   if (
@@ -90,6 +88,80 @@ export function canApplyDraftSnapshot(workflowId: string, versions: DraftSyncVer
   )
 }
 
+/** Hydration owns its request-id guard; it must still respect draft activity. */
+export function canApplyHydrationSnapshot(
+  workflowId: string,
+  versions: DraftSyncVersions
+): boolean {
+  return (
+    canApplyServerSnapshot(workflowId, versions, false) &&
+    (useOperationQueueStore.getState().remoteApplyVersions[workflowId] ?? 0) ===
+      versions.remoteApply
+  )
+}
+
+/** No ACK or local version counter can substitute for a server revision. */
+export function getAttestedDraftRevision(workflowId: string): number | null {
+  const state = useWorkflowStore.getState()
+  const attestation = state.draftRevisionAttestation
+  return attestation &&
+    state.currentWorkflowId === workflowId &&
+    attestation.workflowId === workflowId &&
+    canApplyDraftSnapshot(workflowId, attestation.versions)
+    ? attestation.revision
+    : null
+}
+
+/** Synchronous final guard: never recapture versions to justify an older raw payload. */
+export function applyRawDraftSnapshot(
+  workflowId: string,
+  state: WorkflowState,
+  revision: unknown,
+  versions: DraftSyncVersions
+): boolean {
+  if (
+    !Object.hasOwn(state, 'variables') ||
+    typeof revision !== 'number' ||
+    !Number.isSafeInteger(revision) ||
+    revision < 0 ||
+    !canApplyDraftSnapshot(workflowId, versions)
+  )
+    return false
+  applyWorkflowStateToStores(
+    workflowId,
+    { ...state, currentWorkflowId: workflowId },
+    {
+      draftRevisionAttestation: { workflowId, revision, versions },
+    }
+  )
+  return true
+}
+
+/** Join payload ownership is captured before HTTP can yield to newer local/remote work. */
+export async function syncSocketDraftFromSnapshot(snapshot: {
+  id: string
+  draftRevision: unknown
+  state: WorkflowState
+  variables?: WorkflowState['variables'] | null
+}): Promise<boolean> {
+  const workflowId = snapshot.id
+  const revision = Object.hasOwn(snapshot, 'variables') ? snapshot.draftRevision : undefined
+  const versions = captureDraftVersions(workflowId)
+  const rawState = {
+    ...structuredClone(snapshot.state),
+    ...(Object.hasOwn(snapshot, 'variables')
+      ? { variables: structuredClone(snapshot.variables ?? {}) }
+      : {}),
+  }
+  try {
+    return await syncLocalDraftFromServer(workflowId)
+  } catch (error) {
+    // Degraded path only: the primary HTTP path applies app block migrations.
+    logger.warn('Join-state HTTP sync failed; checking raw fallback', { workflowId, error })
+    return applyRawDraftSnapshot(workflowId, rawState, revision, versions)
+  }
+}
+
 /**
  * Reconciles the local Zustand stores with the server's current draft by
  * fetching migrated state over HTTP and applying it — used after deploys and
@@ -112,6 +184,7 @@ export async function syncLocalDraftFromServer(workflowId: string): Promise<bool
   if (useOperationQueueStore.getState().hasPendingOperations(workflowId)) return false
   const versionsAtStart = captureDraftVersions(workflowId)
 
+  let snapshotVersions = versionsAtStart
   let envelope: Awaited<ReturnType<typeof fetchWorkflowEnvelope>> | undefined
   for (let attempt = 1; ; attempt++) {
     const remoteApplyVersionAtStart =
@@ -130,20 +203,28 @@ export async function syncLocalDraftFromServer(workflowId: string): Promise<bool
     const remoteOpAppliedDuringFetch =
       (useOperationQueueStore.getState().remoteApplyVersions[workflowId] ?? 0) !==
       remoteApplyVersionAtStart
-    if (!remoteOpAppliedDuringFetch) break
+    if (!remoteOpAppliedDuringFetch) {
+      snapshotVersions = { ...versionsAtStart, remoteApply: remoteApplyVersionAtStart }
+      break
+    }
 
     if (attempt >= MAX_SYNC_FETCH_ATTEMPTS) {
-      logger.info('Applying latest draft snapshot despite concurrent remote ops', {
+      logger.info('Keeping current draft after concurrent remote ops exhausted snapshot retries', {
         workflowId,
         attempts: attempt,
       })
-      break
+      return false
     }
     await sleep(SYNC_RETRY_DELAY_MS)
   }
 
   const wireState = envelope?.state
-  if (!envelope || !wireState) {
+  if (
+    !envelope ||
+    !wireState ||
+    !Number.isSafeInteger(envelope.draftRevision) ||
+    envelope.draftRevision < 0
+  ) {
     throw new Error('No workflow state was returned while syncing the local draft')
   }
 
@@ -154,6 +235,21 @@ export async function syncLocalDraftFromServer(workflowId: string): Promise<bool
     : { ...wireState }
   // double-cast-allowed: workflowStateSchema is a wire supertype; normalized workflow state is persisted in store-compatible shape
   const workflowState = draftState as unknown as WorkflowState
-  applyWorkflowStateToStores(workflowId, workflowState, { updateLastSaved: true })
+  applyWorkflowStateToStores(
+    workflowId,
+    { ...workflowState, currentWorkflowId: workflowId },
+    {
+      updateLastSaved: true,
+      ...(Object.hasOwn(envelope, 'variables')
+        ? {
+            draftRevisionAttestation: {
+              workflowId,
+              revision: envelope.draftRevision,
+              versions: snapshotVersions,
+            },
+          }
+        : {}),
+    }
+  )
   return true
 }

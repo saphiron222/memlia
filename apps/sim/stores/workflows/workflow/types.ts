@@ -1,3 +1,4 @@
+// Modified by Memlia: bind draft revision attestations to applied client snapshots.
 import type {
   BlockData,
   BlockLayoutState,
@@ -40,7 +41,25 @@ export type {
 }
 export { SUBFLOW_TYPES } from '@sim/workflow-types/workflow'
 
+export interface DraftSyncVersions {
+  localOperation: number
+  remoteApply: number
+  remoteUpdate: number
+}
+
+export interface DraftRevisionAttestation {
+  workflowId: string
+  revision: number
+  versions: DraftSyncVersions
+}
+
+export interface ReplaceWorkflowStateOptions {
+  updateLastSaved?: boolean
+  draftRevisionAttestation?: DraftRevisionAttestation
+}
+
 export interface WorkflowActions {
+  invalidateDraftRevisionAttestation: () => void
   updateNodeDimensions: (id: string, dimensions: { width: number; height: number }) => void
   batchUpdateBlocksWithParent: (
     updates: Array<{
@@ -106,11 +125,14 @@ export interface WorkflowActions {
   getWorkflowState: () => WorkflowState
   replaceWorkflowState: (
     workflowState: WorkflowState,
-    options?: { updateLastSaved?: boolean }
+    options?: ReplaceWorkflowStateOptions
   ) => void
   setBlockLocked: (id: string, locked: boolean) => void
   batchToggleLocked: (ids: string[]) => void
   setCurrentWorkflowId: (workflowId: string | null) => void
 }
 
-export type WorkflowStore = WorkflowState & WorkflowActions
+export type WorkflowStore = WorkflowState &
+  WorkflowActions & {
+    draftRevisionAttestation: DraftRevisionAttestation | null
+  }

@@ -1,3 +1,4 @@
+// Modified by Memlia: bind draft revision attestations to applied client snapshots.
 import { createLogger } from '@sim/logger'
 import { generateId } from '@sim/utils/id'
 import {
@@ -31,6 +32,7 @@ import {
 } from '@/stores/workflows/utils'
 import type {
   Position,
+  ReplaceWorkflowStateOptions,
   SubBlockState,
   WorkflowState,
   WorkflowStore,
@@ -42,6 +44,7 @@ const logger = createLogger('WorkflowStore')
 
 const initialState = {
   currentWorkflowId: null,
+  draftRevisionAttestation: null,
   blocks: {},
   edges: [],
   loops: {},
@@ -55,8 +58,14 @@ export const useWorkflowStore = create<WorkflowStore>()(
       ...initialState,
 
       setCurrentWorkflowId: (currentWorkflowId) => {
-        set({ currentWorkflowId })
+        set((state) => ({
+          currentWorkflowId,
+          draftRevisionAttestation:
+            currentWorkflowId === state.currentWorkflowId ? state.draftRevisionAttestation : null,
+        }))
       },
+
+      invalidateDraftRevisionAttestation: () => set({ draftRevisionAttestation: null }),
 
       updateNodeDimensions: (id: string, dimensions: { width: number; height: number }) => {
         set((state) => {
@@ -454,6 +463,7 @@ export const useWorkflowStore = create<WorkflowStore>()(
       clear: () => {
         const newState = {
           currentWorkflowId: get().currentWorkflowId,
+          draftRevisionAttestation: null,
           blocks: {},
           edges: [],
           loops: {},
@@ -481,7 +491,7 @@ export const useWorkflowStore = create<WorkflowStore>()(
       },
       replaceWorkflowState: (
         workflowState: WorkflowState,
-        options?: { updateLastSaved?: boolean }
+        options?: ReplaceWorkflowStateOptions
       ) => {
         set((state) => {
           const normalization = normalizeWorkflowState(workflowState)
@@ -505,12 +515,35 @@ export const useWorkflowStore = create<WorkflowStore>()(
               ? nextState.parallels
               : generateParallelBlocks(nextBlocks)
 
+          const currentWorkflowId =
+            nextState.currentWorkflowId !== undefined
+              ? nextState.currentWorkflowId
+              : state.currentWorkflowId
+          const supplied = options?.draftRevisionAttestation
+          const validCounter = (value: number) => Number.isSafeInteger(value) && value >= 0
+          const draftRevisionAttestation =
+            supplied &&
+            supplied.workflowId === currentWorkflowId &&
+            validCounter(supplied.revision) &&
+            validCounter(supplied.versions.localOperation) &&
+            validCounter(supplied.versions.remoteApply) &&
+            validCounter(supplied.versions.remoteUpdate) &&
+            normalization.warnings.length === 0
+              ? {
+                  workflowId: supplied.workflowId,
+                  revision: supplied.revision,
+                  versions: {
+                    localOperation: supplied.versions.localOperation,
+                    remoteApply: supplied.versions.remoteApply,
+                    remoteUpdate: supplied.versions.remoteUpdate,
+                  },
+                }
+              : null
+
           return {
             ...state,
-            currentWorkflowId:
-              nextState.currentWorkflowId !== undefined
-                ? nextState.currentWorkflowId
-                : state.currentWorkflowId,
+            currentWorkflowId,
+            draftRevisionAttestation,
             blocks: nextBlocks,
             edges: nextEdges,
             loops: nextLoops,

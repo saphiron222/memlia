@@ -20,7 +20,8 @@ export const Timestamp = z.iso.datetime({ precision: 3 }).regex(/^(?!0000)[0-9TZ
 export const CalendarDate = z.iso.date().regex(/^(?!0000)[0-9-]+(?![\s\S])/)
 
 export const Revision = z.int().min(0).max(Number.MAX_SAFE_INTEGER)
-export const Scope = { organizationId: Id, workspaceId: Id }
+// Explicit null means no organization, never an unrestricted scope.
+export const Scope = { organizationId: Id.nullable(), workspaceId: Id }
 export const ArtifactRef = z.strictObject({ artifactId: Id, sha256: Digest })
 export const Lifetime = { issuedAt: Timestamp, expiresAt: Timestamp }
 export const StringList = z.array(Label).max(256)

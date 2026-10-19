@@ -1,3 +1,4 @@
+// Modified by Memlia: bind draft revision attestations to applied client snapshots.
 'use client'
 
 import {
@@ -54,6 +55,7 @@ import type {
 import { usePresenceStore } from '@/stores/presence/store'
 import type { PresenceUser } from '@/stores/presence/types'
 import { useWorkflowRegistry as useWorkflowRegistryStore } from '@/stores/workflows/registry/store'
+import { syncSocketDraftFromSnapshot } from '@/stores/workflows/sync-local-draft'
 
 const logger = createLogger('SocketContext')
 
@@ -768,84 +770,6 @@ export function SocketProvider({ children, user }: SocketProviderProps) {
           eventHandlers.current.workflowDeployed?.(data)
         })
 
-        /**
-         * DEGRADED-PATH fallback: replaces the workflow + subblock stores with
-         * the raw state pushed by the realtime server. The primary join path is
-         * `syncLocalDraftFromServer`, which fetches MIGRATED state over HTTP —
-         * the realtime server loads state raw, without the app's block
-         * migrations (credential remaps, subblock-id renames, canonicalModes
-         * backfill), because those need the block registry that apps/realtime
-         * cannot import. Applying raw state is acceptable only as a fallback
-         * when the HTTP fetch fails: load-time migrations persist their result
-         * back to the normalized tables (persistMigratedBlocks), so raw state
-         * converges with migrated state after the first migrated load. If that
-         * persistence ever fails repeatedly, raw state diverges from the
-         * migrated deployed snapshot and change detection reports phantom
-         * diffs that survive redeploys (see the exact text-precision
-         * updated_at guard in persistMigratedBlocks).
-         */
-        const applyRawJoinStateFallback = async (workflowId: string, workflowState: any) => {
-          const [
-            { useOperationQueueStore },
-            { useWorkflowRegistry },
-            { useWorkflowStore },
-            { useSubBlockStore },
-            { useWorkflowDiffStore },
-          ] = await Promise.all([
-            import('@/stores/operation-queue/store'),
-            import('@/stores/workflows/registry/store'),
-            import('@/stores/workflows/workflow/store'),
-            import('@/stores/workflows/subblock/store'),
-            import('@/stores/workflow-diff/store'),
-          ])
-
-          const { activeWorkflowId } = useWorkflowRegistry.getState()
-          if (activeWorkflowId !== workflowId) {
-            logger.info(`Skipping rehydration - workflow ${workflowId} is not active`)
-            return false
-          }
-
-          const hasPending = useOperationQueueStore
-            .getState()
-            .operations.some((op: any) => op.workflowId === workflowId && op.status !== 'confirmed')
-          if (hasPending) {
-            logger.info('Skipping rehydration due to pending operations in queue')
-            return false
-          }
-
-          if (useWorkflowDiffStore.getState().hasActiveDiff) {
-            logger.info('Skipping rehydration - an active diff is in progress')
-            return false
-          }
-
-          const subblockValues: Record<string, Record<string, any>> = {}
-          Object.entries(workflowState.blocks || {}).forEach(([blockId, block]) => {
-            const blockState = block as any
-            subblockValues[blockId] = {}
-            Object.entries(blockState.subBlocks || {}).forEach(([subblockId, subblock]) => {
-              subblockValues[blockId][subblockId] = (subblock as any).value
-            })
-          })
-
-          useWorkflowStore.getState().replaceWorkflowState({
-            blocks: workflowState.blocks || {},
-            edges: workflowState.edges || [],
-            loops: workflowState.loops || {},
-            parallels: workflowState.parallels || {},
-            lastSaved: workflowState.lastSaved || Date.now(),
-          })
-
-          useSubBlockStore.setState((state: any) => ({
-            workflowValues: {
-              ...state.workflowValues,
-              [workflowId]: subblockValues,
-            },
-          }))
-
-          logger.info('Successfully rehydrated workflow stores')
-          return true
-        }
-
         socketInstance.on('operation-confirmed', (data: OperationConfirmedBroadcast) => {
           logger.debug('Operation confirmed', { operationId: data.operationId })
           eventHandlers.current.operationConfirmed?.(data)
@@ -943,40 +867,16 @@ export function SocketProvider({ children, user }: SocketProviderProps) {
           }
 
           if (workflowData?.state) {
-            const { canApplyDraftSnapshot, captureDraftVersions, syncLocalDraftFromServer } =
-              await import('@/stores/workflows/sync-local-draft')
-            const versionsAtJoin = captureDraftVersions(workflowData.id)
-
             try {
-              const synced = await syncLocalDraftFromServer(workflowData.id)
+              // The helper owns identity, revision, raw graph and vectors before its first await.
+              const synced = await syncSocketDraftFromSnapshot(workflowData)
               if (!synced) {
                 logger.info('Join-state sync skipped; keeping local state', {
                   workflowId: workflowData.id,
                 })
               }
             } catch (error) {
-              logger.warn('Join-state sync failed; falling back to raw socket state', { error })
-
-              /**
-               * The raw payload was captured at join time. Anything applied to
-               * the stores while the HTTP sync was failing — local edits,
-               * remote broadcasts, or an external full reload
-               * (workflow-updated / revert) — is newer than the payload, so
-               * applying it would regress those changes. The shared snapshot
-               * guard covers all of those sources.
-               */
-              if (!canApplyDraftSnapshot(workflowData.id, versionsAtJoin)) {
-                logger.info('Skipping raw join-state fallback; stores changed since join', {
-                  workflowId: workflowData.id,
-                })
-                return
-              }
-
-              try {
-                await applyRawJoinStateFallback(workflowData.id, workflowData.state)
-              } catch (rehydrateError) {
-                logger.error('Error rehydrating workflow state:', rehydrateError)
-              }
+              logger.error('Error synchronizing workflow join state:', { error })
             }
           }
         })

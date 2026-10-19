@@ -1,3 +1,4 @@
+// Modified by Memlia: invalidate draft attestations before identity reset.
 'use client'
 
 import { getQueryClient } from '@/app/_shell/providers/get-query-client'
@@ -17,6 +18,7 @@ import { useSubBlockStore } from '@/stores/workflows/subblock/store'
 import { useWorkflowStore } from '@/stores/workflows/workflow/store'
 
 export async function resetAllStores(): Promise<void> {
+  useWorkflowStore.getState().invalidateDraftRevisionAttestation()
   useOperationQueueStore.getState().reset()
   resetRegisteredUserData()
   await waitForConsoleHydration()

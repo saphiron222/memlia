@@ -1,3 +1,4 @@
+// Modified by Memlia: bind draft revision attestations to applied client snapshots.
 import { createLogger } from '@sim/logger'
 import type { Edge } from '@xyflow/react'
 import { ApiClientError } from '@/lib/api/client/errors'
@@ -13,7 +14,7 @@ import { useWorkflowRegistry } from '../workflows/registry/store'
 import { useSubBlockStore } from '../workflows/subblock/store'
 import { mergeSubblockState } from '../workflows/utils'
 import { useWorkflowStore } from '../workflows/workflow/store'
-import type { WorkflowState } from '../workflows/workflow/types'
+import type { ReplaceWorkflowStateOptions, WorkflowState } from '../workflows/workflow/types'
 import type { WorkflowDiffState } from './types'
 
 const logger = createLogger('WorkflowDiffStore')
@@ -45,7 +46,7 @@ export function extractSubBlockValues(
 export function applyWorkflowStateToStores(
   workflowId: string,
   workflowState: WorkflowState,
-  options?: { updateLastSaved?: boolean }
+  options?: ReplaceWorkflowStateOptions
 ) {
   logger.debug('[applyWorkflowStateToStores] Applying state', {
     workflowId,
@@ -53,17 +54,38 @@ export function applyWorkflowStateToStores(
     edgeCount: workflowState.edges?.length ?? 0,
     edgePreview: workflowState.edges?.slice(0, 3).map((e) => `${e.source} -> ${e.target}`),
   })
+  const supplied = options?.draftRevisionAttestation
+  const ownedOptions = {
+    ...options,
+    ...(supplied
+      ? {
+          draftRevisionAttestation: {
+            workflowId: supplied.workflowId,
+            revision: supplied.revision,
+            versions: {
+              localOperation: supplied.versions.localOperation,
+              remoteApply: supplied.versions.remoteApply,
+              remoteUpdate: supplied.versions.remoteUpdate,
+            },
+          },
+        }
+      : {}),
+  }
   const workflowStore = useWorkflowStore.getState()
   const cloned = cloneWorkflowState(workflowState)
   logger.debug('[applyWorkflowStateToStores] Cloned state edges', {
     clonedEdgeCount: cloned.edges?.length ?? 0,
   })
-  workflowStore.replaceWorkflowState(cloned, options)
-  const subBlockValues = extractSubBlockValues(workflowState)
+  const subBlockValues = extractSubBlockValues(cloned)
+  const hasVariables = Object.hasOwn(workflowState, 'variables')
+  const variables = hasVariables ? structuredClone(workflowState.variables) : undefined
+  workflowStore.invalidateDraftRevisionAttestation()
   useSubBlockStore.getState().setWorkflowValues(workflowId, subBlockValues)
-  if (Object.hasOwn(workflowState, 'variables')) {
-    applyWorkflowVariablesToStore(workflowId, workflowState.variables)
+  if (hasVariables) {
+    applyWorkflowVariablesToStore(workflowId, variables)
   }
+  // Publish the graph and its attestation only after all dependent values succeeded.
+  workflowStore.replaceWorkflowState(cloned, ownedOptions)
 
   // Verify what's in the store after apply
   const afterState = workflowStore.getWorkflowState()

@@ -1,9 +1,8 @@
 # Contrats Memlia
 
-Contrats versionnés entre l’application/worker Sim, l’agent Windows et
+Contrats privés et versionnés entre l’application/worker Sim, l’agent Windows et
 le runtime Excel Python. Les ajouts Memlia restent provisoirement tous droits
-réservés. La publication de développement est autorisée par le propriétaire ; aucune
-licence libre ni permission de réutilisation n’est attribuée par cette visibilité.
+réservés. Ce package n’autorise aucune publication.
 
 ## Source canonique unique
 
@@ -43,6 +42,14 @@ Python est `validate`, sans seconde hiérarchie de modèles.
   procédure et de la révision de l’état. Une version inconnue est refusée.
 - Les identifiants ASCII sont opaques : jamais des chemins, URL ou secrets.
   Le service autorisé résout un binding sans concaténer son identifiant à un chemin.
+- Le scope exige toujours `organizationId` et `workspaceId`. `organizationId`
+  accepte un identifiant ou explicitement `null`, qui signifie l’absence effective
+  d’organisation du workspace, jamais un joker ni une portée globale. `workspaceId`
+  reste un identifiant obligatoire non nul ; absence, chaîne vide et identifiant
+  invalide sont refusés pour les deux champs. Aucune organisation n’est déduite
+  ni remplacée par défaut. Le serveur doit résoudre le workspace canonique,
+  comparer son organisation (y compris `null`) et vérifier les droits du principal
+  authentifié ; ce contrôle de forme ne crée aucune autorité.
 - Les horodatages suivent ISO 8601 en UTC, avec trois décimales et suffixe `Z`.
   Les dates de cellules sont `AAAA-MM-JJ`. Le calendrier grégorien commun va de
   l’année 0001 à 9999 ; année zéro, dates impossibles et suffixes sont refusés.
@@ -83,6 +90,16 @@ intégration. Les consommateurs stricts refusent aussi les champs ajoutés : tou
 forme ou signification incompatible demande une nouvelle version du protocole.
 `0.1.0` est un candidat non gelé, sans client intégré ni qualification commerciale
 implicite. Les ajustements issus de revue appartiennent encore à ce candidat.
+
+L’admission explicite de `organizationId: null` élargit le candidat de scope,
+également dans `JobEnvelope.authority`. Les messages contenant un identifiant
+valide restent admis. Les anciens validateurs qui exigeaient une chaîne
+refuseront les nouveaux messages personnels ; tout consommateur et toute
+hypothèse TypeScript exigeant une chaîne doivent donc être adaptés et vérifiés
+avant leur émission. Les exports Python doivent être régénérés avec cette
+source. Aucun fallback ni négociation automatique n’est ajouté ; cette évolution
+ne qualifie pas l’intégration des anciens consommateurs ni l’autorisation d’un
+job personnel.
 
 ## Réutilisation et obligations d’admission
 
@@ -148,12 +165,14 @@ dans un environnement isolé :
 ```sh
 bun run generate
 bun run check:generated
-PYTHON=/chemin/venv/bin/python bun test
+PYTHON=/chemin/venv/bin/python bun run test
 bun run type-check
 bun scripts/verify-source.ts /chemin/checkout-sim-autorise
 ```
 
 `verify-source` contrôle le SHA sans charger du code depuis le chemin fourni.
+Le délai de test de 30 secondes couvre le corpus interopérable complet, dont
+chaque cas est validé par Python à partir du schéma généré.
 Le corpus comprend le refus d’un mauvais SHA et une divergence Python injectée :
 le consommateur altéré refuse un binding personnel valide et le contrôle d’export
 termine avec code 1. Un export surnuméraire est également refusé par le gate,

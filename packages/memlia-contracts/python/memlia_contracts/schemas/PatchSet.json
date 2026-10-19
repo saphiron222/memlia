@@ -9,8 +9,15 @@
           "const": "memlia.patch-set/v1"
         },
         "organizationId": {
-          "type": "string",
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "workspaceId": {
           "type": "string",
@@ -936,8 +943,15 @@
           "const": "memlia.patch-set/v1"
         },
         "organizationId": {
-          "type": "string",
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "workspaceId": {
           "type": "string",
