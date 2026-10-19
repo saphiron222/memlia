@@ -158,7 +158,13 @@ def mac_snapshot(pid):
                 # A short-lived worker may have exited between ps and vmmap.
                 remaining = read(['/bin/ps', '-axo', 'pid='], 'process_recheck').split()
                 if str(member) in remaining:
-                    raise
+                    # ps still lists unreaped terminal processes. Confirm native
+                    # liveness; never retry vmmap or accept an unknown/live state.
+                    with _monitoring_stage('process_recheck'):
+                        current = native_identity(member)
+                        terminal = current is None or current['status'] == 5
+                    if not terminal:
+                        raise
     return {'footprintBytes': total, 'processCount': count,
             'swapBytes': int(swap_mb * 1024**2), 'pressureLevel': pressure,
             'freePercent': free, 'processes': identities}

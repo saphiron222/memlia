@@ -325,8 +325,12 @@ class MonitoringDiagnosticsTests(unittest.TestCase):
                     else:
                         self.fail('unexpected native command')
                     return subprocess.CompletedProcess(command, 0, stdout=value)
+                identity_calls = 0
                 def identity(pid):
-                    if failed_stage in ('process_identity', 'process_recheck'): raise RuntimeError(marker)
+                    nonlocal identity_calls
+                    identity_calls += 1
+                    if failed_stage == 'process_recheck' or (failed_stage == 'process_identity' and identity_calls == 1):
+                        raise RuntimeError(marker)
                     return {'pid':321,'uid':os.getuid()+(1 if failed_stage=='process_ownership' else 0),
                             'seconds':1,'microseconds':2,'status':2}
                 report=Path(tmp)/'report.json'
@@ -389,6 +393,159 @@ class MonitoringDiagnosticsTests(unittest.TestCase):
                 self.assertEqual({'stage':stage,'class':failure_class},receipt['monitoringFailure'])
                 self.assertNotIn('FictitiousPrivateExceptionName',report.read_text())
                 self.assertNotIn('fictitious-private-value',report.read_text())
+
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'native macOS terminal-process race')
+    def test_worker_exiting_between_identity_and_vmmap_is_not_live_missing_monitoring(self):
+        import os
+        import select
+        from unittest.mock import patch
+        # Only this owned process is released. Keep it unreaped until after the
+        # real vmmap, so a real terminal PID remains visible to ps/libproc.
+        child = subprocess.Popen([sys.executable, '-c',
+            "import sys;print('ready',flush=True);sys.stdin.buffer.read(1)"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, start_new_session=True)
+        native_identity = guard.native_identity
+        native_run = guard.subprocess.run
+        transitioned = False
+        vmmap_exits = []
+        try:
+            self.assertTrue(select.select([child.stdout], [], [], 3)[0])
+            self.assertEqual(b'ready\n', child.stdout.readline())
+            def identity(pid):
+                nonlocal transitioned
+                observed = native_identity(pid)
+                if pid == child.pid and not transitioned:
+                    self.assertIsNotNone(observed)
+                    self.assertNotEqual(5, observed['status'])
+                    child.stdin.write(b'x'); child.stdin.flush(); child.stdin.close()
+                    deadline = time.monotonic() + 3
+                    while time.monotonic() < deadline:
+                        terminal = native_identity(pid)
+                        if terminal is None or terminal['status'] == 5:
+                            break
+                        time.sleep(.01)
+                    self.assertTrue(terminal is None or terminal['status'] == 5, 'owned fixture must reach terminal state')
+                    state = native_run(['/bin/ps', '-p', str(pid), '-o', 'stat='],
+                                       capture_output=True, text=True, timeout=3)
+                    self.assertTrue(state.stdout.strip().startswith('Z'),
+                                    'owned fixture must remain an unreaped zombie in ps')
+                    transitioned = True
+                return observed
+            def run(command, **kwargs):
+                try:
+                    result = native_run(command, **kwargs)
+                except subprocess.CalledProcessError as error:
+                    if command == ['/usr/bin/vmmap', '-summary', str(child.pid)]:
+                        vmmap_exits.append(error.returncode)
+                    raise
+                if command == ['/usr/bin/vmmap', '-summary', str(child.pid)]:
+                    vmmap_exits.append(result.returncode)
+                return result
+            with patch.object(guard, 'native_identity', side_effect=identity), patch.object(
+                    guard.subprocess, 'run', side_effect=run):
+                try:
+                    sample = guard.mac_snapshot(child.pid)
+                except guard._MonitoringFailure as error:
+                    self.fail('terminal owned fixture was refused at ' +
+                              repr(guard._monitoring_diagnostic(error)) +
+                              '; real vmmap exit codes=' + repr(vmmap_exits))
+            self.assertTrue(transitioned)
+            self.assertEqual(1, len(vmmap_exits))
+            self.assertNotEqual(0, vmmap_exits[0])
+            self.assertEqual(0, sample['processCount'])
+            self.assertEqual(0, sample['footprintBytes'])
+            self.assertEqual([], sample['processes'])
+        finally:
+            # No PID scan or global kill. This Popen is the only child owned here.
+            if child.stdin and not child.stdin.closed:
+                child.stdin.close()
+            if child.poll() is None:
+                child.terminate()
+            child.wait(timeout=5)
+            child.stdout.close()
+
+    def test_footprint_failure_is_ignored_only_after_a_terminal_native_recheck(self):
+        import os
+        from unittest.mock import patch
+        original = {'pid':321,'uid':os.getuid(),'seconds':1,'microseconds':2,'status':2}
+        cases = (
+            ('gone', None, None), ('zombie', {**original,'status':5}, None),
+            ('live', original, {'stage':'process_footprint','class':'command_exit'}),
+            ('reused_live', {**original,'seconds':9}, {'stage':'process_footprint','class':'command_exit'}),
+            ('unknown_state', {**original,'status':None}, {'stage':'process_footprint','class':'command_exit'}),
+            ('malformed_state', {}, {'stage':'process_recheck','class':'format'}),
+            ('unavailable', OSError('fictitious-private-recheck'), {'stage':'process_recheck','class':'os_error'}),
+            ('unavailable_native_result', RuntimeError('fictitious-private-recheck'), {'stage':'process_recheck','class':'unexpected'}),
+        )
+        for scenario, current, expected in cases:
+            with self.subTest(scenario=scenario):
+                identity_calls = 0
+                vmmap_calls = 0
+                def identity(pid):
+                    nonlocal identity_calls
+                    identity_calls += 1
+                    if identity_calls == 1: return original
+                    if isinstance(current, Exception): raise current
+                    return current
+                def read(command, **kwargs):
+                    nonlocal vmmap_calls
+                    if command[0]=='/usr/sbin/sysctl': value='pressure_level: 1\nused = 0.00M'
+                    elif command[0]=='/usr/bin/memory_pressure': value='free percentage: 70%'
+                    elif command==['/bin/ps','-axo','pid=,ppid=,pgid=']: value='321 0 321'
+                    elif command==['/bin/ps','-axo','pid=']: value='321'
+                    elif command==['/usr/bin/vmmap','-summary','321']:
+                        vmmap_calls += 1
+                        raise subprocess.CalledProcessError(255, command, stderr='fictitious-private-vmmap')
+                    else: self.fail('unexpected native command')
+                    return subprocess.CompletedProcess(command,0,stdout=value)
+                with patch.object(guard.sys,'platform','darwin'), patch.object(
+                        guard,'native_identity',side_effect=identity), patch.object(
+                        guard.subprocess,'run',side_effect=read):
+                    if expected is None:
+                        sample=guard.mac_snapshot(321)
+                        self.assertEqual(0,sample['processCount'])
+                        self.assertEqual([],sample['processes'])
+                    else:
+                        with self.assertRaises(guard._MonitoringFailure) as failure:
+                            guard.mac_snapshot(321)
+                        self.assertEqual(expected,guard._monitoring_diagnostic(failure.exception))
+                self.assertEqual(1,vmmap_calls, 'failed footprint must never be retried')
+                self.assertEqual(2,identity_calls)
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'native macOS live-process recheck')
+    def test_injected_vmmap_failure_on_real_live_owned_child_remains_refused(self):
+        import select
+        from unittest.mock import patch
+        child=subprocess.Popen([sys.executable,'-c',
+            "import sys;print('ready',flush=True);sys.stdin.buffer.read(1)"],
+            stdin=subprocess.PIPE,stdout=subprocess.PIPE,start_new_session=True)
+        run=guard.subprocess.run
+        failures=0
+        def failing_vmmap(command,**kwargs):
+            nonlocal failures
+            if command==['/usr/bin/vmmap','-summary',str(child.pid)]:
+                failures+=1
+                raise subprocess.CalledProcessError(255,command,stderr='fictitious-private-failure')
+            return run(command,**kwargs)
+        try:
+            self.assertTrue(select.select([child.stdout],[],[],3)[0])
+            self.assertEqual(b'ready\n',child.stdout.readline())
+            with patch.object(guard.subprocess,'run',side_effect=failing_vmmap):
+                with self.assertRaises(guard._MonitoringFailure) as failure:
+                    guard.mac_snapshot(child.pid)
+            self.assertEqual({'stage':'process_footprint','class':'command_exit'},
+                             guard._monitoring_diagnostic(failure.exception))
+            self.assertEqual(1,failures)
+            self.assertIsNone(child.poll())
+            current=guard.native_identity(child.pid)
+            self.assertIsNotNone(current)
+            self.assertNotEqual(5,current['status'])
+        finally:
+            if child.stdin and not child.stdin.closed: child.stdin.close()
+            if child.poll() is None: child.terminate()
+            child.wait(timeout=5)
+            child.stdout.close()
 
     def test_diagnostic_boundary_keeps_closed_strings_for_forged_and_subclass_errors(self):
         Unknown=type('FictitiousPrivateExceptionName',(guard._MonitoringFailure,),{})
