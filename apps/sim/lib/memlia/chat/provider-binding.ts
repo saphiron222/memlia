@@ -82,9 +82,10 @@ export function runCatalogProvider(options: CatalogProviderOptions) {
     const native = jsonInput(workflowReadInputs.read_workflow)
     const input =
       workflow.policy === 'summary_only'
-        ? (native.anyOf ?? native.oneOf)?.find(
-            (branch) => branch.properties?.view?.const === 'summary'
-          )
+        ? (native.anyOf ?? native.oneOf)?.find((branch) => {
+            const view = branch.properties?.view
+            return typeof view === 'object' && view !== null && view.const === 'summary'
+          })
         : native
     if (!input) throw new Error('Unsupported workflow read schema.')
     // Native Anthropic drops root unions; a property preserves the original schema.

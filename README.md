@@ -16,7 +16,7 @@ Quatre mesures de compilation sur le runner Linux public standard de 16 Go ont �
 
 Le runner de 16 Go n'est donc pas qualifié pour ce build complet. Une machine de 24–32 Go reste une hypothèse de prochain essai, pas un minimum mesuré ni une recommandation de dimensionnement du serveur d'un cabinet. Aucun runner payant n'est activé. Le garde mémoire macOS de développement demeure dans [scripts/dev](scripts/dev/README.md).
 
-Le contrôle Linux du snapshot précédent a terminé TypeScript sans OOM en 48,532 secondes, avec huit diagnostics localisés dans trois fichiers. Les correctifs ciblés et les nouvelles tranches revues sont présents dans ces sources ; leur validation globale reste à exécuter. Les régressions ciblées ont été rejouées avant intégration, sans API IA ou Microsoft réelle.
+Le [contrôle Linux de la révision précédente](https://github.com/saphiron222/memlia/actions/runs/39237426953) a terminé TypeScript sans OOM en 43,001 secondes : les huit diagnostics antérieurs sont absents, et un diagnostic de type JSON Schema restait dans le raccordement Chat. Cette révision corrige uniquement cette sélection de schéma ; 67 tests et une compilation isolée ont été rejoués par deux intervenants. L'analyse globale Linux de ce nouveau snapshot reste à exécuter. Aucune API IA ou Microsoft réelle n'a été appelée. Les nouvelles tranches de développement locales ne sont pas incluses dans ce témoin de mesure.
 
 Un [contrôle Linux distinct](scripts/ci/README.linux-validation.md) permet de vérifier les types et bundles natifs sans lancer Next build. Sa réussite ne satisfait pas le check `build` obligatoire et ne produit pas de standalone qualifié. Aucun artefact de production, journal brut, cache ou dépendance n'est publié par ces workflows.
 
