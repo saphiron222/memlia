@@ -61,7 +61,7 @@ import hashlib,json,os,platform,shutil,subprocess,sys
 from pathlib import Path
 mem = {k:int(v.split()[0])*1024 for k,v in (x.split(':',1) for x in Path('/proc/meminfo').read_text().splitlines())}
 root=Path(sys.argv[2]); disk=shutil.disk_usage(root)
-receipt={'sourceCommit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),'lockSha256':hashlib.sha256((root/'bun.lock').read_bytes()).hexdigest(),'architecture':platform.machine(),'kernel':platform.release(),'cpuCount':os.cpu_count(),'hostMemTotalBytes':mem['MemTotal'],'hostMemAvailableBytes':mem['MemAvailable'],'hostSwapTotalBytes':mem['SwapTotal'],'hostSwapUsedBytes':mem['SwapTotal']-mem['SwapFree'],'diskFreeBytes':disk.free,'buildCgroupLimitBytes':13*1024**3,'databaseLimitBytes':512*1024**2,'v8OldSpaceMiB':10240,'nextWorkers':2,'runnerImageOS':os.environ.get('ImageOS'),'runnerImageVersion':os.environ.get('ImageVersion')}
+receipt={'sourceCommit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),'lockSha256':hashlib.sha256((root/'bun.lock').read_bytes()).hexdigest(),'architecture':platform.machine(),'kernel':platform.release(),'cpuCount':os.cpu_count(),'hostMemTotalBytes':mem['MemTotal'],'hostMemAvailableBytes':mem['MemAvailable'],'hostSwapTotalBytes':mem['SwapTotal'],'hostSwapUsedBytes':mem['SwapTotal']-mem['SwapFree'],'diskFreeBytes':disk.free,'buildCgroupLimitBytes':13*1024**3,'databaseLimitBytes':512*1024**2,'v8OldSpaceMiB':10240,'bundler':'turbopack','nextWorkers':2,'runnerImageOS':os.environ.get('ImageOS'),'runnerImageVersion':os.environ.get('ImageVersion')}
 Path(sys.argv[1]).write_text(json.dumps(receipt,indent=2)+'\n')
 assert platform.machine()=='x86_64'
 assert mem['MemTotal']>=14*1024**3 and mem['MemAvailable']>=13*1024**3
@@ -150,8 +150,8 @@ phase typegen /work/apps/sim node ../../node_modules/next/dist/bin/next typegen 
 phase typecheck /work/apps/sim node ../../node_modules/typescript/bin/tsc --noEmit --singleThreaded
 phase cli /work/apps/sim bun run build:cli-runtime
 phase sandbox /work/apps/sim bun run build:sandbox-bundles
-# Avoid native package.json build overriding the controlled heap or running Turbo.
-phase next /work/apps/sim node ../../node_modules/next/dist/bin/next build --webpack
+# Preserve the controlled heap; use Sim's installed native Turbopack build engine.
+phase next /work/apps/sim node ../../node_modules/next/dist/bin/next build --turbopack
 phase standalone /work/apps/sim python3 -c '
 from pathlib import Path
 import json
