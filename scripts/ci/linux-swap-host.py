@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import signal
 import stat
 import subprocess
@@ -20,45 +21,124 @@ ZRAM_PHYSICAL_BYTES = 512*1024**2
 VARIANTS = ('webpack', 'turbopack', 'turbopack-zram')
 
 
+FAILURE_CODES = frozenset((
+    'host_operation_unavailable', 'tool_unavailable', 'environment_unavailable',
+    'filesystem_unavailable', 'filesystem_unsupported', 'disk_inventory_invalid',
+    'disk_capacity_insufficient', 'memory_inventory_invalid', 'memory_capacity_insufficient',
+    'swap_inventory_unavailable', 'swap_inventory_invalid', 'privilege_unavailable',
+    'interrupted',
+))
+
+
 class Refused(RuntimeError):
-    pass
+    def __init__(self, code='host_operation_unavailable'):
+        self.code = code if code in FAILURE_CODES else 'host_operation_unavailable'
+        super().__init__(self.code)
 
 
 def command(args, data=None):
-    result = subprocess.run(args, input=data, capture_output=True, text=True, timeout=30)
+    try:
+        result = subprocess.run(args, input=data, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        raise Refused('tool_unavailable') from None
     if result.returncode:
         raise Refused('Host operation unavailable')
     return result.stdout.strip()
 
 
+def parse_proc_swaps(data):
+    # Linux procfs ABI, independently implemented; no util-linux code is copied.
+    if len(data)>65536 or not data.endswith(b'\n'):
+        raise Refused('swap_inventory_invalid')
+    lines=data[:-1].split(b'\n')
+    if re.split(rb'[ \t]+',lines[0])!=[b'Filename',b'Type',b'Size',b'Used',b'Priority'] or len(lines)>129:
+        raise Refused('swap_inventory_invalid')
+    rows={}
+    escapes={b'040':b' ',b'011':b'\t',b'012':b'\n',b'134':b'\\'}
+    for line in lines[1:]:
+        match=re.fullmatch(rb'(/[^ \t\n]+)[ \t]+(file|partition)[ \t]+([0-9]{1,19})[ \t]+([0-9]{1,19})[ \t]+(-?[0-9]{1,6})',line)
+        if not match: raise Refused('swap_inventory_invalid')
+        encoded,kind,size,used,priority=match.groups()
+        decoded=bytearray(); index=0
+        while index<len(encoded):
+            if encoded[index]==92:
+                escape=encoded[index+1:index+4]
+                if escape not in escapes: raise Refused('swap_inventory_invalid')
+                decoded.extend(escapes[escape]); index+=4
+            else:
+                decoded.append(encoded[index]); index+=1
+        name=os.fsdecode(bytes(decoded))
+        size=int(size)*1024; used=int(used)*1024; priority=int(priority)
+        if (b'\0' in decoded or name in rows or not 0<=used<=size<=2**63-1
+                or not -32768<=priority<=32767):
+            raise Refused('swap_inventory_invalid')
+        rows[name]={'name':name,'type':kind.decode('ascii'),'size':size,'used':used,'prio':priority}
+    return rows
+
+
 def swaps():
-    rows = json.loads(command(['swapon','--show','--json','--bytes','--output','NAME,TYPE,SIZE,USED,PRIO']))['swapdevices']
-    return {row['name']: row for row in rows}
+    try:
+        with open('/proc/swaps','rb') as source:
+            data=source.read(65537)
+    except OSError:
+        raise Refused('swap_inventory_unavailable') from None
+    return parse_proc_swaps(data)
 
 
 def validate_host(snapshot):
-    if (snapshot['system'] != 'Linux' or not snapshot['public'] or not snapshot['runner']
-            or snapshot['filesystem'] not in ('ext4','xfs')
-            or snapshot['freeBytes'] < DISK_BYTES+RESERVE_BYTES
-            or snapshot['workFreeBytes'] < RESERVE_BYTES
-            or snapshot['memoryBytes'] < 14*GIB or snapshot['availableBytes'] < 13*GIB):
-        raise Refused('Host prerequisites unavailable')
+    if snapshot['system']!='Linux' or not snapshot['public'] or not snapshot['runner']:
+        raise Refused('environment_unavailable')
+    if snapshot['filesystem'] not in ('ext4','xfs'):
+        raise Refused('filesystem_unsupported')
+    if snapshot['freeBytes']<DISK_BYTES+RESERVE_BYTES or snapshot['workFreeBytes']<RESERVE_BYTES:
+        raise Refused('disk_capacity_insufficient')
+    if snapshot['memoryBytes']<14*GIB or snapshot['availableBytes']<13*GIB:
+        raise Refused('memory_capacity_insufficient')
 
 
-def preflight(temporary, work):
-    if platform.system() != 'Linux':
-        raise Refused('Linux runner required')
-    memory = {k:int(v.split()[0])*1024 for k,v in (line.split(':',1) for line in Path('/proc/meminfo').read_text().splitlines())}
+def preflight(temporary, work, observed=None):
+    observed = {} if observed is None else observed
+    snapshot={'system':'Linux' if platform.system()=='Linux' else 'other',
+              'public':os.environ.get('MEMLIA_PUBLIC_RUN')=='1',
+              'runner':os.environ.get('GITHUB_ACTIONS')=='true' and os.environ.get('RUNNER_OS')=='Linux'}
+    observed.update(snapshot)
+    if snapshot['system']!='Linux' or not snapshot['public'] or not snapshot['runner']:
+        raise Refused('environment_unavailable')
+    snapshot['swapNames']=list(swaps())
+    observed['preexistingSwapCount']=len(snapshot['swapNames'])
+    try:
+        with open('/proc/meminfo','rb') as source: data=source.read(65537)
+        if len(data)>65536: raise ValueError()
+        memory={}
+        for line in data.split(b'\n'):
+            if line.startswith((b'MemTotal:',b'MemAvailable:')):
+                match=re.fullmatch(rb'(MemTotal|MemAvailable):[ \t]+([0-9]{1,19}) kB',line)
+                if not match or match[1] in memory: raise ValueError()
+                memory[match[1]]=int(match[2])*1024
+        total,available=memory[b'MemTotal'],memory[b'MemAvailable']
+        if not 0<=available<=total<=2**63-1: raise ValueError()
+    except (OSError,KeyError,ValueError):
+        raise Refused('memory_inventory_invalid') from None
+    snapshot.update(memoryBytes=total,availableBytes=available)
+    observed.update(memoryBytes=total,availableBytes=available)
+    try: filesystem=command(['findmnt','-n','-o','FSTYPE','-T',str(temporary)])
+    except Refused as error:
+        if error.code=='tool_unavailable': raise
+        raise Refused('filesystem_unavailable') from None
+    snapshot['filesystem']=filesystem if filesystem in ('ext4','xfs') else 'other'
+    observed['filesystem']=snapshot['filesystem']
     def free(path):
-        return int(command(['df','-B1','--output=avail',str(path)]).splitlines()[-1].strip())
-    snapshot = {'system':platform.system(),'public':os.environ.get('MEMLIA_PUBLIC_RUN')=='1',
-                'runner':os.environ.get('GITHUB_ACTIONS')=='true' and os.environ.get('RUNNER_OS')=='Linux',
-                'filesystem':command(['findmnt','-n','-o','FSTYPE','-T',str(temporary)]),
-                'freeBytes':free(temporary),'workFreeBytes':free(work),
-                'memoryBytes':memory['MemTotal'],'availableBytes':memory['MemAvailable'],
-                'swapNames':list(swaps())}
+        value=command(['df','-B1','--output=avail',str(path)]).splitlines()
+        if len(value)!=2 or not re.fullmatch(r'[0-9]{1,19}',value[-1].strip()):
+            raise Refused('disk_inventory_invalid')
+        number=int(value[-1].strip())
+        if number>2**63-1: raise Refused('disk_inventory_invalid')
+        return number
+    for key,path in [('freeBytes',temporary),('workFreeBytes',work)]:
+        snapshot[key]=free(path); observed[key]=snapshot[key]
     validate_host(snapshot)
-    command(['sudo','-n','true'])
+    try: command(['sudo','-n','true'])
+    except Refused: raise Refused('privilege_unavailable') from None
     return snapshot
 
 
@@ -256,30 +336,37 @@ def run(variant):
     destination = None
     started = time.monotonic()
     def interrupted(_signum, _frame):
-        raise Refused('Experiment interrupted')
+        raise Refused('interrupted')
     previous = {sig:signal.signal(sig,interrupted) for sig in (signal.SIGINT,signal.SIGTERM)}
     child_started = False
+    stage = 'environment'
     try:
         if variant not in VARIANTS: raise Refused('Unsupported variant')
         temporary = Path(os.environ['RUNNER_TEMP']).resolve(strict=True)
         destination = temporary/'memlia-swap-host.json'
         if destination.exists(): raise Refused('Receipt already exists')
         work = Path(__file__).resolve().parents[2]
-        snapshot = preflight(temporary,work)
+        stage = 'preflight'
+        receipt['preflight'] = {}
+        snapshot = preflight(temporary,work,receipt['preflight'])
         receipt['hostBefore'] = {key:snapshot[key] for key in ('freeBytes','workFreeBytes','memoryBytes','availableBytes','filesystem')}
         receipt['preexistingSwapCount'] = len(snapshot['swapNames'])
+        stage = 'allocation'
         owned = OwnedSwap(tempfile.mkdtemp(prefix='memlia-swap.',dir=temporary))
         owned.prepare(variant=='turbopack-zram')
         os.environ['MEMLIA_SWAP_HOST_READY']='1'
         os.environ['MEMLIA_SWAP_FILE']=str(owned.path)
         os.environ['MEMLIA_ZRAM_DEVICE']=owned.zram or ''
         with tempfile.TemporaryFile() as output:
+            stage = 'child'
             child_started = True
             result = run_child(['bash',str(work/'scripts/ci/run-linux-build.sh'),'--swap',variant],output,owned.sample)
         receipt['child'] = result
         receipt['status'] = 'passed' if result['exitCode']==0 and result['reason'] is None else 'failed'
-    except Exception:
+    except Exception as error:
         receipt['reason'] = 'experiment_unavailable'
+        code = error.code if isinstance(error, Refused) else ('environment_unavailable' if stage=='environment' else 'host_operation_unavailable')
+        receipt['diagnostic'] = {'stage':stage,'code':code}
         if child_started: receipt['status']='failed'
     finally:
         def cancellation_during_cleanup(_signum, _frame):
