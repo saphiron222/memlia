@@ -46,6 +46,54 @@ Il ne contient ni clé, ciphertext, référence de credential, identité utilisa
 endpoint, header, prompt, graphe ou catalogue. Il n'est pas une preuve d'autorité
 administrateur. Passer un objet au parseur ne prouve pas sa provenance serveur.
 
+## Source administrateur : fichier Linux POSIX
+
+`readChatInstallationPolicyFile()` est un lecteur **serveur Linux uniquement**,
+sans argument. Il lit le chemin absolu canonique de `MEMLIA_CHAT_POLICY_FILE`
+dans l'environnement du processus, sans charger de `.env`, sans registre partagé
+et sans repli sur une variable `NEXT_PUBLIC_*`. Aucun accès au fichier n'a lieu
+à l'import. Son absence, sa suppression ou sa corruption entraînent un refus ;
+il n'existe pas de cache de dernière configuration valide.
+
+Le fichier et tous ses répertoires parents doivent appartenir à UID 0, sans droit
+d'écriture groupe/autres, sans lien symbolique et sans écriture autorisée par
+l'OS à l'identité web. Le serveur doit fonctionner sous une identité non-root,
+avec UID/GID réels et effectifs identiques : le contrôle POSIX d'accès ne doit pas
+évaluer une autre identité. Un UID web 1001 peut lire un fichier root en mode
+0444 ou 0644 dans une arborescence root traversable, sous réserve des ACL et des
+permissions effectives. Le lecteur n'accorde aucun droit et ne modifie aucun mode.
+
+La lecture reprend l'algorithme borné du helper natif Sim
+`packages/sim-cli/src/config/json-file.ts` (Apache-2.0), avec vérification de
+propriété, comparaison inode/métadonnées avant/après lecture et fermeture stricte.
+La limite est de **4096 octets**, avec au plus un octet supplémentaire pour détecter
+un dépassement. Le descripteur utilise `O_NOFOLLOW` et `O_NONBLOCK` ; les fichiers
+non réguliers, UTF-8 invalide, BOM, JSON invalide et erreurs d'accès/fermeture sont
+refusés. Le parseur de politique existant valide ensuite le contenu sans coercition.
+Toutes les erreurs restent fixes, sans chemin, contenu ou cause brute.
+
+Le résultat figé `{ kind: 'installation_file_observation', policy }` décrit une
+observation de fichier administrateur au moment de la lecture. La politique reste
+`activation: 'blocked'`. Ce marqueur structurel est reproductible : il n'est ni
+un jeton d'autorité, ni une admission utilisateur, ni une attestation permanente.
+Un administrateur peut remplacer le fichier après la lecture ; aucun cache,
+watcher, engagement de révocation ou admission atomique n'est fourni ici.
+
+Le raccordement Compose reste **à réaliser et qualifier** : fichier non secret
+monté en lecture seule, par exemple sous `/etc/memlia/chat-policy.json`, variable
+serveur associée, ownership root et identité non-root vérifiés dans le conteneur.
+Aucun montage ni variable du déploiement n'est modifié par cette tranche. La
+configuration ne contient pas de clé, de credential ou d'endpoint personnalisé.
+L'interface administrateur, l'admission du premier envoi, les clés et les budgets
+restent des raccordements séparés ; ce lecteur n'active aucun appel IA.
+
+Les tests utilisent de vrais fichiers, descripteurs, liens et remplacements
+atomiques possédés. Sur macOS, la plateforme Linux et les métadonnées root/parents
+sont explicitement doublées ; les contenus et opérations de lecture restent
+réels. Cela **ne qualifie pas un montage root-owned Linux réel**, les ACL Linux,
+un namespace Docker ou un déploiement Compose. Un fichier réellement détenu par
+l'utilisateur de test est également refusé. Aucun privilège n'est élevé.
+
 ## Plafond de lecture dérivé
 
 `selectWorkflowReadPolicy(decision, serverWorkflowId?)` revalide la décision et
@@ -75,8 +123,8 @@ reproduites depuis des objets valides ; elles ne sont pas des jetons de capacit�
 
 ## Conditions avant le raccordement effectif
 
-- Charger la configuration depuis une source d'installation exclusivement
-  serveur. Ne jamais fusionner `provider`, `model`, `apiKey`, `baseURL`, headers,
+- Raccorder explicitement la source d'installation serveur décrite ci-dessus
+  à la future admission. Ne jamais fusionner `provider`, `model`, `apiKey`, `baseURL`, headers,
   outils, policy ou limites venus d'un client. Le futur contrat HTTP devra refuser
   ces champs ; aucun test de cette route inexistante n'est revendiqué ici.
 - Autoriser la session, le workspace et la capacité Chat **avant le premier envoi**

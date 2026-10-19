@@ -1,3 +1,4 @@
+// Modified by Memlia in 2026: bound native tracing of the explicitly packaged CLI runtime.
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
@@ -67,13 +68,13 @@ async function workbenchCli(
 ): Promise<NonNullable<SandboxSessionRequest['cli']>> {
   const cwd = process.cwd()
   const path = resolve(
-    cwd,
+    /* turbopackIgnore: true */ cwd,
     cwd.endsWith('/apps/sim')
       ? '../../packages/sim-cli/dist/runtime.js'
       : 'packages/sim-cli/dist/runtime.js'
   )
   signal?.throwIfAborted()
-  const runtime = await readFile(path, 'utf8')
+  const runtime = await readFile(/* turbopackIgnore: true */ path, 'utf8')
   const baseURL =
     activeSandboxChatOwner()?.mothershipBaseURL ?? (await getMothershipBaseURL({ userId }))
   const deadline = AbortSignal.timeout(15_000)

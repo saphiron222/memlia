@@ -1,3 +1,4 @@
+// Modified by Memlia in 2026: import native ID regeneration without client stores.
 import { type Principal, resolvePrincipalAttribution } from '@sim/auth/principal'
 import { db } from '@sim/db'
 import { workflow, workspace } from '@sim/db/schema'
@@ -57,7 +58,7 @@ import {
   withWorkspaceOperationReplay,
   workflowOperationFingerprint,
 } from '@/lib/workspaces/operations/receipts'
-import { regenerateWorkflowIds } from '@/stores/workflows/utils'
+import { regenerateWorkflowIds } from '@/lib/workflows/operations/regenerate-ids'
 
 function previewInput(input: ImportWorkflowInput) {
   let workflowInput: unknown = input.workflow

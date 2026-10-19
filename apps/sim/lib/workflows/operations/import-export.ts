@@ -18,7 +18,7 @@ import {
 } from '@/lib/workflows/sanitization/json-sanitizer'
 import { sanitizeMalformedSubBlocks } from '@/lib/workflows/sanitization/subblocks'
 import { normalizeImportedVariables } from '@/lib/workflows/variables/parse'
-import { regenerateWorkflowIds } from '@/stores/workflows/utils'
+import { regenerateWorkflowIds } from '@/lib/workflows/operations/regenerate-ids'
 import type { Variable, WorkflowState } from '@/stores/workflows/workflow/types'
 
 const logger = createLogger('WorkflowImportExport')

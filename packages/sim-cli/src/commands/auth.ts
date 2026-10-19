@@ -1,3 +1,4 @@
+// Modified by Memlia in 2026: exclude host browser launch from native file tracing.
 import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { createInterface } from 'node:readline/promises'
@@ -81,7 +82,7 @@ function openBrowser(url: string): void {
       : [process.platform === 'darwin' ? 'open' : 'xdg-open', [url]]
 
   try {
-    const child = spawn(command, args, { stdio: 'ignore', detached: true })
+    const child = spawn(/*turbopackIgnore:true*/ command, args, { stdio: 'ignore', detached: true })
     child.on('error', () => {})
     child.unref()
   } catch {}

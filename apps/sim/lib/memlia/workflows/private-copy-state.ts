@@ -6,7 +6,7 @@ import {
 import { OrchestrationError } from '@/lib/core/orchestration/types'
 import { sanitizeWorkflowForSharing } from '@/lib/workflows/credentials/extractor'
 import { getBlockRegistry } from '@/blocks/registry'
-import { regenerateWorkflowIds } from '@/stores/workflows/utils'
+import { regenerateWorkflowIds } from '@/lib/workflows/operations/regenerate-ids'
 import type { BlockState, WorkflowState } from '@/stores/workflows/workflow/types'
 
 function unsupported(): never {

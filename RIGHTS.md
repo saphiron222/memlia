@@ -18,6 +18,8 @@ Les adaptations de l'historique Annuler/Rétablir, du refus des anciens remplace
 
 La borne de représentation des styles Edge conserve les droits Apache du décodeur et de ses tests dérivés de Sim. Le profil de garde macOS milestone, sa politique et ses tests, ainsi que les scripts d'expériences Linux avec swap et leur documentation sont des développements Memlia sous droits réservés. Les tests ne confèrent aucun droit sur un composant absent ; aucun binaire système, moteur distant ou code Enterprise n'est ajouté par ces mesures.
 
+Les régénérateurs d’IDs extraits et les annotations de traçage conservent les droits Apache des sources Sim adaptées. Le lecteur de politique administrateur reprend un algorithme Sim sous Apache avec provenance explicite ; ses vérifications et tests nouveaux conservent leurs mentions propres. L’inventaire procfs et la synchronisation de fixture sont des développements Memlia sous droits réservés, sans copie de code util-linux/Linux. Aucun composant système GPL n’est redistribué par ces scripts.
+
 ## Ajouts Memlia
 
 Copyright 2026 Memlia. Tous droits réservés sur les nouveaux développements propres à Memlia. Le propriétaire a autorisé leur visibilité publique pendant le développement ; leur licence logicielle future n’est pas encore choisie. Aucune licence Apache, MIT ou autre licence libre ne leur est implicitement attribuée. Cette réserve ne restreint aucun droit fourni indépendamment par une licence tierce, la loi ou les conditions de la plateforme d’hébergement.
