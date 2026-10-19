@@ -692,9 +692,15 @@ class ProcessObservationTests(unittest.TestCase):
             self.assertEqual(child.stdout.readline().strip(),'ready')
             identity=metrics.identities([child.pid])
             self.assertEqual(list(identity),[child.pid])
-            # The CI phase owns the container's cgroup. Only read it here; no
-            # allocation, migration or signal to any other member is permitted.
-            cgroup=Path('/sys/fs/cgroup/cgroup.procs')
+            # This test also runs on the host before the isolated container.
+            # Read the current unified leaf, which need not be the mount root.
+            # Never allocate, migrate or signal any other cgroup member.
+            current=[line[3:] for line in Path('/proc/self/cgroup').read_text().splitlines()
+                     if line.startswith('0::')]
+            self.assertEqual(len(current),1)
+            self.assertTrue(current[0].startswith('/'))
+            self.assertNotIn('..',current[0].split('/'))
+            cgroup=Path('/sys/fs/cgroup')/current[0].lstrip('/')/'cgroup.procs'
             self.assertIn(child.pid,[int(pid) for pid in cgroup.read_text().split()])
             running=metrics.observe_processes(identity,'after_command')
             self.assertEqual(running['identities'][0]['result'],'present_same_identity')
