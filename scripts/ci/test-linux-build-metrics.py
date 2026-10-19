@@ -613,5 +613,106 @@ class SwapCounterTests(unittest.TestCase):
             self.assertFalse(receipt['webpackObservation']['enabled'])
             self.assertNotIn('PRIVATE_CANARY',json.dumps(receipt))
 
+class ProcessObservationTests(unittest.TestCase):
+    def record(self, pid=123, start=456, state='S'):
+        # Linux stat fields 3..22. The command deliberately contains parentheses.
+        fields = [state, '1', '123', '123'] + ['0'] * 15 + [str(start)]
+        return f'{pid} (PRIVATE_CANARY) with (parentheses)) ' + ' '.join(fields)
+
+    def test_closed_projection_preserves_identity_and_discards_command(self):
+        from io import StringIO
+        with patch.object(Path, 'open', return_value=StringIO(self.record())):
+            observed = metrics.observe_processes({123:456}, 'after_command')
+        self.assertEqual(observed, {'stage':'after_command','total':1,'truncated':False,
+            'identities':[{'pid':123,'startTimeTicks':456,'result':'present_same_identity',
+                           'state':'S','ppid':1,'pgid':123,'sid':123}]})
+        self.assertNotIn('PRIVATE_CANARY', json.dumps(observed))
+
+    def test_missing_reused_unreadable_and_malformed_are_closed(self):
+        from io import StringIO
+        cases = [(FileNotFoundError('PRIVATE_CANARY'),'gone'),
+                 (PermissionError('PRIVATE_CANARY'),'unreadable'),
+                 (self.record(start=999),'identity_changed'),
+                 (self.record(pid=999),'malformed'),
+                 ('PRIVATE_CANARY','malformed'),
+                 (self.record(state='SECRET'),'malformed'),
+                 (self.record()+'X'*8193,'malformed')]
+        for value, expected in cases:
+            with self.subTest(expected=expected):
+                options = {'side_effect':value} if isinstance(value,Exception) else {'return_value':StringIO(value)}
+                with patch.object(Path,'open',**options):
+                    result=metrics.observe_processes({123:456},'before_term')
+                self.assertEqual(result['identities'][0]['result'],expected)
+                self.assertNotIn('PRIVATE_CANARY',json.dumps(result))
+                self.assertNotIn('state',result['identities'][0])
+
+    def test_observation_is_bounded_and_never_classifies_zombie_as_success(self):
+        from io import StringIO
+        with patch.object(Path,'open',side_effect=FileNotFoundError()) as opened:
+            result=metrics.observe_processes({i:456 for i in range(1,101)},'after_cleanup')
+        self.assertEqual(opened.call_count,32)
+        self.assertEqual(result['total'],100)
+        self.assertTrue(result['truncated'])
+        with patch.object(Path,'open',return_value=StringIO(self.record(state='Z'))):
+            zombie=metrics.observe_processes({123:456},'after_command')
+        self.assertEqual(zombie['identities'][0]['state'],'Z')
+        self.assertFalse(metrics.successful(0,True,[123],{},[]))
+        self.assertTrue(metrics.successful(0,True,[],{},[]))
+        with self.assertRaises(ValueError):
+            metrics.observe_processes({},'PRIVATE_CANARY')
+
+    def test_run_keeps_failed_survivor_verdict_after_cleanup_zero(self):
+        # Real child; cgroup and residual identity are explicit portable doubles.
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            args=SimpleNamespace(cgroup=str(root),report=str(root/'receipt.json'),phase='test',
+                timeout=5,command=[sys.executable,'-c','raise SystemExit(0)'])
+            reading={'pids':[os.getpid()],'limitBytes':1024,'swapBytes':0,'events':{}}
+            def cleanup(_root,_child,observations=None):
+                observations.append(metrics.observe_processes({},'after_cleanup'))
+                return [],[]
+            with patch.object(metrics,'cgroup_read',return_value=reading), \
+                 patch.object(metrics,'host_memory',return_value={'availableBytes':1024,'swapUsedBytes':0}), \
+                 patch.object(metrics,'identities',return_value={123:456}), \
+                 patch.object(metrics,'terminate_owned',side_effect=cleanup):
+                self.assertEqual(metrics.run(args),1)
+            receipt=json.loads((root/'receipt.json').read_text())
+            self.assertEqual(receipt['childExitCode'],0)
+            self.assertEqual(receipt['descendantsAfterCommand'],1)
+            self.assertEqual(receipt['descendantsAfterCleanup'],0)
+            self.assertEqual(receipt['processObservations'][0]['stage'],'after_command')
+            self.assertEqual(receipt['processObservations'][-1]['stage'],'after_cleanup')
+
+    @unittest.skipUnless(sys.platform=='linux','real procfs observation requires Linux')
+    def test_native_owned_child_and_zombie_observation_without_signalling_others(self):
+        import time
+        child=subprocess.Popen([sys.executable,'-c','import sys; print("ready",flush=True); sys.stdin.readline()'],
+                               stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True)
+        try:
+            self.assertEqual(child.stdout.readline().strip(),'ready')
+            identity=metrics.identities([child.pid])
+            self.assertEqual(list(identity),[child.pid])
+            # The CI phase owns the container's cgroup. Only read it here; no
+            # allocation, migration or signal to any other member is permitted.
+            cgroup=Path('/sys/fs/cgroup/cgroup.procs')
+            self.assertIn(child.pid,[int(pid) for pid in cgroup.read_text().split()])
+            running=metrics.observe_processes(identity,'after_command')
+            self.assertEqual(running['identities'][0]['result'],'present_same_identity')
+            child.stdin.write('finish\n');child.stdin.flush()
+            deadline=time.monotonic()+5
+            while time.monotonic()<deadline:
+                terminal=metrics.observe_processes(identity,'before_term')
+                if terminal['identities'][0].get('state')=='Z':break
+                time.sleep(.01)
+            self.assertEqual(terminal['identities'][0]['state'],'Z')
+            self.assertNotIn(child.pid,[int(pid) for pid in cgroup.read_text().split()])
+            self.assertFalse(metrics.successful(0,True,[child.pid],{},[]))
+            self.assertEqual(child.wait(timeout=5),0)
+            self.assertEqual(metrics.observe_processes(identity,'after_cleanup')['identities'][0]['result'],'gone')
+        finally:
+            if child.poll() is None:child.kill()
+            child.wait(timeout=5)
+            child.stdin.close();child.stdout.close()
+
 if __name__ == '__main__':
     unittest.main()

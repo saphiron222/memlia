@@ -66,6 +66,47 @@ def identities(pids):
     return found
 
 
+def observe_processes(owned, stage):
+    """Closed diagnostics only; never an input to verdict or signal ownership.
+
+    cgroup.procs normally excludes established zombies. A process can change
+    state between that enumeration and this bounded stat read. Do not infer
+    an historical worker identity or a successful cleanup from these samples.
+    """
+    if stage not in ('after_command', 'before_term', 'before_kill', 'after_cleanup'):
+        raise ValueError('observation-stage-refused')
+    result = {'stage': stage, 'total': len(owned), 'truncated': len(owned) > 32,
+              'identities': []}
+    for pid, started in list(owned.items())[:32]:
+        item = {'pid': pid, 'startTimeTicks': started}
+        try:
+            with Path(f'/proc/{pid}/stat').open() as handle:
+                record = handle.read(8193)
+            if len(record) > 8192:
+                raise ValueError('stat-invalid')
+            opening, closing = record.index('('), record.rindex(')')
+            fields = record[closing + 2:].split()
+            if (int(record[:opening].strip()) != pid or len(fields) < 20
+                    or fields[0] not in ('R', 'S', 'D', 'Z', 'T', 't', 'X', 'x', 'K', 'W', 'P', 'I')):
+                raise ValueError('stat-invalid')
+            parent, group, session, observed_start = map(int, (fields[1], fields[2], fields[3], fields[19]))
+            if min(parent, group, session, observed_start) < 0:
+                raise ValueError('stat-invalid')
+            if observed_start != started:
+                item['result'] = 'identity_changed'
+            else:
+                item.update(result='present_same_identity', state=fields[0], ppid=parent,
+                            pgid=group, sid=session)
+        except FileNotFoundError:
+            item['result'] = 'gone'
+        except OSError:
+            item['result'] = 'unreadable'
+        except (ValueError, IndexError, UnicodeError):
+            item['result'] = 'malformed'
+        result['identities'].append(item)
+    return result
+
+
 def sample_processes(pids):
     rss_sum = high_water = 0
     for pid in pids:
@@ -78,10 +119,13 @@ def sample_processes(pids):
     return rss_sum, high_water
 
 
-def terminate_owned(root, child=None):
+def terminate_owned(root, child=None, observations=None):
     errors = []
     for sig, delay in ((signal.SIGTERM, 2), (signal.SIGKILL, 1)):
-        for pid, started in identities(cgroup_read(root)['pids']).items():
+        owned = identities(cgroup_read(root)['pids'])
+        if observations is not None:
+            observations.append(observe_processes(owned, 'before_term' if sig == signal.SIGTERM else 'before_kill'))
+        for pid, started in owned.items():
             try:
                 if proc_start(Path(f'/proc/{pid}/stat').read_text()) == started:
                     os.kill(pid, sig)
@@ -104,7 +148,10 @@ def terminate_owned(root, child=None):
                 except ChildProcessError:
                     pass
             time.sleep(0.05)
-    return list(identities(cgroup_read(root)['pids'])), errors
+    remaining = identities(cgroup_read(root)['pids'])
+    if observations is not None:
+        observations.append(observe_processes(remaining, 'after_cleanup'))
+    return list(remaining), errors
 
 
 # Only names from the public commit may cross the raw-output boundary.
@@ -395,9 +442,11 @@ def run(args):
             receipt['errors'].append('interrupted')
         if scope_verified:
             try:
-                survivors = list(identities(cgroup_read(root)['pids']))
+                owned_after_command = identities(cgroup_read(root)['pids'])
+                survivors = list(owned_after_command)
                 receipt['descendantsAfterCommand'] = len(survivors)
-                remaining, errors = terminate_owned(root, child)
+                receipt['processObservations'] = [observe_processes(owned_after_command, 'after_command')]
+                remaining, errors = terminate_owned(root, child, receipt['processObservations'])
                 receipt['descendantsAfterCleanup'] = len(remaining)
                 receipt['errors'].extend(errors)
                 if remaining:
