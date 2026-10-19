@@ -1,0 +1,113 @@
+---
+title: Integrations
+description: Connect third-party services and OAuth accounts for your workflows
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+import { Image } from '@/components/ui/image'
+
+Integrations connect your workflows to services such as Gmail, Slack, GitHub, and HubSpot. Connect with OAuth or use a supported API token or service account, then select the saved credential in a block. Sim stores credentials securely and refreshes OAuth tokens when the provider supports it.
+
+You can connect **multiple accounts per service** — for example, two separate Gmail accounts for different workflows.
+
+## The Integrations page
+
+Click **Integrations** in the workspace sidebar. The page shows your **Connected** accounts, a **Featured** list, and a search box covering every available service.
+
+<Image
+  src="/static/integrations/hubspot/integrations-page.png"
+  alt="The current Integrations page with search, featured services, and categorized integrations"
+  width={1064}
+  height={760}
+/>
+
+The page's second tab, **Skills**, holds your workspace's [agent skills](/agents/skills).
+
+Open a service to see what it offers:
+
+- **Skills** — ready-made capabilities you add with one click, like *upsert-contact* for HubSpot.
+- **Templates** — starter workflows built around the service.
+- **+ Add to Sim** — connects your account.
+
+<Image
+  src="/static/integrations/hubspot/hubspot-page-add-to-sim.png"
+  alt="A service page (HubSpot) with its skills, templates, and the Add to Sim button"
+  width={800}
+  height={717}
+/>
+
+## Connecting with OAuth
+
+1. Open the service's page and click **Add to Sim**. If a menu appears, choose **Connect with OAuth**.
+2. Enter a **Display name** to identify this connection (e.g. "Work Gmail" or "Sales HubSpot"), and optionally a **Description**.
+3. Review the **Permissions requested** — these are the scopes Sim will ask the provider for.
+4. Click **Connect** and complete the provider's sign-in and approval flow.
+
+<Image
+  src="/static/integrations/hubspot/connect-hubspot-modal.png"
+  alt="The connect dialog (HubSpot shown) with display name, description, and the permissions requested"
+  width={700}
+  height={708}
+/>
+
+When the provider redirects you back, the connection appears under **Connected**.
+
+For API tokens and service accounts, select the corresponding option from **Add to Sim** and follow the setup guide under that service. These connections have different fields and rotation requirements.
+
+## Using integrations in workflows
+
+Blocks that require authentication (e.g. Gmail, Slack, HubSpot) display an account selector. Select the connected account you want that block to use.
+
+<Image
+  src="/static/credentials/oauth-selector.png"
+  alt="A block showing the account selector dropdown with connected accounts"
+  width={500}
+  height={295}
+/>
+
+You can also connect another account directly from the block by selecting **Connect another [service] account** at the bottom of the dropdown.
+
+If a block requires an integration and none is selected, the workflow will fail at that step.
+
+## Using a credential ID
+
+Each connection has a unique credential ID you can use to reference it dynamically. This is useful when you have multiple accounts for the same service and want to switch between them programmatically — for example, routing different workflow runs to different Gmail accounts based on a variable.
+
+To copy a credential ID, open the connection from the **Connected** list and use the copy control next to its name.
+
+In any block that requires an integration, click **Switch to manual ID** next to the account selector to switch from the dropdown to a text field.
+
+<Image
+  src="/static/integrations/switch-to-manual-id.png"
+  alt="Block showing the Switch to manual ID button next to the account selector"
+  width={500}
+  height={193}
+/>
+
+Paste or reference the credential ID in that field. You can use a `{{SECRET}}` reference or a block output variable to make it dynamic.
+
+<Image
+  src="/static/integrations/manual-credential-id.png"
+  alt="Block showing the Enter credential ID text field after switching to manual mode"
+  width={500}
+  height={197}
+/>
+
+## Managing a connection
+
+Open a connection from the **Connected** list to manage it:
+
+- Edit the **Display name** and **Description**.
+- Manage **Members** — invite teammates and assign them an **Admin** or **Member** role. Admins can edit, reconnect, disconnect, and manage access; Members can use the connection in workflows. When you connect an account, you are its Admin.
+- **Reconnect** — re-authorize if the connection expired or you need updated permissions.
+- **Disconnect** — remove the connection entirely.
+
+<Callout type="warn">
+If you disconnect an integration that is used in a workflow, that workflow will fail at any block referencing it. Update blocks before disconnecting.
+</Callout>
+
+## Token renewal and connection failures
+
+Sim attempts OAuth token renewal when a provider supports it and the connection has a usable refresh token. A revoked or expired refresh token can make a block fail even when the saved connection still appears in **Integrations**. A credential Admin can open it and select **Reconnect** to authorize again.
+
+OAuth tokens are encrypted before storage. The account selector and credential ID reference the saved connection; they do not expose its token. API tokens and service-account secrets have provider-specific rotation rules documented in their setup guides.

@@ -1,0 +1,946 @@
+{
+  "allowed_font_sha256": [],
+  "allowed_license_sha256": [
+    "b13f17c74ba17a5cc136e624fd6f78d75124f2b038a25f0b7eba48a1ca00c0ec",
+    "f7c2fd75ef8745b6f966111bbeb1b592649aaae081ed4d689bd3d6f8571786b7",
+    "260a43c2da0b1b0cd1b1181aab66d2566cb136c1fb56accb985cd2dad174fb4c"
+  ],
+  "denied_sha256": {
+    "000ecac62cbbd525a05011668b9790f685aa0214274f7945f1ce5044d0b5f405": "enterprise",
+    "00c4eb34100f9ae82ef18c2884eca54fed3755eee649aaeaede2d768980a0c4a": "enterprise",
+    "00ee54706c1c8c9275c0b05e255bc4b1245733c62a50dc79770b09e895aa62f5": "enterprise",
+    "01904ccf1ee722cd309172a2bef0a05d7c35ab969f10b8c329ca734780a5db8f": "enterprise",
+    "02e40056a747dc5a6fee223751fa393b7d21378918daa3cd620c9b560751892b": "enterprise",
+    "03234fe3d7cff6c67a92e09b88eca0dec011ae0a59c37340abf6647cc060dc9c": "enterprise",
+    "05578b80342298a9bc3c74558e2cb24dc74c6367dc0e3914e83dbbf00aa13a5b": "enterprise",
+    "05ad52b7c73c649c4a5052e2212381dcaed16058b7b658e8ae13aa2a3177bf04": "enterprise",
+    "0658b710c0cf29eaeb121eea1de6e44c4a8c6615369f835d53af5457ed658fb0": "enterprise",
+    "0694898bff9e4a22b4e1860e8760960e6995341853e4d562265d23cd7af55b41": "enterprise",
+    "073d844f25b2ca00b60f0ce81a1840c721788f839dc33297120f9c7d9a72685c": "enterprise",
+    "09de7ee94cdc6476956e21ed2e159120ee77e48102487df3fd25b72192456594": "enterprise",
+    "0a28d8f43e95e10882c240f2ca7ff1f372403a1536f17abee26b4c44d81ea568": "enterprise",
+    "0be543aa4f3ba983d20593d8471f37f61b7deede0f9f78d654df2f915dd3b97c": "enterprise",
+    "0c2b7b64a961984e4b2effceb349a69a21c280e13c23e2a1e309c8734185e697": "enterprise",
+    "0c4c8337283a759d1b5142e77fe25e6b592f550ed4b6b84bf12762171ec55611": "enterprise",
+    "0c55a3353ce843956208bb4a86a9baa604fad3e5a003a2b5d2c98bac10e5abff": "enterprise",
+    "0d0328b01c14fe8f9f1381cc0a27b96815872a0b5d5adc3283c0ae82f8a52e3b": "enterprise",
+    "0d1d48bc17ab65217c3df6a54d143be89264ac045caaa877b13865a73146f244": "enterprise",
+    "0dc869b4c05196d94ffc6ed8c95d9a4732834a6768e8801051ba9a4ed8a891c5": "enterprise",
+    "0ebff2e09a2a855389ca7501fa41c992480cf591484b338f8326a03fdd1ec9af": "enterprise",
+    "0fe1e02d0e5df6e555a28865cb037add3d282f43b1d9b9573d738427dd033642": "enterprise",
+    "1037ffb599433c13af2dacdedf386e049efb1ac7ab926a1f2d8a02013dd90cf7": "enterprise",
+    "105820dc98eca23cd5533210face9fb39be1e3bda5dccb4b410c41208b22d8a8": "enterprise",
+    "1060f44aeafef47047df5551625a72c890c454fd2c3f3f7a0d20e581d49c0a6f": "enterprise",
+    "12433bc3d7c67b20dd56b668164c94eaf4d3d9e5f4daa03df91398000b0d82ac": "enterprise",
+    "12ecc775fbf8ee2d6b37264ddc5ebc515d0d46b7b3b6f0e9e65ef6e186673d8c": "enterprise",
+    "13ead344a04830db0029bf5938e308ea2fcf5f15100b800bd2ee69850ba18f58": "enterprise",
+    "13fa60eb3a743c0f947b6f6a79d8554866b5e752c2c80f04e6fa85536147e0fa": "enterprise",
+    "160185d19f321fbca5b7e4ef79fa3a30d123819ecbf64fade01022a65f0e05c5": "enterprise",
+    "162a76c39b4beaf3b117a12df73fdc8d27a07741a90a565afcb61e8c193d3dbc": "enterprise",
+    "16d93b306e141a2e28c6f8792c4bdf9d1b10a0ad80fd8d5422bb74c21424f6ed": "enterprise",
+    "175d3dce03ca75261cda5b3434a1e992ac553066abf5d8b376aa118830804567": "enterprise",
+    "17cdd8899312b72edbffb34609b37ac11685bc153d2649592d3303f55e3640cc": "enterprise",
+    "17f1c74d6cd0017bfa2c50b78fec4dba7b084d637eb95c35d545bcdaabec1de8": "enterprise",
+    "18217ea8b9d02f034db58c41d8808286b3637ed54201dc811b8ccc63a65296ac": "enterprise",
+    "1867b6a9f8975c64384f38a691eaee57bb64d1f64dba4a997a66d19eca4dd7ef": "enterprise",
+    "192ad273a5a02499cfe495b35de271f065e4d0b5bd5cb748f17952b35016b235": "enterprise",
+    "192c05c28cce3a0af0d773b5b6b193240bf5f476523d9bf88cc0f4c2e323c5fc": "enterprise",
+    "1ae3d7a493b73a65bd6a0c89ab520e616555852dc536bf703d65bb71f58001bf": "enterprise",
+    "1b7465c4d050297468cd36dabb149384691d7626710f48fa4ff33ab22ab7ad1b": "enterprise",
+    "1b8220c9afe1a38d2d6ee2c4ee7c93d93d620b4bd9271fd6b8489e21a5bf2b9f": "enterprise",
+    "1dc95e00c763afc22d522dab3e4956939f8dc4d351a8ba8635c60773650cfa3a": "enterprise",
+    "1e45875cb3e1bfbca6f98721e78f4f09c9c0301618fbad3ed43edce4c709ab5a": "enterprise",
+    "1e5d34b2ef29a72831f7cff71d9f3537a6f175f2ad43d7f1f9eabf41f9779098": "enterprise",
+    "1ed9648c445ca286f77f7c8d5e8950cf18a82f9008e53b58b989e3a95dc2cc4f": "enterprise",
+    "1eebf227e7dc070d99a2aa4c5e67074de5b3f58a733aa84d1b2b7d3f5aabdeb2": "enterprise",
+    "1f4f9d7a2693484219abc1b6f1515a7723e1f91ae41e6a02bcaab59297ae8d9d": "enterprise",
+    "1f5ebcce0163d454e7e6cd5adec20aaf6a7b07276130c8643b7671e37cbd3c2e": "enterprise",
+    "1fc1a6f6519c381d5442f01bee85d193a26ace4de1b48d321176044655dc9287": "enterprise",
+    "1ff5858cce00b3762e524b879cf0be83139c133897f64315ea90a77c5fce1ccb": "enterprise",
+    "20c4cf42bf3bfde77f2cce8eb0031f45bd20d53b9980530b404a45391897a3e8": "enterprise",
+    "20eb176cd75dbfd2d1cf82ab656e54ba4a38bb9b7b47fe124544c456611f6f3c": "enterprise",
+    "215f31a25c5c56774f523358d6ed621c35fbe14fdd8f67bcf7c0aca5deada718": "enterprise",
+    "21dff0db208c2496baffe52348af2ed742a597dc2cfe63a87d653097c440bb98": "enterprise",
+    "22fe5eabaa87113a51d8aca7fa9f6a0620d01cada44f8ddae51251a694867b0e": "enterprise",
+    "25d6bd93ffbdbdd90a861ab6a69a501f488ebae90074ee5953ecbcfa984f60c6": "enterprise",
+    "2627f4cc90604bc64f1cf5da26b458073e258b7732ced0c1ee84e030350f1276": "enterprise",
+    "2761b26230b8eaed329489232f40d5e75db5789178adb888dd05b144f1659aa0": "enterprise",
+    "2861e013d36a3940b9d0873fd9819b5620c055a6803fad4bfc2eae20213da4fd": "enterprise",
+    "286c346fc6f6a20e3fcf674784f467ec49150657f99e456a1bdc654463ceca95": "enterprise",
+    "2891d42a0ea02a9648134566ebd7390ae1005cd599b3e666e1fe48855dc42755": "enterprise",
+    "2b0aa1b3820e048f663514876c710d8b70e09c4e98db851bd45753883de7b409": "enterprise",
+    "2bcd67d747f79415a4780307d5b1f69474dcfa769d38553498257174267ee2aa": "enterprise",
+    "2c287a31f57acf2c6e8893cbfaf45becb34ddce1af26176f6e98afcf73f4ec7c": "enterprise",
+    "2cdc2a27c5d29de7fb8e2b9e35102f90d5187e22e39eab76f43138f931d8b388": "enterprise",
+    "2e21500cfc03a590bf5f32452e261dc2c892a27a9b5c72db9ad04749fbb3d50c": "enterprise",
+    "2e382953f0b257581daf44ab88117914b9f34a0b048fe2308a2356fde633b91a": "enterprise",
+    "2e84e1a6ad7a98073b8491964a73125a2277b38da981239054bdd2709392f3c8": "enterprise",
+    "2ecd574b1852e5de116c8852a0795439071eb63880feb2773b21ae57adeaaea4": "enterprise",
+    "2f69a81181796a031cba8c863b74a1178be81ca7c69e13fe84f1f15c48c8286a": "enterprise",
+    "3004b9cb98ff180a8e62c3bb7760561b3eb5da9bf0ae19076454f725332c46f1": "enterprise",
+    "3076f0f23371038a1f8a3709d6aec895a182bfd8f46cbd9f6b6f4750c69dbbec": "enterprise",
+    "3188a2ec8101d4c2407f12820db45c009d7c971bfbc9ced7c84d7486abd20a94": "enterprise",
+    "33351f318ebfa4938e46c45f16c85872d374c5181bacc3e253ace8eebbc8290e": "enterprise",
+    "336d810cb942a48aa35e7df14950500420e28fa52f7d47b89545428fb01c222c": "enterprise",
+    "33de9f24923f4b40009fff94dad236a13b43b81714f4373d08d79f490be5e1d7": "enterprise",
+    "34b5596d5863dc8074e06e053ecbc0bab1d8a9b6c0e539e5f082811a99f18cc8": "enterprise",
+    "34bdefd4434fe0374e0f674b489e1d1b548f22c944f5f65a5dea15973a7af4a7": "enterprise",
+    "3528800231b281a666da9808714a8e5b96a365740db433598df232eeb03b75e6": "enterprise",
+    "36c9108fb8f337ab153e7a829ff1f0b6ff836af1d9ae033bc3b0109e90b0bb8c": "enterprise",
+    "3863a2ddfc6776cf82ae680ee4d948c9d82fc5e80336500cccc5596e23d8f9c9": "enterprise",
+    "39da97aaf8f47d4ff82e218ea5926c2d595eac7765ff4fceaed7d9b523b1b98f": "enterprise",
+    "3b9c1267ee97debc199940fb063a35f7f6567a6f3cf881312b177e810464c447": "enterprise",
+    "3bbf51bd0c9f6955d09e14a36268ef9934e10566e3a2e98a294fe6323629126c": "enterprise",
+    "3be07f0cf6314cb87155baa0fa81828a78a72f85a618faf4c5e331f2ca1307e4": "enterprise",
+    "3c63e79468139f10c1a9cafa021012d511a5c010ed12ab852e8eccdeec9bde2b": "enterprise",
+    "3c6fd989e66f7b325f08f9dc194523c49e76f2cedfa98268b86bf6938c35910b": "font",
+    "3d9312236316b9435af19ae155ad46708bb68ec9adc673aae7daad7fb692780f": "enterprise",
+    "3eba85ae3589e1c08f19789725e368a5f41e32ad539a8c92fec1fea022af575a": "enterprise",
+    "4074010737408073109752ae20984674de29405217c34fec9f539a4f4e2bc3a4": "enterprise",
+    "40cbded6c695830b72a675deb23e3f838e8b73ff148aab3233fca7fb60f674f0": "enterprise",
+    "41a89c1a25cff258e7ea9ecdd33e5499efa592da872f4e679ce548adf1e8e8d2": "enterprise",
+    "427242c3a04f77c7fa34501b4a74aafd9d5ceb6a451adbde7cb3241e452f2060": "enterprise",
+    "45be5785d5220a0da09a77f04d4088224ad6a622e09a3d79e6e6d88792013ffa": "enterprise",
+    "46c9fef318f045ffd7c6323933845a34afcd16483d47b61405ed6a21ac0e196f": "enterprise",
+    "48ad4bca021f6db1f64d54ee29b30b3095a357932a9a3cb90bd97b2d0a19397e": "enterprise",
+    "48f8a214215783bc461c5a6da32cb26aa741bd4cd1e1f055493d0de4e6a262b8": "enterprise",
+    "48fc0495a3dc76d6dd70a01a2cc96a8ec6ed80eacd5be6af610f42952f09e6da": "enterprise",
+    "493615832e25dff49b54ae80712a0b204fc4285a9391f6e17395ec698521904a": "enterprise",
+    "49a89f3d5987682e903ae95da22d7d127e1f38daae533260a31f7d8f8897b0af": "enterprise",
+    "4a81ef1fe65be689a6b3cdb926e2900a54d299e1de840e1fc0caadbefa0a2cb4": "enterprise",
+    "4a86b0d6a7c177cd01d5ce9aff6c638a7ce82de1041a06603a710f8c1c95d184": "enterprise",
+    "4b982a3038a0af0efda96f9ba4593e010b284e6061f198f98d55266d8c865577": "enterprise",
+    "4bba700dc6c6c724881533a3726a22de94638527f861ca1d055ee09d1438a393": "enterprise",
+    "4d7e825fc735617ca652a16f7238faed2609c2b046876c5281d6992aa267d240": "enterprise",
+    "4e9d19f361cbe656386626f73673f15c4df42ec1a81a30b49251a5ae547f8510": "enterprise",
+    "4f12ecff096f49d2946eb9601d1a5ec8efd19592115f5b62fc836ce9b5141bed": "enterprise",
+    "4f1411261a27adf3571d4bd56d7ee42aee908d895d2db147bdb0805743a74015": "enterprise",
+    "4f2a02599bb30187aaef5515b8df05a4dcc60826d00c734aac92a6b13c8e9087": "enterprise",
+    "4f9b4e88e3c8899380164cd4462b4cc983c4de8279284be2bca8ea59ad17c148": "enterprise",
+    "4fa9ea2865547795f87cbd85f3f7695647c8983cc87ca169495e8467d916b160": "enterprise",
+    "50dccb51d2d0cd0427b1ee2927422c174f0d495b8909cfe7aca7194514a290d7": "enterprise",
+    "54105b87d008ed2c0b344919eef0d5374a759e55d29686349bb54eda1e9da29f": "enterprise",
+    "55112a8003f025a597151f362375d7dc340f72e38495049a733d1681ef148be9": "enterprise",
+    "574a44463caa753dd3b9753643bfcd18209634e2e9a57183646672762bf68a81": "enterprise",
+    "57f3fdf10957c0d441b0a2194d9c084febd6742694fed045333f1ed745d74f58": "enterprise",
+    "5a34a2dd4009eb8be0d753d4ea194030241fbc153bc266dd92ea9d1e111f2f56": "enterprise",
+    "5a754d421d645003a7d4a27d6b83f0181d76f6b14c40e3e3166f8e772db527e3": "enterprise",
+    "5b376a30ab2b802321a09777a02096d5a37efa7de3ee7f658156b00f6abccb76": "enterprise",
+    "5f5e29aa696d72db3f148e343d30bb0fb70fa0f3f38a1f5ac26a7bff791f0641": "enterprise",
+    "5fa50c8bdaaaa57667c5c9dc9894b387db3589bd0642e896082c8676514f8b2b": "enterprise",
+    "60a5168cdff045ba5f730dbd98aaf46b0be637fa2321ce28e6ac4a6c8df6c8eb": "enterprise",
+    "614131df9814448b9443ce7d3202775159bebb9e18da28f625af38131c0a0ec4": "enterprise",
+    "620a733932a715b47380ff07f0cbd57247ff87ac9f73f269c85a709fb3564a94": "enterprise",
+    "63521400abcc7d4c9265ed309cd58779dec7f4d69f181b8bc3e1ee701daac803": "enterprise",
+    "6427792faaeb810cdf4e2245509196227ceba5e9aac1f0fbdeed8527194c7358": "enterprise",
+    "648764f94768d780823fa003fbb7287736d3db628f9bee6f9b7916b72f9abbd6": "enterprise",
+    "650c2f8d1b9667778d29c70dda64209337ed725e57b52a087ed33868e3059c0b": "enterprise",
+    "658ba4ed470c868975f0e117c5320331ffb2da19d24d15ba004d2e144a6b2070": "enterprise",
+    "66454b7aed26cc7f3073acbee992924b3967c8a0bdf7a93c7d6bcc3068639bb0": "enterprise",
+    "66633f3f09af3b37f3fd1ec60e58c5103d3f4d2a6f55229993b8023ef572a299": "enterprise",
+    "68a4652886a6b01992054fe66de55d8affaf830d76a984e7d5b8b5fd56043138": "enterprise",
+    "6a865bdf79803a283fb3c1576d2cbf984c491151b406e650fdc16ac564c518bd": "enterprise",
+    "6aba58fb0e49bb6ad46749c0e622eea663bc3f13bcb3d6e36b1db720c6355bdf": "enterprise",
+    "6b1cd0380d85d19e8e05351385034bd269d7b101472005a002d583231d4de018": "enterprise",
+    "6c6f5ba7a13004c18f535164a6eae1aae5805f38fa3d39f916669fe0a80abb2c": "enterprise",
+    "6c881a05245a03719d8fa31236c3149c74d3cce712989c5f343f576fe3b6e060": "enterprise",
+    "6cf9dabec6dea484f7321378c43eaafec4771071ddfc163eb71ea46e858bc39a": "enterprise",
+    "6f6825aae1938c92599cb9a3c039eb3abeea5c73e2335f34fc6a44a4df75577c": "enterprise",
+    "71b660b57d9267d671d55032567932728ef656bb711b16e3a00d7b8d4747c309": "enterprise",
+    "721a73edbbdb196530befdb4fbfe029cd2aa4b123b6902020cc451f326bfedc6": "enterprise",
+    "724d257dcc7038704fb377a7de7149301ef1823b98882ad2a476695023b9165b": "enterprise",
+    "737e35113e61349734a4cf230a7b3576cb9ee9cf63ab1fc01f7d7139615e6958": "enterprise",
+    "74a805611f3ff7381ae984831e2ab76e9562356477db3a3c599562c434424d31": "enterprise",
+    "753d131c536770545848e0eefcc6e4c8b79a1c4bf64e48f2a4caa1ac141953f2": "enterprise",
+    "75d3d6e4284cba96a13f00cf75818aaf7fcae2226f1ee7c382a26c039bf76b7e": "enterprise",
+    "77fe1918cd2fe457a5e874e93ffdfc9cfcbdf52c71f09f1235b61a07095d881e": "enterprise",
+    "77fe6372e894f67ad861b6ef643756ea630aed891236b35e1e64cc269e5921dd": "enterprise",
+    "78b0b17b713f255bad37101d414fad2dcd10ccde0c13a947637fbc04fce5654d": "enterprise",
+    "7a8652f45b8b009bc77900b7867e499ed638ddbf5c1d78a18a2c3f152848c97b": "enterprise",
+    "7c42942fbc0321ff251510381f9f79a8319fbe845a5e550ae72b98469390cadc": "enterprise",
+    "803e726d093eae600c4f96ee244d984e759c91cb582ff4a030ad3a10c2de70f4": "enterprise",
+    "84b26aaac0a93d142e00e3fbe3d9b56caf7521e4d0a6d62b7b4ba40d58b76661": "enterprise",
+    "84f4628fa278319675658d42db9d13eaaf83e71abe5d6614689486bff40888f3": "enterprise",
+    "857387459909ac8566c4a63604184f3d7f4422c2a383289deddbe9dc906bc97d": "enterprise",
+    "85e5f13c67375bcdcf0bf0765b41775368190b46f5de76e757b8da8de4ef71c1": "enterprise",
+    "8657999cc09925d70534bd1c8a860f98a8747394e8e34dd6463b5afd3e19537c": "enterprise",
+    "8662656094fab379f0d4170aecb1ae1b9afc21f2ca523a055ab757384f1afdba": "enterprise",
+    "87caaaaee4f96a71d60d1d282205f382af6c82e871496cf5081660a6acac58f8": "enterprise",
+    "889f33610dd4b355249309548b12fb97ceabf8d259127d8e03e4e2548492a049": "enterprise",
+    "8940734387758fb8afa8ea33d2d71a1328c8500257039f57dc940ebcdebab83e": "enterprise",
+    "8984c0ddeca98304266430c6f0d62ccca446c77687c0af8693e53726b1c74e3f": "enterprise",
+    "8a43ee558033612801ce973c9274f516109304a777add8f4903f2076830de8eb": "enterprise",
+    "8a4e329cf2f5bb4f1707ff222df0387c4d9692d899ffdeccdfae086ee8653f2f": "enterprise",
+    "8b99803814655c88fd5e334f4ad30122a58ebf47c1b3ddb31d6e8793e138c608": "enterprise",
+    "8bc16de310a8fbff90ac7e87eda1225a58c429217a9edc45fb7348846020fa3f": "enterprise",
+    "8dc24beb18764af3c1b627c46e8030df47004ff4e36aa23da3cfd78d2339a212": "enterprise",
+    "8ea640d23d11a67de680bd75c347b7d7be7d1176867c0fb06579c664dfc6ac4f": "enterprise",
+    "907799fc0a1341c4f71441328428ad94b16605e8edc65ea93440fea5405a3b93": "enterprise",
+    "919571144c2616dd54dae3a14e7d683e6a6be0d4398615d7caf8a90c09891fbc": "enterprise",
+    "91b3ac3d71988ec6d87cc00b76e890d327711c9acb381134497a756927206155": "enterprise",
+    "91c24d40effbaf6a9471c95ee98825dd740e027305f6bbcd4ae45dacde080188": "enterprise",
+    "92ac0de121e926cc0defd1f2198d42a56bcd33c12d1868c53474512db3a96de3": "enterprise",
+    "930ce2efb1d3458e50b123af645dd1623eec267444028116100d19073ccf18c8": "enterprise",
+    "9322eaa0d11e84d7573a2ad813f40bf1b6d1d53161e13ea1c1c21ca095ea2bf4": "enterprise",
+    "93cc6b56857ae66fa4bd32ad42498021707a89d4d2dce046464fbaca5eee108d": "enterprise",
+    "9511cbe235a93151a4f44863e91759b38e99905f9a4787b97ca5fb8bf79a0766": "enterprise",
+    "956e0f12a4d2669e184c35a5cb441df6587b20ce103e20e1d291a892fbd754c9": "enterprise",
+    "9580361114670f7831f9814fc573f8633903e1052e9ae49925c3b32981245175": "enterprise",
+    "96d595d036209ec925c1da0aed3efaa06f0e0c4bb991d15d9f292874163ca9a4": "enterprise",
+    "96dc70100925496e1136d5d4d66c76d550433715d7445f2fe4c1f72b1e34a48b": "enterprise",
+    "97536af8d2e52a87860b498db0717a9c1e26fa39fa1ddfbe509585df34e6c356": "enterprise",
+    "97e4c8715d4b36abc2f79dd2be7ead2be1080f8751c1baaf506a944377a22f2d": "enterprise",
+    "980c29d5018b034311cbbfd86c095f050de15c5e764d84358fc35c428571ff75": "enterprise",
+    "98b6e211028920ac84904c76ec995ed3fea868c542442919e6f3bd5f05fe59be": "enterprise",
+    "98e72d2b2a62c7fbe26a1494f519d526423c55597b959be4ec60f6a084654ee1": "enterprise",
+    "98e81170f5b9917a7d5461cf2cba0b2f39185d36233cfe5909be8f4b51541c72": "enterprise",
+    "9b01a58877fe259e6d3d68b6995509705e2791d0b5171e3199db837100a7b0a1": "enterprise",
+    "9bdeac89d05f980489556f7183014331d4d976fe5116f18f803c50a94296ab52": "enterprise",
+    "9be0e5e2a9d68874525f57e7d46ce72f740bfbf3761163c5395d57df73315462": "enterprise",
+    "9cfbf8f8643af23b0c4b24a93362d76b019572d7bb25b7df6eadd7241e6bd362": "enterprise",
+    "9d890839b65099c94bd5d4d5c17c44e050a4dd9684594339f5f72a44a401de64": "enterprise",
+    "9e5e1caf5ca0301747b546397431fcc6b5898f21f1d144ab47de0859b3692628": "enterprise",
+    "9e6b90bdad374dc42635983246e14eb6e8a80ff953a2e06cc160f77b44de3a47": "enterprise",
+    "9e99d21134d2f54ae91de342979b20fa5715ecd41525c2e0273aeef9262ae674": "enterprise",
+    "a0f1d1a016a9a7c5b812a568f98024b8e2cc4b5d9551c5ee3d81f932c6c4d96c": "enterprise",
+    "a2cac07f86124eacfef34c4dd0349854f08e78928c64c9a6fce0e988432f33a3": "enterprise",
+    "a2d200af02c98bb97d04b06cc07a95e1a3824c2d697124f12d3d4cbafcb6981b": "enterprise",
+    "a2e4f7222adacdfb5377e2966011f89ccea0b09464bdef6689718d690b9cf9ac": "enterprise",
+    "a2fbbc53fcee1b840b4830ef7a09a2cd052d10faf58135d2eadaa06aaf1736c4": "enterprise",
+    "a376011285476073d855048fd01f2aa0e5fd40a62247c205a1f453260ec42e6a": "enterprise",
+    "a65761400553267292dc03938fbd8e7e3e4506067128f6762fe4c42f7e480c3c": "enterprise",
+    "a86bcc24c34103fa100c79aaec5ea2a7810a9a4f95d9b5453dae12325ee0391d": "enterprise",
+    "a86bfae5ed1d89c07f0fd1ac6d32c6342aa81e019d5346ec2e04b688979c82fe": "enterprise",
+    "a8cdfee2d840a034b41f85bb1cc5fd7168833746dbedd868dbf7bd4945d04308": "enterprise",
+    "aa50c977838d6f37992896ad8e370dd8eada51ef1e4f2a2fb237ac3016819671": "enterprise",
+    "aaca3a736a723b3e31c26f228b7fa5cd7c7a7e3a3cad7d21941d2210199778bc": "enterprise",
+    "ab978618564423d0d652d02585b7db5030ddda2aca8a70ce6b31fe39850de7e7": "enterprise",
+    "ad7a43cd1eb50ba38efb23400e8b76fb7e18f7cf63f8c741fd9cff8592065db2": "enterprise",
+    "adbd7424dc1302113ea0095221ba0955b0e5352001db5a4c57d098d95a603fe8": "enterprise",
+    "af4b0574fa287cecc1ec6355dafd09e5ed1b43e1d5ddf5095d1347b89bb4c8e1": "enterprise",
+    "b1b97fe66a04ec015ab3b4d73b2100063b7fa4d0264659c0bbcc84f76c4015e2": "enterprise",
+    "b27c3fe3d1a937ce68c149567f116278636a41e845e2501094d81e6208ce1f05": "enterprise",
+    "b39f7737d717f6598f86be6196d67360b5decab086c24f1e829310dabd5be5e1": "enterprise",
+    "b400459a212acc06a59c14eb7e622a098cec85e70dcfa71c0fdba05fbb3acd1d": "enterprise",
+    "b5e7434e74716b3b1b0e1d53d1ac7751455c8005a122a2707145705d431bc7f7": "enterprise",
+    "b6e38b4131e5ac23f4e9dae54bd8bef3cea2ec79a99b894eca7393254d6cf138": "enterprise",
+    "b720eff4ea9fe99ab5b4bc1d6db26f5e1eac3974f10562f86b9208c80c5e0406": "enterprise",
+    "b7ab2cdcd9330df9fbbeb7a31cd75b392c8de103efbd95d2f1dc5399107311a3": "enterprise",
+    "b948e94629bd7c7a1f6cc01a1c58216df142919fc88de741e203f124e3152f93": "enterprise",
+    "b95d60aaf3cdab10342a5e83880058f3c6ee21894cdec474fbf8f617f37b865e": "enterprise",
+    "ba96d47ab02dd12c383b40cc60b02a37051137a0c782a1cf706de014bcfbe97b": "enterprise",
+    "bb50bfff9e0b22074280b625158ef5da7e121f852f3f1773d1565633b246e2f1": "enterprise",
+    "bc074e3ba782ed87cfcbe64fb5d24caa97802408e2e137e4cd5bfab7eb361617": "enterprise",
+    "bcd1576c206ec1e65c28e2e7e50504e37f4c6e552b40e839b603d419a56b13c5": "enterprise",
+    "bd07692d92568cac3ea95bd88ae9e8b2dc432df0b610442f571c7f6a078f8df1": "enterprise",
+    "bdcb0863f7f3eabf950e885d003d03536c8d472fb62034faad12aac856bb5f2a": "enterprise",
+    "bded7069ff67a1f626ba9b610bee66818cc4a28212560539232a9dcd0a3c671d": "enterprise",
+    "be85435744121b1fa0397e01db1fc2eee33172b40a51c0f7df8c151489e78c9b": "enterprise",
+    "be94dc051a49eca268b7ffd95461d5a94191a1ceb650b4704f41a2c56678f721": "enterprise",
+    "c055cadcd46d9356bbf47fdf713f846a3b9b720f18f050b9e07b550dd5e3f1f3": "font",
+    "c062eef909b3ea834cc66c7b54821facb92667f136d79c60fae88dcdfc71d466": "enterprise",
+    "c0e2cf3520a3569158ed9fc0aef6f3e37a5d97d77f811baccced43a3556e7e12": "enterprise",
+    "c1164c6bb839942f37f49e0bc79a63b53f6762a0c3c076bc8a2be38d9b920c55": "enterprise",
+    "c117dcbd0eb59bb982a9b498d618a519021c67b81ee4a94e263ac5543cf4d1fb": "enterprise",
+    "c1e554b5c7514e688a3893195e7f8318439526bc66a80290b716c667cc327b01": "enterprise",
+    "c1ece4d3080eb10ff6468119e54fe40d4ca5d908253fd09bb642a53ce9d570ab": "enterprise",
+    "c1f019b7e9076f4478de742e72be85147bcb7a6af5f335ef3bdd3ca51038eab1": "enterprise",
+    "c200fff632e012a203364a9391589882883a8c414f5cf9c922aeeffab389909d": "enterprise",
+    "c28250183854b90b9a0538f249ccd4b7515e379a2d9a0354f518d501c5cde346": "enterprise",
+    "c301a7818b6d3f78f2ce92f1a5464b2d070239a65957f7fd96d6a7db5f440973": "enterprise",
+    "c333243f04435218c2903a0ab9155aa3dc6b1855f425be38eedc19d170ea12f4": "enterprise",
+    "c47b78513ab22c029a27b79b85267db22b4efb41762127d09c173db86d34adae": "enterprise",
+    "c49139b45bb6976c210830adc1efca58336822049b591b65ce1161ddb27e4369": "enterprise",
+    "c553bce44f20cda9a4a7fcf8e7b14b2e58b958ad3ed44022c3ecd47fc32f568d": "enterprise",
+    "c5ccbae05a2ca5b45963cf7eff0c95f992b0beab71889ec2f4d29e0e24455900": "enterprise",
+    "c5d9e89b18e1699592a2da5017c2595f2e6f6315785a98583df9e4e5a77999a9": "enterprise",
+    "c5f56fdfb704fe49c7ffe89f8fddc36ebcb2abc9b939c506350234b27f2b1a85": "enterprise",
+    "c64eed1a5d3f804d30730f9f8d8f02c9c38085ae1acbde60cf5e91ef17c76b2e": "enterprise",
+    "c6d369124c3906ad9fff9608098e8d29318490350a2147930e5be16ef7597c3e": "enterprise",
+    "c6d9ede4f8d329e8adbc240772659418a7bbbf794516a7f9772e9e24eef1827e": "enterprise",
+    "c807acc87da6e6c46acb1e494c5ffc9eea60261e852ef695fb056899722fca67": "enterprise",
+    "c88eaf5cfffa1c26e647f877caeacb47e6fc5561d60fb397b48da084d4691e05": "enterprise",
+    "c8a4d31219403ad9558b30d671ce361f455909a5da5afa9f7087e2be5e502920": "enterprise",
+    "c95bb726740ae3dd515d354e4cad672ea6eae7a4621d5b4de2d52f7c47be9c57": "enterprise",
+    "cf3783a654fa74b1d6e14d961fe3fa3b3ccdb387a2c6c61565315c721d853ecb": "enterprise",
+    "cfe5e5d9f0e288a0f72fcb6dd820d64605eb21a5f886cbad31249a3d4119cd30": "enterprise",
+    "d1868ffe674faeef4e85ff00cfa02f5449c837a6aa930741ab61a6460bb856c0": "enterprise",
+    "d290ec661b745ae261af396a0903155ba707ccdbafebd9c338409f332f4afbc8": "enterprise",
+    "d2ac42498b9db1f2724105b5bcac13b3bcb3a413a9860695d7d55cb9cc714ed7": "enterprise",
+    "d2d5ff99cda87ac8cd4fe74249134d49381bd5a5d4dfb0f2d83ae0a308d783bc": "enterprise",
+    "d339c9293617462b9e52902d86af62c1f2f99641c720556adbc6cf8aa65b993c": "enterprise",
+    "d36f6a2a0f03c4c1facc0277bc52fb94b93a4dec466d4e9e6f153ecbbad4fec6": "enterprise",
+    "d3c4b5ac1c212fb0b89b4d2ed3d3671169303202417e20fe14092d9a387cd107": "enterprise",
+    "d5abe2bede0f1a044be46cb500148077f89c0308df8d647b3876da59966aa0f4": "enterprise",
+    "d60854a2f71b50390c3f169c8d100ab99c80e163b9cfefb1d29f880dd2c92a2f": "enterprise",
+    "d65767cc2aa26e8518f18c5b8a8854d8dff0052393898f2d33f354e75180991f": "enterprise",
+    "d6b013bbd387e3355b0e25b53278ce6e7c30a535590c239806ed01a21e6bb810": "enterprise",
+    "d7853426f115ab860ec5ee2d32780be0222de06333c1baac5d6e8df353c2c1f7": "enterprise",
+    "d8cac9d3d61dbf5fa834e7aa12a5a0931dd772eb08b86a920e9001ddd9c01542": "enterprise",
+    "da7fa50d1b76ed19f57f195d53a560d6f9b402ce6a21dfc0fe18a31adab99b8d": "enterprise",
+    "db3f13ea5794eac4fee51decf0f7e773b995866efceba203871169c6f33aea38": "enterprise",
+    "dc2ed4449e8af695906388b0c9dda2598288746054bb7afe619282983441c098": "enterprise",
+    "dd6958535a4a2371f83206e400c35a21c908d699587865ff5ba4a14f65db8341": "enterprise",
+    "dde4388265e0196bee61983f36bd580a5a83f03bb08b7780a2bb69affd980ccc": "enterprise",
+    "de18c907b910d61b1532cf0d63f6c4e4cc6f46925c52e4fafd6835383112e0fc": "enterprise",
+    "def1129b3020b8a8936f3dd6e1610d891495188fe45e05097581e17893c925c5": "enterprise",
+    "dfa7ecf55b673ee93e211c87e91941f4debcca88a39f97f92739f53b6836a236": "enterprise",
+    "e00fe55e595e59f49ca4b059b610805c1b1c6654a453ba9bdddf42a42d3c8fe1": "enterprise",
+    "e096ccf8d4001fcc3cae186ab02c3278d31916e128af7479cd78fe0dc8f6d384": "enterprise",
+    "e0d2feee79e5622c421ac7141f907d3712eb4f9bfdb49eee2cdf37bd12fad825": "enterprise",
+    "e0e07e40a5643eac644fed21753e33bcfa1840a24a909d8e1824a3049bdb3b81": "enterprise",
+    "e164d4c498900bbf505e054022edac7f56aa33b5d4d3d889a0b8aef3f2feabb3": "enterprise",
+    "e22a40cf787c47ae436a18d1d04dd011e8d46f3d9ffc7250b7f73acb6c9dfd4b": "enterprise",
+    "e30f20151a323012a1581a26f5c3c0b56ceaa1a8a73def47f145f70b2b13bb23": "enterprise",
+    "e34d7dbe8452bcd6051e14144104c080437bdaf2e8b7cfb16e939960a6f70157": "enterprise",
+    "e38c41fff60e59d0e2781ccce678ee2c8d0c13d10a51b935bc226c27c85009b6": "enterprise",
+    "e55b65fb14db143bf28bcfaff140ccb48717e8fec4f0471b88cd86e091a00eae": "enterprise",
+    "e5ae2682b2acf2e78612c47d6d51133e23c440bb6f657052c6f9d20201774cac": "enterprise",
+    "e752ddaadf73d6178c235796ba6e4287e09fb4c273f242430b99970f0f802307": "enterprise",
+    "e82c06f87f0d6061ad9918965923c6d91efb644e85671043073b7270133898d8": "enterprise",
+    "eb371c7d5ab443fa719efb3d86c0f49e743aceafc31a7833522950727939ae37": "enterprise",
+    "eb4013615de1bc83e0e114d0b47d3c79cfdcf9cee06022f9b5b4ec315a0e9895": "enterprise",
+    "ec39677a938abd70e485073f7b5209a6c22db834d520634787eaee6eb781a869": "enterprise",
+    "ecd023cd28e3c213c90de6cb4c7a3c784a5b6a42fa7fb375f9570d1b7e863044": "enterprise",
+    "ecd21d3000173aa27abd335765d5c77a4f59833df118865403376400d94c2790": "enterprise",
+    "ee3e80bed13dcfb1f2173c09e0cd580d82aa9a03ed5483c2fd301c12de6e5808": "upstream-tracking",
+    "ee657d87e77ce1e15fc60ed130774a57894e375fc560f69f436078cefa459da7": "enterprise",
+    "ee8fa195b2a2b3e111a6273ec681182aa302e1f7550e2f9bf4a54a72c0990279": "enterprise",
+    "eed9a80a172773ddd30d020bb185c32ebe34a733cbd433ceb80300e46a09cb2b": "enterprise",
+    "ef34246aef62ebdef6d6e8a46db8eabe3cef957e490ce5e53f56d93dbfa54d73": "enterprise",
+    "f03b3eb6becdb18ae0d59f131d03f763659f1a46d4fdf6e229a33b243f73527e": "enterprise",
+    "f11186fae17d7497372a879f52d8c132fb5f4dd448500bc7481af21a4c8d57e8": "enterprise",
+    "f26c8188f31f205bc3d1444d82b2b5fca4b65f1ea3fae829b4f15d556e831e47": "enterprise",
+    "f2b302201291c5ccef9152f82f76a81748f27af1f752a3d30efc837ef8d156f6": "enterprise",
+    "f31fe65596733736b29907d3fd4769170196bfe6253d88ae105a78353465e05c": "enterprise",
+    "f38f8aa3a35c2e3ffe0b9c951f31adc6a41d83b93a057b809ff65ccb82482d7a": "enterprise",
+    "f57c832857f49219ba36b12dfaf49e2d0746429bffd3050562d2a93c84d8af8c": "enterprise",
+    "f6718db5d84f906f3298484d0c3a03616e10dc32394f5d3d130674367b74a853": "enterprise",
+    "f6a74281818dd263d6bcf9615e8f82596bdd42cf160b0ddd1a98a01b236114fa": "enterprise",
+    "f6c797a4be603bbebd929185ce8ef0e174385eb5c916641068aa28b3fc6d5dfe": "enterprise",
+    "f7abe8eb1003bd7682e42b7e9858d1d6973b40efd9c351aeffb7be3bbcee5fdb": "enterprise",
+    "f9ec86f285d118f69ae7849fbe025548cdcd8e768bcdc183ea44c2b176ef7cf4": "enterprise",
+    "fac1c5498471212d2e647ccd1998003ba638869ed4e7b5d3772e639f081f94a2": "enterprise",
+    "fb60cb704611efcad4564f99113eb354fc6cb91bbdaf5b317f278982fe604334": "enterprise",
+    "fd103bb5fa6c679c3bac18c3cdeacfaa196db8185ce65e6e8f25cdda8a6d2ef4": "enterprise",
+    "fdc80d8a5646835ea09b8b1a746c47a58731ce13917c4c9da24630f418d56239": "enterprise",
+    "ff7d95977de1d36f8695197382d91a93f9b42687642ca70cb604a210ec857ad8": "enterprise"
+  },
+  "excluded_sources": {
+    "apps/sim/lib/consent/scripts.ts": {
+      "reason": "Trackers et identifiants de suivi amont exclus ; module indépendant Memlia à fournir en P01, consommateurs Apache conservés.",
+      "sha256": "ee3e80bed13dcfb1f2173c09e0cd580d82aa9a03ed5483c2fd301c12de6e5808"
+    }
+  },
+  "reviewed_secret_fixtures": {
+    "apps/sim/app/api/credentials/route.test.ts": {
+      "findings": [
+        {
+          "line": 389,
+          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "rule": "secret-signature"
+        },
+        {
+          "line": 403,
+          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "rule": "secret-signature"
+        }
+      ],
+      "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+      "sha256": "6c67db3302f33b7ea9e0b6993c84c39c38d0031b077db53f52eb4fa0b9e5eb8c"
+    },
+    "apps/sim/app/api/v2/credentials/[credentialId]/route.test.ts": {
+      "findings": [
+        {
+          "line": 129,
+          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "rule": "secret-signature"
+        },
+        {
+          "line": 141,
+          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "rule": "secret-signature"
+        }
+      ],
+      "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+      "sha256": "613ddc1fada4b6b7420c577a3fbd126ef789656ba090b478a0aa02a5cbc00f20"
+    },
+    "apps/sim/app/api/v2/credentials/route.test.ts": {
+      "findings": [
+        {
+          "line": 228,
+          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "rule": "secret-signature"
+        },
+        {
+          "line": 245,
+          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "rule": "secret-signature"
+        }
+      ],
+      "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+      "sha256": "06564537093189f541163fe83e3754eb109e10ed27cd013660d8a51f63527134"
+    },
+    "apps/sim/app/workspace/[workspaceId]/integrations/components/connect-service-account-modal/connect-service-account-modal.tsx": {
+      "findings": [
+        {
+          "line": 439,
+          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "rule": "secret-signature"
+        }
+      ],
+      "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+      "sha256": "b0cc0dae64d9e983afd292689632dba475d8dcb402afcf8c5e6b22701d799835"
+    },
+    "apps/sim/blocks/blocks/cloudtrail.test.ts": {
+      "findings": [
+        {
+          "line": 31,
+          "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examinés.",
+          "rule": "secret-signature"
+        },
+        {
+          "line": 44,
+          "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examinés.",
+          "rule": "secret-signature"
+        }
+      ],
+      "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examinés.",
+      "sha256": "ad508d82f958aa3ca99063c32f23acd16f01a60ee81a7887ae116f47288ba420"
+    },
+    "apps/sim/blocks/blocks/iam.test.ts": {
+      "findings": [
+        {
+          "line": 17,
+          "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examinés.",
+          "rule": "secret-signature"
+        }
+      ],
+      "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examinés.",
+      "sha256": "da749555c8d845b6a0f4f418cac0b829b10682de3eebb675ab9bba956a7c87f1"
+    },
+    "apps/sim/blocks/blocks/pi.ts": {
+      "findings": [
+        {
+          "line": 454,
+          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "rule": "secret-signature"
+        }
+      ],
+      "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+      "sha256": "9bbc8aff5423d2b1006f4cb0204b9a1e627ee019253e9f10194ca4c123a63b46"
+    },
+    "apps/sim/blocks/blocks/sftp.ts": {
+      "findings": [
+        {
+          "line": 106,
+          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "rule": "secret-signature"
+        }
+      ],
+      "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+      "sha256": "ab1c1cf1a5c47f6b85867d861d563f7eece2e7e1d09fa76885e709df3746ab79"
+    },
+    "apps/sim/blocks/blocks/sqs.test.ts": {
+      "findings": [
+        {
+          "line": 11,
+          "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examinés.",
+          "rule": "secret-signature"
+        }
+      ],
+      "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examinés.",
+      "sha256": "b4ca08c25825f12c4f3cf8f0402d2487072427d3bb171fd5e01e9c687a399d22"
+    },
+    "apps/sim/blocks/blocks/ssh.ts": {
+      "findings": [
+        {
+          "line": 157,
+          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "rule": "secret-signature"
+        }
+      ],
+      "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+      "sha256": "a3c47fe6ca66e788957d8c3298ba4d9ddbfb1496e8d2f4397c451cff61843e96"
+    },
+    "apps/sim/connectors/google-drive/google-drive.test.ts": {
+      "findings": [
+        {
+          "line": 283,
+          "reason": "Chaînes synthétiques examinées dans tests de rédaction ou refus de credentials : suites alphabétiques, marqueurs descriptifs ou clés volontairement invalides.",
+          "rule": "secret-signature"
+        }
+      ],
+      "reason": "Chaînes synthétiques examinées dans tests de rédaction ou refus de credentials : suites alphabétiques, marqueurs descriptifs ou clés volontairement invalides.",
+      "sha256": "aa4efe41f148c2b1b04b53e5bcda2996626501e013e4709811675882a87abee1"
+    },
+    "apps/sim/connectors/s3/meta.ts": {
+      "findings": [
+        {
+          "line": 23,
+          "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examinés.",
+          "rule": "secret-signature"
+        }
+      ],
+      "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examinés.",
+      "sha256": "4fda567a1de521f70b12108ca86540e482846f62a605cd6537da77126ed75901"
+    },
+    "apps/sim/lib/core/security/linear-regex.test.ts": {
+      "findings": [
+        {
+          "line": 342,
+          "reason": "Chaînes synthétiques examinées dans tests de rédaction ou refus de credentials : suites alphabétiques, marqueurs descriptifs ou clés volontairement invalides.",
+          "rule": "secret-signature"
+        }
+      ],
+      "reason": "Chaînes synthétiques examinées dans tests de rédaction ou refus de credentials : suites alphabétiques, marqueurs descriptifs ou clés volontairement invalides.",
+      "sha256": "ab630d6a804fe9dc3ff78e3f2ef4d7e5dc5d04d863b10490970ddf54c47b6dcd"
+    },
+    "apps/sim/lib/credentials/application/provider-catalog.ts": {
+      "findings": [
+        {
+          "line": 271,
+          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "rule": "secret-signature"
+        }
+      ],
+      "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+      "sha256": "bdc666b0fc8205c0150707db18650c73a49851a802ce6fddefaf5ff16ac6c0fb"
+    },
+    "apps/sim/lib/credentials/client-credential-accounts/descriptors.ts": {
+      "findings": [
+        {
+          "line": 551,
+          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "rule": "secret-signature"
+        },
+        {
+          "line": 659,
+          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "rule": "secret-signature"
+        }
+      ],
+      "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+      "sha256": "28270e07589745f32203618cb08b9a9ae02370b8600fb899bbf750c28309b45d"
+    },
+    "apps/sim/lib/credentials/client-credential-accounts/minters/salesforce.ts": {
+      "findings": [
+        {
+          "line": 208,
+          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "rule": "secret-signature"
+        },
+        {
+          "line": 209,
+          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "rule": "secret-signature"
+        }
+      ],
+      "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+      "sha256": "b67d4d04403da4ac71143aded486629d51e0efb00a367958c0170c184fa47640"
+    },
+    "apps/sim/lib/credentials/client-credential-accounts/server.test.ts": {
+      "findings": [
+        {
+          "line": 52,
+          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "rule": "secret-signature"
+        },
+        {
+          "line": 87,
+          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "rule": "secret-signature"
+        },
+        {
+          "line": 99,
+          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "rule": "secret-signature"
+        }
+      ],
+      "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+      "sha256": "e40a48903a0f1dbc874beb76655214d7bcea204fafbd51fdaee0acbc409e39f4"
+    },
+    "apps/sim/lib/credentials/oracledb-service-account.server.test.ts": {
+      "findings": [
+        {
+          "line": 24,
+          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "rule": "secret-signature"
+        }
+      ],
+      "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+      "sha256": "60eef4cd4cd90b15c3273435ccb60e4a8ef117eee1c3e222504c514b01797b20"
+    },
+    "apps/sim/lib/credentials/orchestration/index.test.ts": {
+      "findings": [
+        {
+          "line": 376,
+          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "rule": "secret-signature"
+        },
+        {
+          "line": 384,
+          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "rule": "secret-signature"
+        }
+      ],
+      "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+      "sha256": "050a814556d528f611fe8acc5828358a26977e4992a33245511df9eb4f3636db"
+    },
+    "apps/sim/lib/credentials/service-account-secret.test.ts": {
+      "findings": [
+        {
+          "line": 131,
+          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "rule": "secret-signature"
+        },
+        {
+          "line": 140,
+          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "rule": "secret-signature"
+        },
+        {
+          "line": 285,
+          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "rule": "secret-signature"
+        },
+        {
+          "line": 290,
+          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "rule": "secret-signature"
+        }
+      ],
+      "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+      "sha256": "918457359c61fe58991a19a16885880b20a7c86af8c007a04e2b2bbefc230045"
+    },
+    "apps/sim/lib/data-drains/destinations/bigquery.test.ts": {
+      "findings": [
+        {
+          "line": 36,
+          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "rule": "secret-signature"
+        }
+      ],
+      "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+      "sha256": "39d38577871edc69e40299ee9a0cdfb307f0a6e129fe103118515505e7898586"
+    },
+    "apps/sim/lib/data-drains/destinations/gcs.test.ts": {
+      "findings": [
+        {
+          "line": 24,
+          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "rule": "secret-signature"
+        }
+      ],
+      "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+      "sha256": "c5036d6f6544885058d5d9502d3807976ee489121f58af370585263743c56222"
+    },
+    "apps/sim/lib/data-drains/destinations/snowflake.ts": {
+      "findings": [
+        {
+          "line": 168,
+          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "rule": "secret-signature"
+        }
+      ],
+      "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+      "sha256": "ff8a62995e33fdfacc2104e0a288f87016e810085eff05e404e028f9a2eedbfb"
+    },
+    "apps/sim/lib/internal/oracledb/oracle-worker.test.ts": {
+      "findings": [
+        {
+          "line": 521,
+          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "rule": "secret-signature"
+        }
+      ],
+      "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+      "sha256": "8174e463a837487f939baad37e9886be9bb3aa90292a4f164c74aa619a328493"
+    },
+    "apps/sim/lib/knowledge/__integration__/providers-live.integration.ts": {
+      "findings": [
+        {
+          "line": 361,
+          "reason": "Chaînes synthétiques examinées dans tests de rédaction ou refus de credentials : suites alphabétiques, marqueurs descriptifs ou clés volontairement invalides.",
+          "rule": "secret-signature"
+        },
+        {
+          "line": 484,
+          "reason": "Chaînes synthétiques examinées dans tests de rédaction ou refus de credentials : suites alphabétiques, marqueurs descriptifs ou clés volontairement invalides.",
+          "rule": "secret-signature"
+        },
+        {
+          "line": 560,
+          "reason": "Chaînes synthétiques examinées dans tests de rédaction ou refus de credentials : suites alphabétiques, marqueurs descriptifs ou clés volontairement invalides.",
+          "rule": "secret-signature"
+        }
+      ],
+      "reason": "Chaînes synthétiques examinées dans tests de rédaction ou refus de credentials : suites alphabétiques, marqueurs descriptifs ou clés volontairement invalides.",
+      "sha256": "a510a47fda2a2a9401ae4456072c16a4437c2056c046f8b028e0d3ce6f282648"
+    },
+    "apps/sim/lib/mcp/error-diagnostics.test.ts": {
+      "findings": [
+        {
+          "line": 6,
+          "reason": "Chaînes synthétiques examinées dans tests de rédaction ou refus de credentials : suites alphabétiques, marqueurs descriptifs ou clés volontairement invalides.",
+          "rule": "secret-signature"
+        }
+      ],
+      "reason": "Chaînes synthétiques examinées dans tests de rédaction ou refus de credentials : suites alphabétiques, marqueurs descriptifs ou clés volontairement invalides.",
+      "sha256": "c314980e3251259e253bd4c8935bac2b25f9bfcde405ec54a0ff2cc2eefec486"
+    },
+    "apps/sim/lib/messaging/email/providers/gmail.test.ts": {
+      "findings": [
+        {
+          "line": 34,
+          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "rule": "secret-signature"
+        }
+      ],
+      "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+      "sha256": "f7d024de5ddec390e66384aa6c28f90f43868ada560bc941ce86465c54b4da77"
+    },
+    "apps/sim/providers/bedrock/index.test.ts": {
+      "findings": [
+        {
+          "line": 129,
+          "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examinés.",
+          "rule": "secret-signature"
+        },
+        {
+          "line": 146,
+          "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examinés.",
+          "rule": "secret-signature"
+        },
+        {
+          "line": 153,
+          "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examinés.",
+          "rule": "secret-signature"
+        }
+      ],
+      "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examinés.",
+      "sha256": "b309942d129c40e9aea29474e52032601346cf9aedc56e837f5050d22748662c"
+    },
+    "apps/sim/tools/kalshi/types.ts": {
+      "findings": [
+        {
+          "line": 432,
+          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "rule": "secret-signature"
+        }
+      ],
+      "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+      "sha256": "31ed9857fc0b5d41311c5b69cdb955aae8962aad892243386dfcf398e6dfe470"
+    },
+    "apps/sim/tools/sqs/contract-guards.test.ts": {
+      "findings": [
+        {
+          "line": 19,
+          "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examinés.",
+          "rule": "secret-signature"
+        }
+      ],
+      "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examinés.",
+      "sha256": "e350bde5faa18eee33521a853e750a914085a679aa6dce18bbc780c0ce74e083"
+    }
+  },
+  "schema": "memlia.publication-policy/v1",
+  "source_sha": "c6cef5f87b6a1d1d01df89e7140bad9e9fd4c2e2",
+  "reviewed_dynamic_imports": [
+    {
+      "path": "apps/desktop/src/main/help-search.ts",
+      "sha256": "04e6cfd10950d3c6dc8bf1d0b1a61cbbc7a54f16f47edf606f95210a34d77865",
+      "lines": [
+        28
+      ],
+      "reason": "runtime desktop macOS : __dirname/native/help-search.node. Admission du code source exact uniquement ; Compiler le bridge natif avec provenance des outils, SHA et dépendances système ; contrôler archive desktop finale. Binaire non présent/admis actuellement.",
+      "source": {
+        "repository": "https://github.com/simstudioai/sim",
+        "commit": "c6cef5f87b6a1d1d01df89e7140bad9e9fd4c2e2",
+        "blob": "8b9eca5810d2ad49840a8edc8dc5a1a07120ee36",
+        "sha256": "04e6cfd10950d3c6dc8bf1d0b1a61cbbc7a54f16f47edf606f95210a34d77865",
+        "modified": false
+      },
+      "license": "Apache-2.0",
+      "targetSources": [
+        {
+          "path": "apps/desktop/native/help-search.mm",
+          "sha256": "25d0b14ae3a7d6159e681eef375933d1cebf55e4653e17d8da57499a2b2c4a17"
+        }
+      ],
+      "enumeratedTargets": null
+    },
+    {
+      "path": "apps/desktop/src/main/native-directory.ts",
+      "sha256": "527f6bb2f875abc4a98dd09bfa1362c292f6ea59813a764e430c10c0f16d425d",
+      "lines": [
+        30
+      ],
+      "reason": "runtime desktop : app.getAppPath()/dist/native/directory.node. Admission du code source exact uniquement ; Compiler/inspecter bridge directory.node et son archive réelle, vérifier relocalisation app.getAppPath, SHA/binaire et licences. Aucune preuve desktop finale P01.",
+      "source": {
+        "repository": "https://github.com/simstudioai/sim",
+        "commit": "c6cef5f87b6a1d1d01df89e7140bad9e9fd4c2e2",
+        "blob": "224d16b37dda4829ee8c11000d4d5e903242dc6d",
+        "sha256": "527f6bb2f875abc4a98dd09bfa1362c292f6ea59813a764e430c10c0f16d425d",
+        "modified": false
+      },
+      "license": "Apache-2.0",
+      "targetSources": [
+        {
+          "path": "apps/desktop/native/directory.cc",
+          "sha256": "1e713bf4cf29037a841ee9ca05d6df5e37efadf3e94030b1d18f26ae3de0351d"
+        }
+      ],
+      "enumeratedTargets": null
+    },
+    {
+      "path": "apps/docs/scripts/test-header-merge-e2e.ts",
+      "sha256": "09f24e17c8527532ae6931b42fb14025738588849306e4d456ca9e5df034270b",
+      "lines": [
+        85
+      ],
+      "reason": "test docs : require.resolve('next/dist/esm/server/lib/patch-set-header.js') converti en file URL. Admission du code source exact uniquement ; Vérifier version/lock et SHA du fichier installé ; exécuter script avec rapport local, aucun changement des merges de headers.",
+      "source": {
+        "repository": "https://github.com/simstudioai/sim",
+        "commit": "c6cef5f87b6a1d1d01df89e7140bad9e9fd4c2e2",
+        "blob": "b2c2f37be9318e6bff4f6a64cdd3d77bdacc73e6",
+        "sha256": "09f24e17c8527532ae6931b42fb14025738588849306e4d456ca9e5df034270b",
+        "modified": false
+      },
+      "license": "Apache-2.0",
+      "targetSources": [
+        {
+          "path": "node_modules/next/dist/esm/server/lib/patch-set-header.js",
+          "sha256": "042dc907341a029fbf1df4f7acaa5a8485dbe7528e5bad8f4046a5a5a20ecc1a"
+        }
+      ],
+      "enumeratedTargets": null
+    },
+    {
+      "path": "apps/sim/bootstrap.ts",
+      "sha256": "8b26e2c43f78459711d0790bfec5950d124fa1df4a726e86d9469556066a85bb",
+      "lines": [
+        13
+      ],
+      "reason": "runtime serveur standalone : ./server.js généré par Next, adjacent au bootstrap déployé. Admission du code source exact uniquement ; Inspecter le vrai server.js et tous chunks/maps/standalone/couche image, vérifier présence/absence EE et bibliothèques non admises avant gate artefact. Aucune déclaration module fictive ajoutée.",
+      "source": {
+        "repository": "https://github.com/simstudioai/sim",
+        "commit": "c6cef5f87b6a1d1d01df89e7140bad9e9fd4c2e2",
+        "blob": "bc2e92b882cea674b1e00e47ce5752c817bcd14d",
+        "sha256": "8b26e2c43f78459711d0790bfec5950d124fa1df4a726e86d9469556066a85bb",
+        "modified": false
+      },
+      "license": "Apache-2.0",
+      "targetSources": [],
+      "enumeratedTargets": null
+    },
+    {
+      "path": "apps/sim/executor/handlers/pi/search/extension-source.test.ts",
+      "sha256": "a5a039d690c47ce38a832f53025a9d49f56626b11bf78b1e196fbdd183a1d8dd",
+      "lines": [
+        47
+      ],
+      "reason": "test unitaire hors réseau : tmpdir créé par mkdtemp + extension.mjs écrit depuis PI_SEARCH_EXTENSION_SOURCE. Admission du code source exact uniquement ; Hash des sources de génération et des imports transitifs ; inspecter bytes générés, tests hors réseau, suppression du répertoire temporaire.",
+      "source": {
+        "repository": "https://github.com/simstudioai/sim",
+        "commit": "c6cef5f87b6a1d1d01df89e7140bad9e9fd4c2e2",
+        "blob": "a5aa4e15559e454c25727f0edbb1d787ca5da837",
+        "sha256": "a5a039d690c47ce38a832f53025a9d49f56626b11bf78b1e196fbdd183a1d8dd",
+        "modified": false
+      },
+      "license": "Apache-2.0",
+      "targetSources": [
+        {
+          "path": "apps/sim/executor/handlers/pi/search/extension-source.ts",
+          "sha256": "f355bc7dce693e1cb152d18aadb8bb1a48cc9764560754994adbcce41ab71acb"
+        },
+        {
+          "path": "apps/sim/executor/handlers/pi/search/normalize.ts",
+          "sha256": "5946c654162db13ab036bf25f32d18bb78b80594372c2d6647baa592f8083f73"
+        }
+      ],
+      "enumeratedTargets": null
+    },
+    {
+      "path": "apps/sim/executor/handlers/pi/search/parity.test.ts",
+      "sha256": "2e2613faa58fb8ee134d96240f5aa9030e88168900c5909ee3e6d83b14f67948",
+      "lines": [
+        57
+      ],
+      "reason": "test unitaire hors réseau : tmpdir créé par mkdtemp + extension.mjs écrit depuis PI_SEARCH_EXTENSION_SOURCE. Admission du code source exact uniquement ; Hash des sources/génération ; preuve des tests hors réseau ; ne jamais appeler les providers de production.",
+      "source": {
+        "repository": "https://github.com/simstudioai/sim",
+        "commit": "c6cef5f87b6a1d1d01df89e7140bad9e9fd4c2e2",
+        "blob": "952f4d0b2cee79b366a5cdc5adcd18bc36d13f68",
+        "sha256": "2e2613faa58fb8ee134d96240f5aa9030e88168900c5909ee3e6d83b14f67948",
+        "modified": false
+      },
+      "license": "Apache-2.0",
+      "targetSources": [
+        {
+          "path": "apps/sim/executor/handlers/pi/search/extension-source.ts",
+          "sha256": "f355bc7dce693e1cb152d18aadb8bb1a48cc9764560754994adbcce41ab71acb"
+        },
+        {
+          "path": "apps/sim/executor/handlers/pi/search/normalize.ts",
+          "sha256": "5946c654162db13ab036bf25f32d18bb78b80594372c2d6647baa592f8083f73"
+        }
+      ],
+      "enumeratedTargets": null
+    },
+    {
+      "path": "apps/sim/lib/api/contracts/v2/list-pagination.test.ts",
+      "sha256": "7d89c7fc9a4f555c5c37c27ec0b80ed603085c3428e5e8b91b47edf45f1b1767",
+      "lines": [
+        650
+      ],
+      "reason": "test contrats : listContractFiles() sous apps/sim/lib/api/contracts, fichiers .ts non test. Admission du code source exact uniquement ; Geler et scanner toute liste de candidats (manifest adjacent), refuser nouveaux fichiers symlink/EE et chaque changement de loader ; tests pagination.",
+      "source": {
+        "repository": "https://github.com/simstudioai/sim",
+        "commit": "c6cef5f87b6a1d1d01df89e7140bad9e9fd4c2e2",
+        "blob": "f11a22ae1bfc6513c13e0b2fce94ee0138f17a4f",
+        "sha256": "7d89c7fc9a4f555c5c37c27ec0b80ed603085c3428e5e8b91b47edf45f1b1767",
+        "modified": false
+      },
+      "license": "Apache-2.0",
+      "targetSources": [],
+      "enumeratedTargets": "contracts"
+    },
+    {
+      "path": "apps/sim/lib/api/contracts/v2/test-utils.ts",
+      "sha256": "6a91580822edf3bf83975994cec6590ca682ca14b53e2e54b3d1a8e8b4e23531",
+      "lines": [
+        77
+      ],
+      "reason": "helper de tests contrats : listContractFiles() sous apps/sim/lib/api/contracts, fichiers .ts non test. Admission du code source exact uniquement ; Même manifeste borné et inspection de chaque cible que list-pagination ; vérifier aucun consumer runtime n’importe ce helper.",
+      "source": {
+        "repository": "https://github.com/simstudioai/sim",
+        "commit": "c6cef5f87b6a1d1d01df89e7140bad9e9fd4c2e2",
+        "blob": "06108cfd091faddd8e4220f3e3b0e6174815311f",
+        "sha256": "6a91580822edf3bf83975994cec6590ca682ca14b53e2e54b3d1a8e8b4e23531",
+        "modified": false
+      },
+      "license": "Apache-2.0",
+      "targetSources": [],
+      "enumeratedTargets": "contracts"
+    },
+    {
+      "path": "apps/sim/lib/core/outbox/handlers.test.ts",
+      "sha256": "158963f9919801a04dbd29e9844a4e9bdfde0bd95407c8fbc639a0dc8b562443",
+      "lines": [
+        55
+      ],
+      "reason": "test exhaustivité outbox : findHandlerMapExports() : fichiers TS/TSX sous apps/sim exportant <name>OutboxHandlers. Admission du code source exact uniquement ; Manifeste exact des candidats, gate de sources sur chaque cible, refus symlinks/EE/nouveaux modules non examinés ; exécuter test exhaustif.",
+      "source": {
+        "repository": "https://github.com/simstudioai/sim",
+        "commit": "c6cef5f87b6a1d1d01df89e7140bad9e9fd4c2e2",
+        "blob": "fe04a7414f0a8914b99aca0a50c19e7bad88e1bc",
+        "sha256": "158963f9919801a04dbd29e9844a4e9bdfde0bd95407c8fbc639a0dc8b562443",
+        "modified": false
+      },
+      "license": "Apache-2.0",
+      "targetSources": [],
+      "enumeratedTargets": "handlers"
+    }
+  ]
+}

@@ -1,0 +1,1120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "type": "string",
+          "const": "memlia.patch-set/v1"
+        },
+        "organizationId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+        },
+        "workspaceId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+        },
+        "patchId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+        },
+        "procedureId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+        },
+        "procedureVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "procedureDigest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}(?![\\s\\S])"
+        },
+        "snapshotId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+        },
+        "snapshotDigest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}(?![\\s\\S])"
+        },
+        "workbookId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+        },
+        "expectedWorkbookVersion": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}(?![\\s\\S])"
+        },
+        "writeScopes": {
+          "minItems": 1,
+          "maxItems": 256,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "sheetId": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+              },
+              "startRow": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1048576
+              },
+              "endRow": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1048576
+              },
+              "startColumn": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 16384
+              },
+              "endColumn": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 16384
+              }
+            },
+            "required": [
+              "sheetId",
+              "startRow",
+              "endRow",
+              "startColumn",
+              "endColumn"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "mutations": {
+          "minItems": 1,
+          "maxItems": 100000,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "sheetId": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+              },
+              "row": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1048576
+              },
+              "column": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 16384
+              },
+              "mutationId": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+              },
+              "kind": {
+                "type": "string",
+                "const": "set_cell"
+              },
+              "before": {
+                "type": "object",
+                "properties": {
+                  "value": {
+                    "oneOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "null"
+                          }
+                        },
+                        "required": [
+                          "kind"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "decimal"
+                          },
+                          "value": {
+                            "type": "string",
+                            "pattern": "^-?(?:0|[1-9][0-9]{0,37})(?:\\.[0-9]{1,18})?(?![\\s\\S])"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "value"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "string"
+                          },
+                          "value": {
+                            "type": "string",
+                            "pattern": "^[^\\uD800-\\uDFFF]{0,32767}(?![\\s\\S])",
+                            "minLength": 0,
+                            "maxLength": 32767
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "value"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "boolean"
+                          },
+                          "value": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "value"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "date"
+                          },
+                          "value": {
+                            "type": "string",
+                            "allOf": [
+                              {
+                                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))$"
+                              },
+                              {
+                                "pattern": "^(?!0000)[0-9-]+(?![\\s\\S])"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "value"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  },
+                  "formula": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "function": {
+                            "type": "string",
+                            "enum": [
+                              "SUM",
+                              "ROUND",
+                              "IF",
+                              "MIN",
+                              "MAX",
+                              "COUNT"
+                            ]
+                          },
+                          "arguments": {
+                            "minItems": 1,
+                            "maxItems": 256,
+                            "type": "array",
+                            "items": {
+                              "anyOf": [
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "kind": {
+                                      "type": "string",
+                                      "const": "cell"
+                                    },
+                                    "reference": {
+                                      "type": "object",
+                                      "properties": {
+                                        "sheetId": {
+                                          "type": "string",
+                                          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                                        },
+                                        "row": {
+                                          "type": "integer",
+                                          "minimum": 1,
+                                          "maximum": 1048576
+                                        },
+                                        "column": {
+                                          "type": "integer",
+                                          "minimum": 1,
+                                          "maximum": 16384
+                                        }
+                                      },
+                                      "required": [
+                                        "sheetId",
+                                        "row",
+                                        "column"
+                                      ],
+                                      "additionalProperties": false
+                                    }
+                                  },
+                                  "required": [
+                                    "kind",
+                                    "reference"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "kind": {
+                                      "type": "string",
+                                      "const": "range"
+                                    },
+                                    "reference": {
+                                      "type": "object",
+                                      "properties": {
+                                        "sheetId": {
+                                          "type": "string",
+                                          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                                        },
+                                        "startRow": {
+                                          "type": "integer",
+                                          "minimum": 1,
+                                          "maximum": 1048576
+                                        },
+                                        "endRow": {
+                                          "type": "integer",
+                                          "minimum": 1,
+                                          "maximum": 1048576
+                                        },
+                                        "startColumn": {
+                                          "type": "integer",
+                                          "minimum": 1,
+                                          "maximum": 16384
+                                        },
+                                        "endColumn": {
+                                          "type": "integer",
+                                          "minimum": 1,
+                                          "maximum": 16384
+                                        }
+                                      },
+                                      "required": [
+                                        "sheetId",
+                                        "startRow",
+                                        "endRow",
+                                        "startColumn",
+                                        "endColumn"
+                                      ],
+                                      "additionalProperties": false
+                                    }
+                                  },
+                                  "required": [
+                                    "kind",
+                                    "reference"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "kind": {
+                                      "type": "string",
+                                      "const": "literal"
+                                    },
+                                    "value": {
+                                      "oneOf": [
+                                        {
+                                          "type": "object",
+                                          "properties": {
+                                            "kind": {
+                                              "type": "string",
+                                              "const": "null"
+                                            }
+                                          },
+                                          "required": [
+                                            "kind"
+                                          ],
+                                          "additionalProperties": false
+                                        },
+                                        {
+                                          "type": "object",
+                                          "properties": {
+                                            "kind": {
+                                              "type": "string",
+                                              "const": "decimal"
+                                            },
+                                            "value": {
+                                              "type": "string",
+                                              "pattern": "^-?(?:0|[1-9][0-9]{0,37})(?:\\.[0-9]{1,18})?(?![\\s\\S])"
+                                            }
+                                          },
+                                          "required": [
+                                            "kind",
+                                            "value"
+                                          ],
+                                          "additionalProperties": false
+                                        },
+                                        {
+                                          "type": "object",
+                                          "properties": {
+                                            "kind": {
+                                              "type": "string",
+                                              "const": "string"
+                                            },
+                                            "value": {
+                                              "type": "string",
+                                              "pattern": "^[^\\uD800-\\uDFFF]{0,32767}(?![\\s\\S])",
+                                              "minLength": 0,
+                                              "maxLength": 32767
+                                            }
+                                          },
+                                          "required": [
+                                            "kind",
+                                            "value"
+                                          ],
+                                          "additionalProperties": false
+                                        },
+                                        {
+                                          "type": "object",
+                                          "properties": {
+                                            "kind": {
+                                              "type": "string",
+                                              "const": "boolean"
+                                            },
+                                            "value": {
+                                              "type": "boolean"
+                                            }
+                                          },
+                                          "required": [
+                                            "kind",
+                                            "value"
+                                          ],
+                                          "additionalProperties": false
+                                        },
+                                        {
+                                          "type": "object",
+                                          "properties": {
+                                            "kind": {
+                                              "type": "string",
+                                              "const": "date"
+                                            },
+                                            "value": {
+                                              "type": "string",
+                                              "allOf": [
+                                                {
+                                                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))$"
+                                                },
+                                                {
+                                                  "pattern": "^(?!0000)[0-9-]+(?![\\s\\S])"
+                                                }
+                                              ]
+                                            }
+                                          },
+                                          "required": [
+                                            "kind",
+                                            "value"
+                                          ],
+                                          "additionalProperties": false
+                                        }
+                                      ]
+                                    }
+                                  },
+                                  "required": [
+                                    "kind",
+                                    "value"
+                                  ],
+                                  "additionalProperties": false
+                                }
+                              ]
+                            }
+                          }
+                        },
+                        "required": [
+                          "function",
+                          "arguments"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "styleHash": {
+                    "type": "string",
+                    "pattern": "^sha256:[a-f0-9]{64}(?![\\s\\S])"
+                  }
+                },
+                "required": [
+                  "value",
+                  "formula",
+                  "styleHash"
+                ],
+                "additionalProperties": false
+              },
+              "after": {
+                "type": "object",
+                "properties": {
+                  "value": {
+                    "oneOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "null"
+                          }
+                        },
+                        "required": [
+                          "kind"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "decimal"
+                          },
+                          "value": {
+                            "type": "string",
+                            "pattern": "^-?(?:0|[1-9][0-9]{0,37})(?:\\.[0-9]{1,18})?(?![\\s\\S])"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "value"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "string"
+                          },
+                          "value": {
+                            "type": "string",
+                            "pattern": "^[^\\uD800-\\uDFFF]{0,32767}(?![\\s\\S])",
+                            "minLength": 0,
+                            "maxLength": 32767
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "value"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "boolean"
+                          },
+                          "value": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "value"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "date"
+                          },
+                          "value": {
+                            "type": "string",
+                            "allOf": [
+                              {
+                                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))$"
+                              },
+                              {
+                                "pattern": "^(?!0000)[0-9-]+(?![\\s\\S])"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "value"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  },
+                  "formula": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "function": {
+                            "type": "string",
+                            "enum": [
+                              "SUM",
+                              "ROUND",
+                              "IF",
+                              "MIN",
+                              "MAX",
+                              "COUNT"
+                            ]
+                          },
+                          "arguments": {
+                            "minItems": 1,
+                            "maxItems": 256,
+                            "type": "array",
+                            "items": {
+                              "anyOf": [
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "kind": {
+                                      "type": "string",
+                                      "const": "cell"
+                                    },
+                                    "reference": {
+                                      "type": "object",
+                                      "properties": {
+                                        "sheetId": {
+                                          "type": "string",
+                                          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                                        },
+                                        "row": {
+                                          "type": "integer",
+                                          "minimum": 1,
+                                          "maximum": 1048576
+                                        },
+                                        "column": {
+                                          "type": "integer",
+                                          "minimum": 1,
+                                          "maximum": 16384
+                                        }
+                                      },
+                                      "required": [
+                                        "sheetId",
+                                        "row",
+                                        "column"
+                                      ],
+                                      "additionalProperties": false
+                                    }
+                                  },
+                                  "required": [
+                                    "kind",
+                                    "reference"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "kind": {
+                                      "type": "string",
+                                      "const": "range"
+                                    },
+                                    "reference": {
+                                      "type": "object",
+                                      "properties": {
+                                        "sheetId": {
+                                          "type": "string",
+                                          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                                        },
+                                        "startRow": {
+                                          "type": "integer",
+                                          "minimum": 1,
+                                          "maximum": 1048576
+                                        },
+                                        "endRow": {
+                                          "type": "integer",
+                                          "minimum": 1,
+                                          "maximum": 1048576
+                                        },
+                                        "startColumn": {
+                                          "type": "integer",
+                                          "minimum": 1,
+                                          "maximum": 16384
+                                        },
+                                        "endColumn": {
+                                          "type": "integer",
+                                          "minimum": 1,
+                                          "maximum": 16384
+                                        }
+                                      },
+                                      "required": [
+                                        "sheetId",
+                                        "startRow",
+                                        "endRow",
+                                        "startColumn",
+                                        "endColumn"
+                                      ],
+                                      "additionalProperties": false
+                                    }
+                                  },
+                                  "required": [
+                                    "kind",
+                                    "reference"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "kind": {
+                                      "type": "string",
+                                      "const": "literal"
+                                    },
+                                    "value": {
+                                      "oneOf": [
+                                        {
+                                          "type": "object",
+                                          "properties": {
+                                            "kind": {
+                                              "type": "string",
+                                              "const": "null"
+                                            }
+                                          },
+                                          "required": [
+                                            "kind"
+                                          ],
+                                          "additionalProperties": false
+                                        },
+                                        {
+                                          "type": "object",
+                                          "properties": {
+                                            "kind": {
+                                              "type": "string",
+                                              "const": "decimal"
+                                            },
+                                            "value": {
+                                              "type": "string",
+                                              "pattern": "^-?(?:0|[1-9][0-9]{0,37})(?:\\.[0-9]{1,18})?(?![\\s\\S])"
+                                            }
+                                          },
+                                          "required": [
+                                            "kind",
+                                            "value"
+                                          ],
+                                          "additionalProperties": false
+                                        },
+                                        {
+                                          "type": "object",
+                                          "properties": {
+                                            "kind": {
+                                              "type": "string",
+                                              "const": "string"
+                                            },
+                                            "value": {
+                                              "type": "string",
+                                              "pattern": "^[^\\uD800-\\uDFFF]{0,32767}(?![\\s\\S])",
+                                              "minLength": 0,
+                                              "maxLength": 32767
+                                            }
+                                          },
+                                          "required": [
+                                            "kind",
+                                            "value"
+                                          ],
+                                          "additionalProperties": false
+                                        },
+                                        {
+                                          "type": "object",
+                                          "properties": {
+                                            "kind": {
+                                              "type": "string",
+                                              "const": "boolean"
+                                            },
+                                            "value": {
+                                              "type": "boolean"
+                                            }
+                                          },
+                                          "required": [
+                                            "kind",
+                                            "value"
+                                          ],
+                                          "additionalProperties": false
+                                        },
+                                        {
+                                          "type": "object",
+                                          "properties": {
+                                            "kind": {
+                                              "type": "string",
+                                              "const": "date"
+                                            },
+                                            "value": {
+                                              "type": "string",
+                                              "allOf": [
+                                                {
+                                                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))$"
+                                                },
+                                                {
+                                                  "pattern": "^(?!0000)[0-9-]+(?![\\s\\S])"
+                                                }
+                                              ]
+                                            }
+                                          },
+                                          "required": [
+                                            "kind",
+                                            "value"
+                                          ],
+                                          "additionalProperties": false
+                                        }
+                                      ]
+                                    }
+                                  },
+                                  "required": [
+                                    "kind",
+                                    "value"
+                                  ],
+                                  "additionalProperties": false
+                                }
+                              ]
+                            }
+                          }
+                        },
+                        "required": [
+                          "function",
+                          "arguments"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "styleHash": {
+                    "type": "string",
+                    "pattern": "^sha256:[a-f0-9]{64}(?![\\s\\S])"
+                  }
+                },
+                "required": [
+                  "value",
+                  "formula",
+                  "styleHash"
+                ],
+                "additionalProperties": false
+              },
+              "ruleId": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+              }
+            },
+            "required": [
+              "sheetId",
+              "row",
+              "column",
+              "mutationId",
+              "kind",
+              "before",
+              "after",
+              "ruleId"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "calculation": {
+          "type": "string",
+          "enum": [
+            "not_required",
+            "excel_required"
+          ]
+        },
+        "anomalies": {
+          "maxItems": 10000,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+              },
+              "severity": {
+                "type": "string",
+                "enum": [
+                  "blocking",
+                  "informative"
+                ]
+              },
+              "resourceIds": {
+                "maxItems": 256,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                }
+              }
+            },
+            "required": [
+              "code",
+              "severity",
+              "resourceIds"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "postconditions": {
+          "minItems": 1,
+          "maxItems": 256,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "controlId": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+              },
+              "expectedDigest": {
+                "type": "string",
+                "pattern": "^sha256:[a-f0-9]{64}(?![\\s\\S])"
+              }
+            },
+            "required": [
+              "controlId",
+              "expectedDigest"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "organizationId",
+        "workspaceId",
+        "patchId",
+        "procedureId",
+        "procedureVersion",
+        "procedureDigest",
+        "snapshotId",
+        "snapshotDigest",
+        "workbookId",
+        "expectedWorkbookVersion",
+        "digest",
+        "writeScopes",
+        "mutations",
+        "calculation",
+        "anomalies",
+        "postconditions"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "type": "string",
+          "const": "memlia.patch-set/v1"
+        },
+        "organizationId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+        },
+        "workspaceId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+        },
+        "patchId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+        },
+        "procedureId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+        },
+        "procedureVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "procedureDigest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}(?![\\s\\S])"
+        },
+        "snapshotId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+        },
+        "snapshotDigest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}(?![\\s\\S])"
+        },
+        "workbookId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+        },
+        "expectedWorkbookVersion": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}(?![\\s\\S])"
+        },
+        "writeScopes": {
+          "maxItems": 0,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "sheetId": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+              },
+              "startRow": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1048576
+              },
+              "endRow": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1048576
+              },
+              "startColumn": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 16384
+              },
+              "endColumn": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 16384
+              }
+            },
+            "required": [
+              "sheetId",
+              "startRow",
+              "endRow",
+              "startColumn",
+              "endColumn"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "mutations": {
+          "maxItems": 0,
+          "type": "array",
+          "items": {
+            "not": {}
+          }
+        },
+        "calculation": {
+          "type": "string",
+          "const": "not_required"
+        },
+        "anomalies": {
+          "maxItems": 10000,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+              },
+              "severity": {
+                "type": "string",
+                "enum": [
+                  "blocking",
+                  "informative"
+                ]
+              },
+              "resourceIds": {
+                "maxItems": 256,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                }
+              }
+            },
+            "required": [
+              "code",
+              "severity",
+              "resourceIds"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "postconditions": {
+          "minItems": 1,
+          "maxItems": 256,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "controlId": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+              },
+              "expectedDigest": {
+                "type": "string",
+                "pattern": "^sha256:[a-f0-9]{64}(?![\\s\\S])"
+              }
+            },
+            "required": [
+              "controlId",
+              "expectedDigest"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "kind": {
+          "type": "string",
+          "const": "no_changes"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "organizationId",
+        "workspaceId",
+        "patchId",
+        "procedureId",
+        "procedureVersion",
+        "procedureDigest",
+        "snapshotId",
+        "snapshotDigest",
+        "workbookId",
+        "expectedWorkbookVersion",
+        "digest",
+        "writeScopes",
+        "mutations",
+        "calculation",
+        "anomalies",
+        "postconditions",
+        "kind"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

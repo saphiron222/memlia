@@ -1,0 +1,21 @@
+{
+  "name": "@memlia/queue-transport-tests",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "license": "UNLICENSED",
+  "scripts": {
+    "test": "bun test ../../../apps/sim/lib/core/async-jobs/backends/pg-boss-transport.integration.test.ts",
+    "test:node": "node --experimental-strip-types --test ../../../apps/sim/lib/core/async-jobs/backends/pg-boss-transport.integration.test.ts"
+  },
+  "dependencies": {
+    "@memlia/contracts": "file:../../../packages/memlia-contracts",
+    "@opentelemetry/api": "1.9.1",
+    "pg-boss": "12.38.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.2.1",
+    "@types/pg": "8.23.1",
+    "@typescript/typescript6": "6.0.2"
+  }
+}

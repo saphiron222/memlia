@@ -1,0 +1,908 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "const": "memlia.job/v1"
+    },
+    "commandId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+    },
+    "runId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+    },
+    "runner": {
+      "type": "string",
+      "enum": [
+        "slack-search",
+        "workflow-execution",
+        "schedule-execution",
+        "webhook-execution",
+        "quickbooks-webhook-ingress",
+        "resume-execution",
+        "workflow-group-cell",
+        "cleanup-logs",
+        "cleanup-soft-deletes",
+        "cleanup-table-row-ttl",
+        "cleanup-stale-executions",
+        "cleanup-tasks",
+        "cleanup-file-versions",
+        "cleanup-dispatch",
+        "knowledge-connector-directory-sync"
+      ]
+    },
+    "inputs": {
+      "maxItems": 256,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "artifactId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}(?![\\s\\S])"
+          }
+        },
+        "required": [
+          "artifactId",
+          "sha256"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "authority": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "schemaVersion": {
+              "type": "string",
+              "const": "memlia.principal/v1"
+            },
+            "organizationId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+            },
+            "workspaceId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+            },
+            "scopes": {
+              "maxItems": 256,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[^\\uD800-\\uDFFF]{1,256}(?![\\s\\S])",
+                "minLength": 1,
+                "maxLength": 256
+              }
+            },
+            "allowedTools": {
+              "maxItems": 256,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[^\\uD800-\\uDFFF]{1,256}(?![\\s\\S])",
+                "minLength": 1,
+                "maxLength": 256
+              }
+            },
+            "actor": {
+              "type": "object",
+              "properties": {
+                "version": {
+                  "type": "number",
+                  "const": 1
+                },
+                "principal": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "session"
+                        },
+                        "userId": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                        },
+                        "sessionId": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "userId",
+                        "sessionId"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "personal_api_key"
+                        },
+                        "userId": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                        },
+                        "keyId": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "userId",
+                        "keyId"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "oauth_access_token"
+                        },
+                        "userId": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                        },
+                        "clientId": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                        },
+                        "tokenId": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                        },
+                        "scopes": {
+                          "maxItems": 256,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "pattern": "^[^\\uD800-\\uDFFF]{1,256}(?![\\s\\S])",
+                            "minLength": 1,
+                            "maxLength": 256
+                          }
+                        },
+                        "expiresAt": {
+                          "type": "string",
+                          "allOf": [
+                            {
+                              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                            },
+                            {
+                              "pattern": "^(?!0000)[0-9TZ:.-]+(?![\\s\\S])"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "userId",
+                        "clientId",
+                        "tokenId",
+                        "scopes",
+                        "expiresAt"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "version",
+                "principal"
+              ],
+              "additionalProperties": false
+            },
+            "subject": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "user"
+                },
+                "userId": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                }
+              },
+              "required": [
+                "kind",
+                "userId"
+              ],
+              "additionalProperties": false
+            },
+            "authority": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "interactive"
+                }
+              },
+              "required": [
+                "kind"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "schemaVersion",
+            "organizationId",
+            "workspaceId",
+            "scopes",
+            "allowedTools",
+            "actor",
+            "subject",
+            "authority"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schemaVersion": {
+              "type": "string",
+              "const": "memlia.principal/v1"
+            },
+            "organizationId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+            },
+            "workspaceId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+            },
+            "scopes": {
+              "maxItems": 256,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[^\\uD800-\\uDFFF]{1,256}(?![\\s\\S])",
+                "minLength": 1,
+                "maxLength": 256
+              }
+            },
+            "allowedTools": {
+              "maxItems": 256,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[^\\uD800-\\uDFFF]{1,256}(?![\\s\\S])",
+                "minLength": 1,
+                "maxLength": 256
+              }
+            },
+            "actor": {
+              "type": "object",
+              "properties": {
+                "version": {
+                  "type": "number",
+                  "const": 1
+                },
+                "principal": {
+                  "anyOf": [
+                    {
+                      "oneOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "session"
+                            },
+                            "userId": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                            },
+                            "sessionId": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "userId",
+                            "sessionId"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "personal_api_key"
+                            },
+                            "userId": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                            },
+                            "keyId": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "userId",
+                            "keyId"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "oauth_access_token"
+                            },
+                            "userId": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                            },
+                            "clientId": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                            },
+                            "tokenId": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                            },
+                            "scopes": {
+                              "maxItems": 256,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "pattern": "^[^\\uD800-\\uDFFF]{1,256}(?![\\s\\S])",
+                                "minLength": 1,
+                                "maxLength": 256
+                              }
+                            },
+                            "expiresAt": {
+                              "type": "string",
+                              "allOf": [
+                                {
+                                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                                },
+                                {
+                                  "pattern": "^(?!0000)[0-9TZ:.-]+(?![\\s\\S])"
+                                }
+                              ]
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "userId",
+                            "clientId",
+                            "tokenId",
+                            "scopes",
+                            "expiresAt"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
+                    },
+                    {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "workspace_api_key"
+                            },
+                            "workspaceId": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                            },
+                            "keyId": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "workspaceId",
+                            "keyId"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "system"
+                            },
+                            "serviceId": {
+                              "type": "string",
+                              "enum": [
+                                "public_api",
+                                "schedule",
+                                "internal",
+                                "table",
+                                "chat"
+                              ]
+                            },
+                            "workspaceId": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                            },
+                            "workflowId": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "serviceId",
+                            "workspaceId",
+                            "workflowId"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "system"
+                            },
+                            "serviceId": {
+                              "type": "string",
+                              "const": "webhook"
+                            },
+                            "workspaceId": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                            },
+                            "workflowId": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                            },
+                            "webhookId": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                            },
+                            "provider": {
+                              "type": "string",
+                              "pattern": "^[^\\uD800-\\uDFFF]{1,256}(?![\\s\\S])",
+                              "minLength": 1,
+                              "maxLength": 256
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "serviceId",
+                            "workspaceId",
+                            "workflowId",
+                            "webhookId",
+                            "provider"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "delegated"
+                        },
+                        "serviceId": {
+                          "type": "string",
+                          "enum": [
+                            "copilot",
+                            "realtime"
+                          ]
+                        },
+                        "subjectUserId": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                        },
+                        "workspaceId": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                        },
+                        "delegationId": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                        },
+                        "audience": {
+                          "type": "string",
+                          "pattern": "^[^\\uD800-\\uDFFF]{1,256}(?![\\s\\S])",
+                          "minLength": 1,
+                          "maxLength": 256
+                        },
+                        "issuedAt": {
+                          "type": "string",
+                          "allOf": [
+                            {
+                              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                            },
+                            {
+                              "pattern": "^(?!0000)[0-9TZ:.-]+(?![\\s\\S])"
+                            }
+                          ]
+                        },
+                        "expiresAt": {
+                          "type": "string",
+                          "allOf": [
+                            {
+                              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                            },
+                            {
+                              "pattern": "^(?!0000)[0-9TZ:.-]+(?![\\s\\S])"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "serviceId",
+                        "subjectUserId",
+                        "workspaceId",
+                        "delegationId",
+                        "audience",
+                        "issuedAt",
+                        "expiresAt"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "version",
+                "principal"
+              ],
+              "additionalProperties": false
+            },
+            "subject": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "user"
+                },
+                "userId": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                }
+              },
+              "required": [
+                "kind",
+                "userId"
+              ],
+              "additionalProperties": false
+            },
+            "authority": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "delegation"
+                },
+                "delegationId": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                }
+              },
+              "required": [
+                "kind",
+                "delegationId"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "schemaVersion",
+            "organizationId",
+            "workspaceId",
+            "scopes",
+            "allowedTools",
+            "actor",
+            "subject",
+            "authority"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "schemaVersion": {
+              "type": "string",
+              "const": "memlia.principal/v1"
+            },
+            "organizationId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+            },
+            "workspaceId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+            },
+            "scopes": {
+              "maxItems": 256,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[^\\uD800-\\uDFFF]{1,256}(?![\\s\\S])",
+                "minLength": 1,
+                "maxLength": 256
+              }
+            },
+            "allowedTools": {
+              "maxItems": 256,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[^\\uD800-\\uDFFF]{1,256}(?![\\s\\S])",
+                "minLength": 1,
+                "maxLength": 256
+              }
+            },
+            "actor": {
+              "type": "object",
+              "properties": {
+                "version": {
+                  "type": "number",
+                  "const": 1
+                },
+                "principal": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "workspace_api_key"
+                        },
+                        "workspaceId": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                        },
+                        "keyId": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "workspaceId",
+                        "keyId"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "system"
+                        },
+                        "serviceId": {
+                          "type": "string",
+                          "enum": [
+                            "public_api",
+                            "schedule",
+                            "internal",
+                            "table",
+                            "chat"
+                          ]
+                        },
+                        "workspaceId": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                        },
+                        "workflowId": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "serviceId",
+                        "workspaceId",
+                        "workflowId"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "system"
+                        },
+                        "serviceId": {
+                          "type": "string",
+                          "const": "webhook"
+                        },
+                        "workspaceId": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                        },
+                        "workflowId": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                        },
+                        "webhookId": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                        },
+                        "provider": {
+                          "type": "string",
+                          "pattern": "^[^\\uD800-\\uDFFF]{1,256}(?![\\s\\S])",
+                          "minLength": 1,
+                          "maxLength": 256
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "serviceId",
+                        "workspaceId",
+                        "workflowId",
+                        "webhookId",
+                        "provider"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "version",
+                "principal"
+              ],
+              "additionalProperties": false
+            },
+            "subject": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "service"
+                },
+                "serviceAccountId": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                }
+              },
+              "required": [
+                "kind",
+                "serviceAccountId"
+              ],
+              "additionalProperties": false
+            },
+            "authority": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "approved_shared"
+                },
+                "grantId": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                }
+              },
+              "required": [
+                "kind",
+                "grantId"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "schemaVersion",
+            "organizationId",
+            "workspaceId",
+            "scopes",
+            "allowedTools",
+            "actor",
+            "subject",
+            "authority"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "idempotencyKey": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+    },
+    "submittedAt": {
+      "type": "string",
+      "allOf": [
+        {
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+        },
+        {
+          "pattern": "^(?!0000)[0-9TZ:.-]+(?![\\s\\S])"
+        }
+      ]
+    },
+    "effectPolicy": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "read_only"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "provider_idempotent"
+            },
+            "providerKey": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+            },
+            "verifierId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+            }
+          },
+          "required": [
+            "kind",
+            "providerKey",
+            "verifierId"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "no_automatic_retry"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "commandId",
+    "runId",
+    "runner",
+    "inputs",
+    "authority",
+    "idempotencyKey",
+    "submittedAt",
+    "effectPolicy"
+  ],
+  "additionalProperties": false
+}
