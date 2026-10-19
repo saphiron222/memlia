@@ -1,0 +1,547 @@
+{
+  "schema": "memlia.reviewed-gitleaks/v1",
+  "scanner": "gitleaks",
+  "version": "8.30.1",
+  "source_sha": "c6cef5f87b6a1d1d01df89e7140bad9e9fd4c2e2",
+  "findings": [
+    {
+      "path": "apps/desktop/src/main/handoff.test.ts",
+      "sha256": "620c29ca5304e15a771ccee9123ea0f1b7c7979b04f420084314134a9705f263",
+      "rule": "generic-api-key",
+      "line": 15,
+      "reason": "Jeton synthétique construit avec une suite hexadécimale répétée pour le test handoff."
+    },
+    {
+      "path": "apps/docs/COPY_AUDIT.md",
+      "sha256": "f591e0c250233ec9960da9d17f7545fcbf90d2aa67557bc098267f82ef2413b3",
+      "rule": "generic-api-key",
+      "line": 98,
+      "reason": "Phrase de documentation ; mots ordinaires assimilés à une clé."
+    },
+    {
+      "path": "apps/docs/content/docs/workflows/blocks/human-in-the-loop.mdx",
+      "sha256": "1fe587f5ff3587ec1ec6b6aff33c2e1e63afbe21b8699f43c104f6f30762a86a",
+      "rule": "curl-auth-header",
+      "line": 82,
+      "reason": "Exemple curl avec placeholder explicite de clé, pas un credential."
+    },
+    {
+      "path": "apps/realtime/src/routes/http.test.ts",
+      "sha256": "2f3d353e032a4d05e401cf6a0219439357b44e6522d90db74ca7f53b197dc775",
+      "rule": "generic-api-key",
+      "line": 47,
+      "reason": "Secret de test explicitement nommé, envoyé dans les headers des requêtes fictives du serveur HTTP realtime."
+    },
+    {
+      "path": "apps/sim/app/api/auth/oauth2/token/route.integration.ts",
+      "sha256": "430c53a77f43f91b590283f2831bd0c0f75345e6827525e12fefc0db1f4b81ba",
+      "rule": "generic-api-key",
+      "line": 24,
+      "reason": "Secret de fixture explicitement nommé pour les échanges OAuth2 de la recette locale."
+    },
+    {
+      "path": "apps/sim/app/api/credentials/route.test.ts",
+      "sha256": "6c67db3302f33b7ea9e0b6993c84c39c38d0031b077db53f52eb4fa0b9e5eb8c",
+      "rule": "private-key",
+      "line": 389,
+      "reason": "Fixture PEM dont corps est un mot fictif ou dont seul l’en-tête est présent ; pas une clé cryptographique."
+    },
+    {
+      "path": "apps/sim/app/api/v1/admin/auth.ts",
+      "sha256": "29c85883dffb5f87a2ed52478da24987aa5eb601b8bb9edc47ebb35ec426cb0c",
+      "rule": "curl-auth-header",
+      "line": 8,
+      "reason": "Commentaire curl avec placeholder explicite de clé administrateur."
+    },
+    {
+      "path": "apps/sim/app/api/v2/credentials/route.test.ts",
+      "sha256": "06564537093189f541163fe83e3754eb109e10ed27cd013660d8a51f63527134",
+      "rule": "private-key",
+      "line": 228,
+      "reason": "Fixture PEM dont corps est un mot fictif ou dont seul l’en-tête est présent ; pas une clé cryptographique."
+    },
+    {
+      "path": "apps/sim/app/api/v2/credentials/[credentialId]/route.test.ts",
+      "sha256": "613ddc1fada4b6b7420c577a3fbd126ef789656ba090b478a0aa02a5cbc00f20",
+      "rule": "private-key",
+      "line": 129,
+      "reason": "Fixture PEM dont corps est un mot fictif ou dont seul l’en-tête est présent ; pas une clé cryptographique."
+    },
+    {
+      "path": "apps/sim/app/api/workflows/[id]/execute/route.test.ts",
+      "sha256": "061a1aa75c3614363abc78efad0fc7860e17b35cc76d6e03f1cd6a1f43aa93bd",
+      "rule": "generic-api-key",
+      "line": 1184,
+      "reason": "Valeur descriptive du champ token dans sourceInput fictif pour vérifier le traitement des entrées."
+    },
+    {
+      "path": "apps/sim/app/workspace/[workspaceId]/w/[workflowId]/components/panel/components/editor/components/sub-block/components/code/code.test.tsx",
+      "sha256": "5ca110804c6c6d8d42330f938620067e78f2e10e1009635ca869ec7f87e11626",
+      "rule": "generic-api-key",
+      "line": 197,
+      "reason": "Constante SECRET_MATCH contenant un marqueur de fixture, utilisée par les assertions de l’éditeur de code."
+    },
+    {
+      "path": "apps/sim/connectors/dropbox/dropbox.ts",
+      "sha256": "37b0b8f8fdac4a708540f46b956e073cbcece7702da4128c2b0f58962c28ae09",
+      "rule": "dropbox-api-token",
+      "line": 174,
+      "reason": "Annotation de type ConnectorConfig et identifiant de code, pas une chaîne secrète."
+    },
+    {
+      "path": "apps/sim/blocks/registry-maps.ts",
+      "sha256": "564dd49717d452dcae9378ada1f1e3954cf7d50ef0bec153db5d31dcc43760d1",
+      "rule": "airtable-api-key",
+      "line": 8,
+      "reason": "Import de symboles AirtableBlock/AirtableBlockMeta, pas un token."
+    },
+    {
+      "path": "apps/sim/enrichments/linkedin-profile/linkedin-profile.ts",
+      "sha256": "bbc07899028dd336c6991bdad77ab65eb301c3366a03203fc9e906effe24c742",
+      "rule": "linkedin-client-secret",
+      "line": 34,
+      "reason": "Annotation de type EnrichmentConfig, pas un secret LinkedIn."
+    },
+    {
+      "path": "apps/sim/executor/handlers/agent/memory.test.ts",
+      "sha256": "80d2ab07ec32e47666720b3da1cbc6e91153aba351e435349e23f49bbf7bcffa",
+      "rule": "generic-api-key",
+      "line": 288,
+      "reason": "Identifiant de conversation fictive dans une assertion de persistance mémoire."
+    },
+    {
+      "path": "apps/sim/executor/handlers/workflow/tool-runner.test.ts",
+      "sha256": "bda5ce2dd25c0a0c7e4240deeee4d09e2846c63701720139a23eb707268e1e75",
+      "rule": "generic-api-key",
+      "line": 75,
+      "reason": "Constante synthétique de test de non-divulgation ; contexte enfant simulé, aucune connexion fournisseur."
+    },
+    {
+      "path": "apps/sim/lib/billing/core/usage-analytics.test.ts",
+      "sha256": "0f28904384d29ec4dfa8de3c38afbfcdb861d7946256c495fa9f04c4c25df063",
+      "rule": "generic-api-key",
+      "line": 534,
+      "reason": "Identifiant de modèle IA servant de clé d’agrégat de coût."
+    },
+    {
+      "path": "apps/sim/lib/billing/webhooks/subscription-usage.test.ts",
+      "sha256": "f147d7133bf2a0b43f0c64ef755eba35757688c7015ed82cd8d62c1c8ee59aba",
+      "rule": "stripe-access-token",
+      "line": 71,
+      "reason": "Chaîne de test Stripe explicitement fictive injectée dans appels simulés et assertions."
+    },
+    {
+      "path": "apps/sim/lib/core/security/encryption.test.ts",
+      "sha256": "c924a0e4a350b2eabbac26b1f1f7dbd7d2c26680d27f103044196d35668a9470",
+      "rule": "generic-api-key",
+      "line": 8,
+      "reason": "Clé de test déterministe à motif répétitif ou nom de clé IA explicitement fictif, dans environnement mocké."
+    },
+    {
+      "path": "apps/sim/lib/core/security/encryption.test.ts",
+      "sha256": "c924a0e4a350b2eabbac26b1f1f7dbd7d2c26680d27f103044196d35668a9470",
+      "rule": "generic-api-key",
+      "line": 45,
+      "reason": "Clé de test déterministe à motif répétitif ou nom de clé IA explicitement fictif, dans environnement mocké."
+    },
+    {
+      "path": "apps/sim/lib/core/utils.test.ts",
+      "sha256": "b2ac1fc60eea0fbaaa99b08ab5a0f190082b3ad1df58746c1bd374d06a5f81c0",
+      "rule": "generic-api-key",
+      "line": 7,
+      "reason": "Clé de test déterministe à motif répétitif ou nom de clé IA explicitement fictif, dans environnement mocké."
+    },
+    {
+      "path": "apps/sim/lib/core/utils.test.ts",
+      "sha256": "b2ac1fc60eea0fbaaa99b08ab5a0f190082b3ad1df58746c1bd374d06a5f81c0",
+      "rule": "generic-api-key",
+      "line": 11,
+      "reason": "Clé de test déterministe à motif répétitif ou nom de clé IA explicitement fictif, dans environnement mocké."
+    },
+    {
+      "path": "apps/sim/lib/core/utils.test.ts",
+      "sha256": "b2ac1fc60eea0fbaaa99b08ab5a0f190082b3ad1df58746c1bd374d06a5f81c0",
+      "rule": "generic-api-key",
+      "line": 12,
+      "reason": "Clé de test déterministe à motif répétitif ou nom de clé IA explicitement fictif, dans environnement mocké."
+    },
+    {
+      "path": "apps/sim/lib/core/utils.test.ts",
+      "sha256": "b2ac1fc60eea0fbaaa99b08ab5a0f190082b3ad1df58746c1bd374d06a5f81c0",
+      "rule": "generic-api-key",
+      "line": 13,
+      "reason": "Clé de test déterministe à motif répétitif ou nom de clé IA explicitement fictif, dans environnement mocké."
+    },
+    {
+      "path": "apps/sim/lib/credentials/client-credential-accounts/server.test.ts",
+      "sha256": "e40a48903a0f1dbc874beb76655214d7bcea204fafbd51fdaee0acbc409e39f4",
+      "rule": "private-key",
+      "line": 52,
+      "reason": "Fixture PEM dont corps est un mot fictif ou dont seul l’en-tête est présent ; pas une clé cryptographique."
+    },
+    {
+      "path": "apps/sim/lib/credentials/client-credential-accounts/minters/salesforce.ts",
+      "sha256": "b67d4d04403da4ac71143aded486629d51e0efb00a367958c0170c184fa47640",
+      "rule": "private-key",
+      "line": 208,
+      "reason": "Commentaire décrivant les en-têtes PEM acceptés ; aucun matériau de clé."
+    },
+    {
+      "path": "apps/sim/lib/data-drains/service.integration.ts",
+      "sha256": "af49b6236850e6694cda4ae32147bd293fdaa068f6ff8b33537880c2d8a9d205",
+      "rule": "generic-api-key",
+      "line": 260,
+      "reason": "Constante de fixture de test inspectée ; valeur descriptive ou synthétique injectée dans mocks/assertions de non-divulgation, sans appel fournisseur réel."
+    },
+    {
+      "path": "apps/sim/lib/data-drains/service.integration.ts",
+      "sha256": "af49b6236850e6694cda4ae32147bd293fdaa068f6ff8b33537880c2d8a9d205",
+      "rule": "generic-api-key",
+      "line": 261,
+      "reason": "Constante de fixture de test inspectée ; valeur descriptive ou synthétique injectée dans mocks/assertions de non-divulgation, sans appel fournisseur réel."
+    },
+    {
+      "path": "apps/sim/lib/credentials/service-account-secret.test.ts",
+      "sha256": "918457359c61fe58991a19a16885880b20a7c86af8c007a04e2b2bbefc230045",
+      "rule": "private-key",
+      "line": 131,
+      "reason": "Fixture PEM dont corps est un mot fictif ou dont seul l’en-tête est présent ; pas une clé cryptographique."
+    },
+    {
+      "path": "apps/sim/lib/credentials/service-account-secret.test.ts",
+      "sha256": "918457359c61fe58991a19a16885880b20a7c86af8c007a04e2b2bbefc230045",
+      "rule": "private-key",
+      "line": 285,
+      "reason": "Fixture PEM dont corps est un mot fictif ou dont seul l’en-tête est présent ; pas une clé cryptographique."
+    },
+    {
+      "path": "apps/sim/lib/credentials/orchestration/index.test.ts",
+      "sha256": "050a814556d528f611fe8acc5828358a26977e4992a33245511df9eb4f3636db",
+      "rule": "private-key",
+      "line": 376,
+      "reason": "Fixture PEM dont corps est un mot fictif ou dont seul l’en-tête est présent ; pas une clé cryptographique."
+    },
+    {
+      "path": "apps/sim/lib/execution/remote-sandbox/e2b.ts",
+      "sha256": "25e7e945d88804c1ce1e11917dbe9234b0eece77b7806a644edf2fe4a4d2ddc0",
+      "rule": "generic-api-key",
+      "line": 333,
+      "reason": "Lecture env.E2B_API_KEY ; la valeur provient de l’environnement, pas du code."
+    },
+    {
+      "path": "apps/sim/lib/execution/remote-sandbox/e2b.ts",
+      "sha256": "25e7e945d88804c1ce1e11917dbe9234b0eece77b7806a644edf2fe4a4d2ddc0",
+      "rule": "generic-api-key",
+      "line": 947,
+      "reason": "Lecture env.E2B_API_KEY ; la valeur provient de l’environnement, pas du code."
+    },
+    {
+      "path": "apps/sim/lib/execution/remote-sandbox/e2b.ts",
+      "sha256": "25e7e945d88804c1ce1e11917dbe9234b0eece77b7806a644edf2fe4a4d2ddc0",
+      "rule": "generic-api-key",
+      "line": 995,
+      "reason": "Lecture env.E2B_API_KEY ; la valeur provient de l’environnement, pas du code."
+    },
+    {
+      "path": "apps/sim/lib/execution/remote-sandbox/e2b.ts",
+      "sha256": "25e7e945d88804c1ce1e11917dbe9234b0eece77b7806a644edf2fe4a4d2ddc0",
+      "rule": "generic-api-key",
+      "line": 1044,
+      "reason": "Lecture env.E2B_API_KEY ; la valeur provient de l’environnement, pas du code."
+    },
+    {
+      "path": "apps/sim/lib/execution/remote-sandbox/e2b.ts",
+      "sha256": "25e7e945d88804c1ce1e11917dbe9234b0eece77b7806a644edf2fe4a4d2ddc0",
+      "rule": "generic-api-key",
+      "line": 1069,
+      "reason": "Lecture env.E2B_API_KEY ; la valeur provient de l’environnement, pas du code."
+    },
+    {
+      "path": "apps/sim/lib/execution/remote-sandbox/e2b.ts",
+      "sha256": "25e7e945d88804c1ce1e11917dbe9234b0eece77b7806a644edf2fe4a4d2ddc0",
+      "rule": "generic-api-key",
+      "line": 1122,
+      "reason": "Lecture env.E2B_API_KEY ; la valeur provient de l’environnement, pas du code."
+    },
+    {
+      "path": "apps/sim/lib/internal/memory/operations.test.ts",
+      "sha256": "0ff4bc0da15401a215a694fcd00fdb9334a16763f07f8ea24edab7e1dd26505c",
+      "rule": "generic-api-key",
+      "line": 53,
+      "reason": "Identifiant de conversation fictive de la fixture mémoire."
+    },
+    {
+      "path": "apps/sim/lib/internal/memory/operations.test.ts",
+      "sha256": "0ff4bc0da15401a215a694fcd00fdb9334a16763f07f8ea24edab7e1dd26505c",
+      "rule": "generic-api-key",
+      "line": 85,
+      "reason": "Identifiant de conversation fictive de la fixture mémoire."
+    },
+    {
+      "path": "apps/sim/lib/internal/memory/operations.test.ts",
+      "sha256": "0ff4bc0da15401a215a694fcd00fdb9334a16763f07f8ea24edab7e1dd26505c",
+      "rule": "generic-api-key",
+      "line": 96,
+      "reason": "Identifiant de conversation fictive de la fixture mémoire."
+    },
+    {
+      "path": "apps/sim/lib/internal/memory/operations.test.ts",
+      "sha256": "0ff4bc0da15401a215a694fcd00fdb9334a16763f07f8ea24edab7e1dd26505c",
+      "rule": "generic-api-key",
+      "line": 107,
+      "reason": "Identifiant de conversation fictive de la fixture mémoire."
+    },
+    {
+      "path": "apps/sim/lib/internal/memory/operations.test.ts",
+      "sha256": "0ff4bc0da15401a215a694fcd00fdb9334a16763f07f8ea24edab7e1dd26505c",
+      "rule": "generic-api-key",
+      "line": 134,
+      "reason": "Identifiant de conversation fictive de la fixture mémoire."
+    },
+    {
+      "path": "apps/sim/lib/internal/memory/operations.test.ts",
+      "sha256": "0ff4bc0da15401a215a694fcd00fdb9334a16763f07f8ea24edab7e1dd26505c",
+      "rule": "generic-api-key",
+      "line": 141,
+      "reason": "Identifiant de conversation fictive de la fixture mémoire."
+    },
+    {
+      "path": "apps/sim/lib/internal/oci/client.server.test.ts",
+      "sha256": "1084748ace8246383da63c3e23210202ea685e444dc0b2896c9b48f4fd8b11a8",
+      "rule": "generic-api-key",
+      "line": 721,
+      "reason": "Constante opaqueProviderSecret synthétique utilisée dans une réponse fournisseur simulée pour vérifier la non-divulgation."
+    },
+    {
+      "path": "apps/sim/lib/knowledge/__integration__/execution-archive-provenance.integration.ts",
+      "sha256": "18aeb97f581c8a0fddccda5c970d3331c81309a63ed892d0bc077730a6f5054f",
+      "rule": "generic-api-key",
+      "line": 738,
+      "reason": "Clé descriptive de fixture, avec espaces intentionnels, dans la recette de provenance des archives."
+    },
+    {
+      "path": "apps/sim/lib/logs/execution/trace-secret-projection.test.ts",
+      "sha256": "c44959c09b11c4d7b60d1f23726f9028466bcfbcf0832ad91a23e9810fbd9680",
+      "rule": "generic-api-key",
+      "line": 735,
+      "reason": "Valeur synthétique courte répétée 1024 fois pour tester expansion et non-divulgation."
+    },
+    {
+      "path": "apps/sim/lib/mcp/resolve-config.ts",
+      "sha256": "f9e10fe7523a04b1a8762bf7941cb8ad94f58604c70be5d29225c508973270f4",
+      "rule": "generic-api-key",
+      "line": 49,
+      "reason": "Nom de propriété et annotation de type de provenance."
+    },
+    {
+      "path": "apps/sim/lib/memory/application/use-cases.test.ts",
+      "sha256": "9f698b4ef7d0b3c69b7c8f145bce65a015765ef4ccfbc81eb631b8d71a2c2304",
+      "rule": "generic-api-key",
+      "line": 98,
+      "reason": "Identifiant de conversation fictive de la fixture mémoire."
+    },
+    {
+      "path": "apps/sim/lib/memory/application/use-cases.test.ts",
+      "sha256": "9f698b4ef7d0b3c69b7c8f145bce65a015765ef4ccfbc81eb631b8d71a2c2304",
+      "rule": "generic-api-key",
+      "line": 130,
+      "reason": "Identifiant de conversation fictive de la fixture mémoire."
+    },
+    {
+      "path": "apps/sim/lib/memory/summary-store.integration.ts",
+      "sha256": "fe22cb9e119fb6247f978fa0251e653cfe235a8d60c60e47ebac274db6befb02",
+      "rule": "generic-api-key",
+      "line": 210,
+      "reason": "Identifiant de conversation fictive de la fixture mémoire."
+    },
+    {
+      "path": "apps/sim/lib/memory/summary-store.integration.ts",
+      "sha256": "fe22cb9e119fb6247f978fa0251e653cfe235a8d60c60e47ebac274db6befb02",
+      "rule": "generic-api-key",
+      "line": 238,
+      "reason": "Identifiant de conversation fictive de la fixture mémoire."
+    },
+    {
+      "path": "apps/sim/lib/memory/summary-store.integration.ts",
+      "sha256": "fe22cb9e119fb6247f978fa0251e653cfe235a8d60c60e47ebac274db6befb02",
+      "rule": "generic-api-key",
+      "line": 310,
+      "reason": "Identifiant de conversation fictive de la fixture mémoire."
+    },
+    {
+      "path": "apps/sim/lib/memory/summary-store.integration.ts",
+      "sha256": "fe22cb9e119fb6247f978fa0251e653cfe235a8d60c60e47ebac274db6befb02",
+      "rule": "generic-api-key",
+      "line": 320,
+      "reason": "Identifiant de conversation fictive de la fixture mémoire."
+    },
+    {
+      "path": "apps/sim/lib/mothership/agent-cli/file-provenance.test.ts",
+      "sha256": "d84d0a27289fc1fb4f927e48420342cd17d2400107b211378023ac5949544fb0",
+      "rule": "generic-api-key",
+      "line": 581,
+      "reason": "Deux marqueurs synthétiques de fixture/test, dont une suite alphanumérique déterministe, pour vérifier la provenance des fichiers."
+    },
+    {
+      "path": "apps/sim/lib/mothership/agent-cli/file-provenance.test.ts",
+      "sha256": "d84d0a27289fc1fb4f927e48420342cd17d2400107b211378023ac5949544fb0",
+      "rule": "generic-api-key",
+      "line": 582,
+      "reason": "Deux marqueurs synthétiques de fixture/test, dont une suite alphanumérique déterministe, pour vérifier la provenance des fichiers."
+    },
+    {
+      "path": "apps/sim/lib/mothership/content-delivery/registry-gate.test.ts",
+      "sha256": "df8fa2c9888728146ec6d567d9994ea586264e1e16a26c52bbd8d9383c367a28",
+      "rule": "generic-api-key",
+      "line": 28,
+      "reason": "Constante SECRET explicitement synthétique dans la fixture de contrôle du registre de livraison."
+    },
+    {
+      "path": "apps/sim/lib/oauth/types.ts",
+      "sha256": "08a891b4e6d3f7fd5f3cb2167d897802c082e6b1ab843b58cea7ba04957b5e56",
+      "rule": "generic-api-key",
+      "line": 21,
+      "reason": "Discriminant de schéma OCI, pas une clé de signature."
+    },
+    {
+      "path": "apps/sim/lib/table/cell-write.ts",
+      "sha256": "924041fefa307038112d0f978ceddab087e72d52264cb3b16601d89518d41416",
+      "rule": "generic-api-key",
+      "line": 200,
+      "reason": "Alias de type TypeScript de provenance."
+    },
+    {
+      "path": "apps/sim/lib/uploads/core/storage-service.blob-connection-string.test.ts",
+      "sha256": "a49fb9e8049907fb43e5860d8e3bb187bb95c1497f48484a7bdf6af088d474df",
+      "rule": "generic-api-key",
+      "line": 21,
+      "reason": "Connexion au compte standard Azurite devstoreaccount1, endpoint explicite loopback ; credential public d’émulateur."
+    },
+    {
+      "path": "apps/sim/lib/uploads/providers/google-cloud-storage/client.ts",
+      "sha256": "c0249294c2a8b6738f56ffe1fff3051a36656b5fcc678d24121218087cb462ba",
+      "rule": "generic-api-key",
+      "line": 556,
+      "reason": "Phrase de commentaire décrivant une API XML/S3."
+    },
+    {
+      "path": "apps/sim/lib/workflows/editing/validation.test.ts",
+      "sha256": "afb45d29d45237751ea8a791174f11d623125a8043cf06d75609c94e2a4e3eb0",
+      "rule": "generic-api-key",
+      "line": 704,
+      "reason": "Constante de fixture de test inspectée ; valeur descriptive ou synthétique injectée dans mocks/assertions de non-divulgation, sans appel fournisseur réel."
+    },
+    {
+      "path": "apps/sim/providers/cost-policy.test.ts",
+      "sha256": "4bfb524ec02ac837bd691e7e3777a73af5d2cfd8855bb771677196918708951a",
+      "rule": "generic-api-key",
+      "line": 20,
+      "reason": "Identifiant de modèle IA, pas une clé fournisseur."
+    },
+    {
+      "path": "apps/sim/providers/anthropic/core.test.ts",
+      "sha256": "f4f5a3f453e5fab644f893bd0823268244fe7ed826147174973393f5359622b4",
+      "rule": "generic-api-key",
+      "line": 979,
+      "reason": "Chaîne alphanumérique déterministe de test de masquage des erreurs Anthropic."
+    },
+    {
+      "path": "apps/sim/providers/utils.test.ts",
+      "sha256": "5a56e670f1e9e19bc6adacf634d0aec72cb20635457e5256eb04af126342d821",
+      "rule": "generic-api-key",
+      "line": 1496,
+      "reason": "Chaîne alphanumérique déterministe de test de masquage des erreurs fournisseur."
+    },
+    {
+      "path": "apps/sim/tools/pitchbook/pitchbook.test.ts",
+      "sha256": "41001d001e6c5b7a8b0e018019d66dca47597444decd270566b91881cdd5e444",
+      "rule": "generic-api-key",
+      "line": 365,
+      "reason": "Clé synthétique courte injectée dans corps 401 simulés pour tester la rédaction."
+    },
+    {
+      "path": "apps/sim/tools/index.test.ts",
+      "sha256": "0151a54a2f1b69d96f63e3cfda07401e7afae73717aeeb7e3aeb01efa9df89f3",
+      "rule": "stripe-access-token",
+      "line": 2999,
+      "reason": "Chaîne de test Stripe explicitement fictive injectée dans appels simulés et assertions."
+    },
+    {
+      "path": "apps/sim/tools/index.test.ts",
+      "sha256": "0151a54a2f1b69d96f63e3cfda07401e7afae73717aeeb7e3aeb01efa9df89f3",
+      "rule": "stripe-access-token",
+      "line": 3018,
+      "reason": "Chaîne de test Stripe explicitement fictive injectée dans appels simulés et assertions."
+    },
+    {
+      "path": "apps/sim/tools/index.test.ts",
+      "sha256": "0151a54a2f1b69d96f63e3cfda07401e7afae73717aeeb7e3aeb01efa9df89f3",
+      "rule": "stripe-access-token",
+      "line": 3044,
+      "reason": "Chaîne de test Stripe explicitement fictive injectée dans appels simulés et assertions."
+    },
+    {
+      "path": "apps/sim/tools/index.test.ts",
+      "sha256": "0151a54a2f1b69d96f63e3cfda07401e7afae73717aeeb7e3aeb01efa9df89f3",
+      "rule": "stripe-access-token",
+      "line": 3063,
+      "reason": "Chaîne de test Stripe explicitement fictive injectée dans appels simulés et assertions."
+    },
+    {
+      "path": "apps/sim/tools/index.test.ts",
+      "sha256": "0151a54a2f1b69d96f63e3cfda07401e7afae73717aeeb7e3aeb01efa9df89f3",
+      "rule": "stripe-access-token",
+      "line": 3108,
+      "reason": "Chaîne de test Stripe explicitement fictive injectée dans appels simulés et assertions."
+    },
+    {
+      "path": "apps/sim/tools/index.test.ts",
+      "sha256": "0151a54a2f1b69d96f63e3cfda07401e7afae73717aeeb7e3aeb01efa9df89f3",
+      "rule": "stripe-access-token",
+      "line": 3122,
+      "reason": "Chaîne de test Stripe explicitement fictive injectée dans appels simulés et assertions."
+    },
+    {
+      "path": "helm/sim/tests/smoke_test.yaml",
+      "sha256": "0783fc592912065b23cd233556924c9bba4ac2049e44c0f02458d4468b4ef13a",
+      "rule": "generic-api-key",
+      "line": 14,
+      "reason": "Valeurs de test explicites dans fixture Helm ou environnement mocké ; aucun secret de déploiement."
+    },
+    {
+      "path": "helm/sim/tests/smoke_test.yaml",
+      "sha256": "0783fc592912065b23cd233556924c9bba4ac2049e44c0f02458d4468b4ef13a",
+      "rule": "generic-api-key",
+      "line": 15,
+      "reason": "Valeurs de test explicites dans fixture Helm ou environnement mocké ; aucun secret de déploiement."
+    },
+    {
+      "path": "helm/sim/tests/cronjobs_test.yaml",
+      "sha256": "e0567dc721140c950d348e88211060ec1b4fbbe8797e0832c6e2f4361411284f",
+      "rule": "generic-api-key",
+      "line": 9,
+      "reason": "Valeurs de test explicites dans fixture Helm ou environnement mocké ; aucun secret de déploiement."
+    },
+    {
+      "path": "helm/sim/tests/cronjobs_test.yaml",
+      "sha256": "e0567dc721140c950d348e88211060ec1b4fbbe8797e0832c6e2f4361411284f",
+      "rule": "generic-api-key",
+      "line": 10,
+      "reason": "Valeurs de test explicites dans fixture Helm ou environnement mocké ; aucun secret de déploiement."
+    },
+    {
+      "path": "packages/deployment-config/src/env-capabilities.ts",
+      "sha256": "81905a7d50ab0406ced70e4339d423205cd381a734be7bea02d70abff9b5d2bc",
+      "rule": "generic-api-key",
+      "line": 1533,
+      "reason": "Noms des variables d’environnement IA, pas leurs valeurs."
+    },
+    {
+      "path": "packages/testing/src/mocks/env.mock.ts",
+      "sha256": "596f6f9f87f9bfa9d67e15d13432f6f179ba24fb440ea09fe9f5d7cf0583f9dd",
+      "rule": "generic-api-key",
+      "line": 18,
+      "reason": "Valeurs de test explicites dans fixture Helm ou environnement mocké ; aucun secret de déploiement."
+    }
+  ]
+}

@@ -1,0 +1,68 @@
+# Copyright 2026 Memlia. All rights reserved.
+name: Admission des sources
+on:
+  pull_request:
+  push:
+    branches: [main, memlia/integration]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: admission-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  admission:
+    # Reconfigure private-runner quotas explicitly before using metered minutes.
+    if: github.event.repository.private == false
+    name: Provenance, imports et historique
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Vérifier la présence et les empreintes des notices amont
+        run: |
+          python3 scripts/ci/test_upstream_notices.py -v
+          python3 scripts/ci/check-upstream-notices.py --root .
+          python3 scripts/ci/check-upstream-notices.py --root . --history
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22.22.3'
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12.15'
+      - name: Préparer le parseur déjà utilisé par Sim
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --prefix "$RUNNER_TEMP/memlia-parser" --ignore-scripts --no-audit --no-fund --save-exact @typescript/typescript6@6.0.2
+          parser="$RUNNER_TEMP/memlia-parser/node_modules/@typescript/typescript6/lib/typescript.js"
+          printf '%s  %s\n' 'd3f3cd2b04b7f466f4484df921b744223f7bd1f3e353ec9110bdf52695b983d5' "$parser" | sha256sum --check
+          printf 'MEMLIA_TYPESCRIPT_PATH=%s\n' "$parser" >> "$GITHUB_ENV"
+      - name: Vérifier les contrôles puis les sources et tous les commits
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m unittest discover -s scripts/compliance -p 'test_*.py'
+          python scripts/compliance/gate.py tree --root .
+          python scripts/compliance/gate.py history --root .
+      - name: Installer le scanner de secrets vérifié
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools="$RUNNER_TEMP/memlia-gitleaks"
+          mkdir -p "$tools"
+          archive="$tools/gitleaks.tar.gz"
+          curl --fail --location --silent --show-error --retry 2 --max-time 120 https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz --output "$archive"
+          printf '%s  %s\n' '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb' "$archive" | sha256sum --check
+          tar --extract --gzip --file "$archive" --directory "$tools" -- gitleaks
+          "$tools/gitleaks" version
+      - name: Contrôler les secrets sans exemptions implicites
+        shell: bash
+        run: |
+          set -euo pipefail
+          export MEMLIA_GITLEAKS_BIN="$RUNNER_TEMP/memlia-gitleaks/gitleaks"
+          python -m unittest discover -s scripts/ci -p 'test_*.py'
+          bash scripts/ci/check-secrets.sh "$MEMLIA_GITLEAKS_BIN"

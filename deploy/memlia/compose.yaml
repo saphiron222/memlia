@@ -1,0 +1,189 @@
+# Derived from Sim c6cef5f87b6a1d1d01df89e7140bad9e9fd4c2e2 (Apache-2.0).
+# Foundation only: see README release gates before starting application services.
+x-runtime: &runtime
+  restart: unless-stopped
+  init: true
+  stop_grace_period: 30s
+  security_opt: [no-new-privileges:true]
+  logging:
+    driver: json-file
+    options: {max-size: 10m, max-file: '3'}
+
+services:
+  web:
+    <<: *runtime
+    image: ${MEMLIA_IMAGE_PREFIX:?Memlia image prefix required}/web@sha256:${MEMLIA_WEB_SHA256:?Audited web digest required}
+    user: '1001:1001'
+    cap_drop: [ALL]
+    mem_limit: 8g
+    pids_limit: 512
+    ports: ['127.0.0.1:3000:3000']
+    networks: [backend, egress]
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: ${DATABASE_URL:?Non-superuser web database URL required}
+      BETTER_AUTH_URL: ${NEXT_PUBLIC_APP_URL:?HTTPS cabinet origin required}
+      NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:?HTTPS cabinet origin required}
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?Required authentication secret}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Required persistent encryption key}
+      INTERNAL_API_SECRET: ${INTERNAL_API_SECRET:?Required shared internal secret}
+      CRON_SECRET: ${CRON_SECRET:?Required cron bearer secret}
+      REDIS_URL: redis://redis:6379
+      SOCKET_SERVER_URL: http://realtime:3002
+      NEXT_PUBLIC_SOCKET_URL: ''
+      TRUSTED_ORIGINS: ${TRUSTED_ORIGINS:-}
+      AUTH_TRUSTED_PROXIES: ${AUTH_TRUSTED_PROXIES:-}
+      EGRESS_ALLOWED_HOSTS: ${EGRESS_ALLOWED_HOSTS:-}
+      STORAGE_PROVIDER: local
+      MAX_TOOL_ITERATIONS: ${MAX_TOOL_ITERATIONS:-20}
+      EXECUTION_TIMEOUT_FREE: ${EXECUTION_TIMEOUT_FREE:-900}
+      EXECUTION_TIMEOUT_ASYNC_FREE: ${EXECUTION_TIMEOUT_ASYNC_FREE:-900}
+      NEXT_TELEMETRY_DISABLED: '1'
+      VERCEL_TELEMETRY_DISABLED: '1'
+      DO_NOT_TRACK: '1'
+      SIM_TELEMETRY_DISABLED: '1'
+      NEXT_PUBLIC_POSTHOG_ENABLED: 'false'
+      NEXT_PUBLIC_POSTHOG_KEY: ''
+      SENTRY_DSN: ''
+      NEXT_PUBLIC_SENTRY_DSN: ''
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OLLAMA_URL: ${OLLAMA_URL:-}
+    volumes:
+      - uploads:/app/apps/sim/uploads
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      migrations: {condition: service_completed_successfully}
+      realtime: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, curl, -fsS, --max-time, '4', http://127.0.0.1:3000]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  realtime:
+    <<: *runtime
+    image: ${MEMLIA_IMAGE_PREFIX:?Memlia image prefix required}/realtime@sha256:${MEMLIA_REALTIME_SHA256:?Audited realtime digest required}
+    user: '1001:1001'
+    cap_drop: [ALL]
+    mem_limit: 1g
+    pids_limit: 128
+    ports: ['127.0.0.1:3002:3002']
+    networks: [backend, egress]
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: ${DATABASE_URL_REALTIME:?Non-superuser realtime database URL required}
+      DATABASE_URL_REALTIME: ${DATABASE_URL_REALTIME:?Non-superuser realtime database URL required}
+      NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:?HTTPS cabinet origin required}
+      BETTER_AUTH_URL: ${NEXT_PUBLIC_APP_URL:?HTTPS cabinet origin required}
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?Required authentication secret}
+      INTERNAL_API_SECRET: ${INTERNAL_API_SECRET:?Required shared internal secret}
+      REDIS_URL: redis://redis:6379
+      DO_NOT_TRACK: '1'
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      migrations: {condition: service_completed_successfully}
+    healthcheck:
+      test: [CMD, curl, -fsS, --max-time, '4', http://127.0.0.1:3002/health]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  migrations:
+    image: ${MEMLIA_IMAGE_PREFIX:?Memlia image prefix required}/migrations@sha256:${MEMLIA_MIGRATIONS_SHA256:?Audited migrations digest required}
+    user: '1001:1001'
+    init: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 1g
+    pids_limit: 128
+    stop_grace_period: 30s
+    networks: [backend]
+    working_dir: /app/packages/db
+    environment:
+      DATABASE_URL: ${MIGRATION_DATABASE_URL:?Schema-owner migration database URL required}
+      MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:?Schema-owner migration database URL required}
+    command: [bun, run, 'db:migrate']
+    depends_on:
+      db: {condition: service_healthy}
+    restart: 'no'
+
+  redis:
+    <<: *runtime
+    # Valkey 8.1.10-alpine, BSD-3-Clause; manifest pinned after registry resolution.
+    image: valkey/valkey:8.1.10-alpine@sha256:081c2f5cb575efc901aa80ff9cdbd1ec6a301682fd35e1ebb4b0990a4a4a8507
+    mem_limit: 512m
+    pids_limit: 64
+    networks: [backend]
+    command: [valkey-server, --appendonly, 'yes', --appendfsync, everysec, --maxmemory, 384mb, --maxmemory-policy, noeviction]
+    volumes: [redis_data:/data]
+    healthcheck:
+      test: [CMD, valkey-cli, ping]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  cron:
+    <<: *runtime
+    image: ${MEMLIA_IMAGE_PREFIX:?Memlia image prefix required}/cron@sha256:${MEMLIA_CRON_SHA256:?Audited cron digest required}
+    user: '1001:1001'
+    cap_drop: [ALL]
+    read_only: true
+    mem_limit: 256m
+    pids_limit: 128
+    stop_grace_period: 60s
+    networks: [backend]
+    environment:
+      SIM_URL: http://web:3000
+      CRON_SECRET: ${CRON_SECRET:?Required cron bearer secret}
+      TZ: UTC
+    configs:
+      - source: crontab
+        target: /etc/sim/crontab
+    depends_on:
+      web: {condition: service_healthy}
+    healthcheck:
+      # Liveness only; successful endpoint execution must be monitored separately.
+      test: [CMD-SHELL, 'kill -0 1']
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+  db:
+    <<: *runtime
+    image: pgvector/pgvector:pg17@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
+    mem_limit: 2g
+    pids_limit: 256
+    stop_grace_period: 60s
+    networks: [backend]
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: memlia
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Bootstrap administrator password required}
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD, pg_isready, -U, postgres, -d, memlia]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+
+volumes:
+  postgres_data:
+  redis_data:
+  uploads:
+
+networks:
+  backend:
+    internal: true
+  egress:
+
+# File-backed config supports the cron service read-only root filesystem.
+configs:
+  crontab:
+    file: ./crontab

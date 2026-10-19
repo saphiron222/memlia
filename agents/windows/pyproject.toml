@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "memlia-windows-agent"
+version = "0.0.0"
+description = "Primitives locales de session de Memlia Agent"
+requires-python = ">=3.12"
+dependencies = []
+license = "LicenseRef-Memlia-All-Rights-Reserved"
+license-files = ["LICENSE"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

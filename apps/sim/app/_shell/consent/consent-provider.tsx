@@ -1,0 +1,32 @@
+// Modified by Memlia in 2026. Upstream Apache-2.0 license and notices retained.
+'use client'
+
+import type { ReactNode } from 'react'
+import { TrackingConsentProvider } from '@/lib/consent/tracking-consent'
+import { AttributionCookieGuard } from '@/app/_shell/consent/attribution-cookie-guard'
+import { ConsentBanner } from '@/app/_shell/consent/consent-banner'
+import { ConsentStoreProvider } from '@/app/_shell/consent/consent-store-provider'
+import { FreebuffClickIdGuard } from '@/app/_shell/consent/freebuff-click-id-guard'
+
+interface ConsentProviderProps {
+  children: ReactNode
+}
+
+/**
+ * Owns hosted Sim's consent lifecycle across every route. The banner stays off
+ * until the resolved jurisdiction policy requires it and then appears on every
+ * entry route, including a direct workspace visit. Privacy settings remain the
+ * durable control after the initial decision.
+ */
+export function ConsentProvider({ children }: ConsentProviderProps) {
+  return (
+    <ConsentStoreProvider>
+      <TrackingConsentProvider>
+        {children}
+        <FreebuffClickIdGuard />
+        <AttributionCookieGuard />
+        <ConsentBanner />
+      </TrackingConsentProvider>
+    </ConsentStoreProvider>
+  )
+}

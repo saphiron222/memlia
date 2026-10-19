@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "const": "memlia.binding/v1"
+    },
+    "organizationId": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "workspaceId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+    },
+    "bindingId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+    },
+    "provider": {
+      "type": "string",
+      "pattern": "^[^\\uD800-\\uDFFF]{1,256}(?![\\s\\S])",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "accountRef": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+    },
+    "scopes": {
+      "maxItems": 256,
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[^\\uD800-\\uDFFF]{1,256}(?![\\s\\S])",
+        "minLength": 1,
+        "maxLength": 256
+      }
+    },
+    "connection": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "personal"
+            },
+            "subjectUserId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+            },
+            "resolution": {
+              "type": "string",
+              "const": "subject_only"
+            }
+          },
+          "required": [
+            "kind",
+            "subjectUserId",
+            "resolution"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "shared"
+            },
+            "credentialOwnerUserId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+            },
+            "approvalId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+            },
+            "allowedSubjectIds": {
+              "minItems": 1,
+              "maxItems": 256,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "credentialOwnerUserId",
+            "approvalId",
+            "allowedSubjectIds"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "organizationId",
+    "workspaceId",
+    "bindingId",
+    "provider",
+    "accountRef",
+    "scopes",
+    "connection"
+  ],
+  "additionalProperties": false
+}

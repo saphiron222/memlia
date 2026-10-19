@@ -1,0 +1,52 @@
+---
+title: Introduction
+description: Build, deploy, and manage AI agents in a shared workspace.
+---
+
+Sim is the open-source AI workspace where teams build, deploy, and manage AI agents. Connect models and tools, store shared data, and inspect what happens when an agent runs.
+
+## Choose how to build
+
+| Method | Use it to |
+| --- | --- |
+| **[Chat](/chat)** | Describe what you need and ask Sim to create or edit workspace resources. Open what it creates, run it, and check the result. |
+| **[Workflow builder](/workflows)** | Connect blocks into agent logic, configure their inputs, and inspect execution step by step. |
+| **[API and SDKs](/api-reference)** | Create resources and run deployed workflows from your application. |
+
+You can start in Chat and refine the same workflow in the builder. On self-hosted deployments, Chat depends on the deployment's configuration and can be disabled.
+
+Follow [Getting started](/getting-started) to build an agent with web search tools and structured output.
+
+## Workspace resources
+
+A workspace holds the resources your team and agents use:
+
+| Resource | Purpose |
+| --- | --- |
+| **[Workflows](/workflows)** | Executable logic made of connected blocks. Use Agent blocks for model reasoning and tools for actions such as sending email or querying an API. |
+| **[Tables](/tables)** | Structured rows that workflows can read, update, and process. |
+| **[Files](/files)** | Documents and media you upload, create, and share with agents. |
+| **[Knowledge bases](/knowledgebase)** | Searchable documents. Retrieve relevant passages for an agent to use in its answers. |
+| **[Logs](/logs-debugging)** | Run records and block inputs, outputs, errors, timing, and costs. |
+
+[Deploy a workflow](/workflows/deployment) to make it available through an API, a chat interface, or an MCP server. MCP (Model Context Protocol) lets AI applications discover and call tools exposed by a server.
+
+## Models and integrations
+
+Use the [integration catalog](/integrations) to connect supported models, communication services, productivity apps, search tools, and databases. These tools let agents research a topic, process documents, update business systems, and return results to another application.
+
+For tools outside the catalog, connect an [external MCP server](/agents/mcp) or create a [custom tool](/agents/custom-tools). Configure the credentials and permissions each service requires.
+
+## Choose a deployment
+
+- **Sim Cloud:** Sign in at [sim.ai](https://www.sim.ai) to use the managed service.
+- **Self-hosted:** Run Sim on your infrastructure with [Docker Compose](/platform/self-hosting/docker) or [Kubernetes](/platform/self-hosting/kubernetes). You can connect local models through Ollama or vLLM. Chat and external integrations can still require network access.
+
+The core source is available on [GitHub](https://github.com/simstudioai/sim) under the Apache 2.0 license. Enterprise features use a separate license that requires an active Enterprise subscription for production use. See [self-hosting](/platform/self-hosting) for installation requirements and configuration.
+
+## Related docs
+
+- [Getting started](/getting-started): Build and test a research agent.
+- [Chat](/chat): Build and manage workspace resources conversationally.
+- [Workflows](/workflows): Blocks, connections, triggers, and execution.
+- [Quick reference](/quick-reference): Look up builder actions.

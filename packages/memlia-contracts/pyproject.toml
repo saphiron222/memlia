@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "memlia-contracts"
+version = "0.1.0"
+description = "Memlia versioned transport contracts"
+requires-python = ">=3.12"
+dependencies = ["jsonschema==4.26.0"]
+license = "LicenseRef-Memlia-All-Rights-Reserved"
+
+[tool.setuptools.packages.find]
+where = ["python"]
+
+[tool.setuptools.package-data]
+memlia_contracts = ["schemas/*.json"]
