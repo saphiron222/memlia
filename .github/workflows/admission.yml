@@ -16,7 +16,8 @@ jobs:
     if: github.event.repository.private == false
     name: Provenance, imports et historique
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    # The full-history step took 23m51s; retain time for the unchanged secret checks.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
