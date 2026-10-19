@@ -16,6 +16,9 @@ postgres='pgvector/pgvector:pg17@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca
 containers=()
 network_created=0
 completed=0
+current_stage=bootstrap
+database_ready_exit_code=''
+database_init_exit_code=''
 cleanup() {
   result=$?
   trap - EXIT INT TERM
@@ -37,11 +40,25 @@ cleanup() {
   else
     cleanup_ok=0
   fi
-  python3 - "$metrics/result.json" "$result" "$completed" "$cleanup_ok" <<'PY' || receipt_ok=0
+  python3 - "$metrics/result.json" "$result" "$completed" "$cleanup_ok" \
+    "${current_stage:-bootstrap}" "${database_ready_exit_code:-}" "${database_init_exit_code:-}" <<'PY' || receipt_ok=0
 import json,sys
 from pathlib import Path
-code, completed, cleanup = map(int,sys.argv[2:])
-Path(sys.argv[1]).write_text(json.dumps({'exitCode':code,'normalCompletion':bool(completed),'cleanup':bool(cleanup),'status':'passed' if code==0 and completed and cleanup else 'failed'},indent=2)+'\n')
+def exit_code(value, optional=False):
+    if optional and value=='': return None
+    if not (value.isascii() and value.isdigit() and len(value)<=3 and int(value)<=255):
+        raise ValueError('Invalid bounded command exit code')
+    return int(value)
+code=exit_code(sys.argv[2]); completed,cleanup=map(int,sys.argv[3:5]); stage=sys.argv[5]
+allowed={'bootstrap','host','pull_node','pull_database','download_bun','verify_bun','extract_bun',
+         'prepare_database','create_network','start_database','database_readiness','database_initialization',
+         'phase_test','phase_install','toolchain','phase_inventory','phase_typegen','phase_typecheck',
+         'phase_cli','phase_sandbox','phase_next','phase_standalone','completed'}
+assert stage in allowed and completed in (0,1) and cleanup in (0,1), 'Invalid fixed build diagnostic'
+Path(sys.argv[1]).write_text(json.dumps({'exitCode':code,'stage':stage,
+    'databaseReadyExitCode':exit_code(sys.argv[6],True),'databaseInitExitCode':exit_code(sys.argv[7],True),
+    'normalCompletion':bool(completed),'cleanup':bool(cleanup),
+    'status':'passed' if code==0 and completed and cleanup else 'failed'},indent=2)+'\n')
 PY
   # Only our fixed-schema JSON receipts are shown; no raw build logs/artifacts.
   python3 - "$metrics" <<'PY' || receipt_ok=0
@@ -56,6 +73,7 @@ PY
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
+current_stage=host
 python3 - "$metrics/host.json" "$root" <<'PY'
 import hashlib,json,os,platform,shutil,subprocess,sys
 from pathlib import Path
@@ -69,13 +87,19 @@ assert disk.free>=8*1024**3
 assert not (root/'node_modules').exists() and not (root/'apps/sim/.next').exists() and not (root/'.turbo').exists()
 PY
 # No cache restore or global cache/SDK deletion on the runner.
+current_stage=pull_node
 docker pull --platform linux/amd64 "$image" > "$private/pull-node.log" 2>&1
+current_stage=pull_database
 docker pull --platform linux/amd64 "$postgres" > "$private/pull-db.log" 2>&1
+current_stage=download_bun
 curl --fail --location --silent --show-error --retry 2 --max-time 120 \
   https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64.zip \
   --output "$private/bun.zip" 2> "$private/download.log"
+current_stage=verify_bun
 printf '%s  %s\n' '36368faef7527875d5ffa52e53cd48021741f2a83eb6208a8dd64068d422a913' "$private/bun.zip" | sha256sum --check > "$private/checksum.log"
+current_stage=extract_bun
 unzip -q "$private/bun.zip" -d "$private/tools"
+current_stage=prepare_database
 python3 - "$private" <<'PY'
 from pathlib import Path
 import secrets,sys
@@ -85,22 +109,33 @@ values={'DATABASE_URL':f'postgresql://memlia_build:{password}@database:5432/meml
 (root/'build.env').write_text(''.join(f'{k}={v}\n' for k,v in values.items()))
 (root/'database.sql').write_text(f"CREATE ROLE memlia_build LOGIN PASSWORD '{password}' NOSUPERUSER NOCREATEDB NOCREATEROLE;\nALTER DATABASE memlia_build OWNER TO memlia_build;\nCREATE EXTENSION IF NOT EXISTS vector;\nALTER SCHEMA public OWNER TO memlia_build;\n")
 PY
+current_stage=create_network
 docker network create "$prefix" > "$private/network.log" 2>&1
 network_created=1
 containers+=("$prefix-database")
+current_stage=start_database
 docker run -d --name "$prefix-database" --network "$prefix" --network-alias database \
   --memory 512m --memory-swap 512m --cpus 1 --env-file "$private/postgres.env" \
   "$postgres" > "$private/database.log" 2>&1
+current_stage=database_readiness
 ready=0
 for attempt in {1..40}; do
-  if docker exec "$prefix-database" pg_isready -U postgres -d memlia_build > /dev/null 2>&1; then ready=1; break; fi
+  if docker exec "$prefix-database" pg_isready -h 127.0.0.1 -p 5432 -t 1 -U postgres -d memlia_build > /dev/null 2>&1; then
+    database_ready_exit_code=0; ready=1; break
+  else
+    database_ready_exit_code=$?
+  fi
   sleep 1
 done
-[[ "$ready" == 1 ]]
+[[ "$ready" == 1 ]] || exit 1
+current_stage=database_initialization
+database_init_exit_code=0
 docker exec -i "$prefix-database" psql -v ON_ERROR_STOP=1 -U postgres -d memlia_build \
-  < "$private/database.sql" > "$private/database-init.log" 2>&1
+  < "$private/database.sql" > "$private/database-init.log" 2>&1 || database_init_exit_code=$?
+[[ "$database_init_exit_code" == 0 ]] || exit "$database_init_exit_code"
 phase() {
   local label="$1" cwd="$2"
+  current_stage="phase_$label"
   shift 2
   python3 - "$root" <<'PY'
 import shutil,sys
@@ -131,6 +166,7 @@ PY
 }
 phase test /work python3 scripts/ci/test-linux-build-metrics.py -v
 phase install /work sh -ec 'test "$(node --version)" = v24.22.0; test "$(bun --version)" = 1.4.2; sha256sum bun.lock > /scratch/lock.sha256; bun install --frozen-lockfile --ignore-scripts; sha256sum -c /scratch/lock.sha256'
+current_stage=toolchain
 docker run --rm --network none --user "$(id -u):$(id -g)" --read-only --cap-drop ALL \
   --security-opt no-new-privileges:true --memory 256m --memory-swap 256m \
   --mount "type=bind,source=$root,target=/work,readonly" \
@@ -164,4 +200,5 @@ assert (root/"static").is_dir()
 assert (root/"required-server-files.json").is_file()
 assert json.loads((root/"required-server-files.json").read_text())["config"]["output"]=="standalone"
 '
+current_stage=completed
 completed=1
