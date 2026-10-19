@@ -12,6 +12,7 @@ import {
   VARIABLE_OPERATIONS,
   WORKFLOW_OPERATIONS,
 } from '@sim/realtime-protocol/constants'
+import type { OperationFailedBroadcast } from '@sim/realtime-protocol/events'
 import { generateId } from '@sim/utils/id'
 import type { BlockRetryConfig } from '@sim/workflow-types/workflow'
 import {
@@ -190,10 +191,13 @@ export function useCollaborativeWorkflow() {
   // Track if we're applying remote changes to avoid infinite loops
   const isApplyingRemoteChange = useRef(false)
   const reloadSequencesRef = useRef<Record<string, number>>({})
+  const refusalIdentityRef = useRef({ workflowId: activeWorkflowId, userId: session?.user?.id })
+  refusalIdentityRef.current = { workflowId: activeWorkflowId, userId: session?.user?.id }
 
   const {
     addToQueue,
     confirmOperation,
+    retainRejectedWorkflowReplacement,
     failOperation,
     cancelOperationsForBlock,
     cancelOperationsForVariable,
@@ -219,6 +223,42 @@ export function useCollaborativeWorkflow() {
     isConnected,
   ])
 
+  // A local pre-emit hold has no server failure event. Observe the owned queue
+  // entry itself; a foreign wire code or another workflow never supplies identity.
+  useEffect(() => {
+    const workflowId = activeWorkflowId
+    const userId = session?.user?.id
+    if (!workflowId || !userId) return
+    const showRetainedRefusal = () => {
+      if (
+        refusalIdentityRef.current.workflowId !== workflowId ||
+        refusalIdentityRef.current.userId !== userId ||
+        useWorkflowRegistry.getState().activeWorkflowId !== workflowId ||
+        useWorkflowStore.getState().currentWorkflowId !== workflowId
+      )
+        return
+      const retained = useOperationQueueStore
+        .getState()
+        .operations.some(
+          (op) =>
+            op.workflowId === workflowId &&
+            op.userId === userId &&
+            op.operation.target === OPERATION_TARGETS.WORKFLOW &&
+            op.operation.operation === WORKFLOW_OPERATIONS.REPLACE_STATE &&
+            op.status === 'failed' &&
+            op.failureCode === 'WORKFLOW_REPLACE_REQUIRES_CAS'
+        )
+      const message = 'Workflow replacement requires revision-checked persistence.'
+      const diff = useWorkflowDiffStore.getState()
+      if (retained && diff.reconciliationErrors[workflowId] !== message) {
+        diff.setWorkflowReconciliationError(workflowId, message)
+      }
+    }
+    const unsubscribe = useOperationQueueStore.subscribe(showRetainedRefusal)
+    showRetainedRefusal()
+    return unsubscribe
+  }, [activeWorkflowId, session?.user?.id])
+
   useEffect(() => {
     const handleWorkflowOperation = (data: any) => {
       const { operation, target, payload, userId, metadata } = data
@@ -231,6 +271,21 @@ export function useCollaborativeWorkflow() {
           broadcastWorkflowId: metadata.workflowId,
           activeWorkflowId,
         })
+        return
+      }
+
+      // Modified by Memlia: legacy payloads are never authoritative snapshots.
+      if (
+        target === OPERATION_TARGETS.WORKFLOW &&
+        operation === WORKFLOW_OPERATIONS.REPLACE_STATE
+      ) {
+        if (
+          typeof metadata?.workflowId === 'string' &&
+          metadata.workflowId &&
+          metadata.workflowId === activeWorkflowId
+        ) {
+          void handleWorkflowUpdated({ workflowId: metadata.workflowId })
+        }
         return
       }
 
@@ -422,39 +477,6 @@ export function useCollaborativeWorkflow() {
             case VARIABLE_OPERATIONS.REMOVE:
               useOperationQueueStore.getState().cancelOperationsForVariable(payload.variableId)
               useVariablesStore.getState().deleteVariable(payload.variableId)
-              break
-          }
-        } else if (target === OPERATION_TARGETS.WORKFLOW) {
-          switch (operation) {
-            case WORKFLOW_OPERATIONS.REPLACE_STATE:
-              if (payload.state) {
-                logger.info('Received workflow state replacement from remote user', {
-                  userId,
-                  blockCount: Object.keys(payload.state.blocks || {}).length,
-                  edgeCount: (payload.state.edges || []).length,
-                  hasActiveDiff,
-                  isShowingDiff,
-                })
-                useWorkflowStore.getState().replaceWorkflowState(payload.state)
-
-                // Extract and apply subblock values
-                const subBlockValues: Record<string, Record<string, any>> = {}
-                Object.entries(payload.state.blocks || {}).forEach(
-                  ([blockId, block]: [string, any]) => {
-                    subBlockValues[blockId] = {}
-                    Object.entries(block.subBlocks || {}).forEach(
-                      ([subBlockId, subBlock]: [string, any]) => {
-                        subBlockValues[blockId][subBlockId] = subBlock.value
-                      }
-                    )
-                  }
-                )
-                if (activeWorkflowId) {
-                  useSubBlockStore.getState().setWorkflowValues(activeWorkflowId, subBlockValues)
-                }
-
-                logger.info('Successfully applied remote workflow state replacement')
-              }
               break
           }
         }
@@ -961,8 +983,27 @@ export function useCollaborativeWorkflow() {
       }
     }
 
-    const handleOperationFailed = (data: any) => {
-      const { operationId, error, retryable } = data
+    const handleOperationFailed = (data: OperationFailedBroadcast) => {
+      const { operationId, error, retryable, code } = data
+      const localOperation = useOperationQueueStore
+        .getState()
+        .operations.find((op) => op.id === operationId)
+      const isLegacyReplacement =
+        localOperation?.operation.target === OPERATION_TARGETS.WORKFLOW &&
+        localOperation.operation.operation === WORKFLOW_OPERATIONS.REPLACE_STATE
+      if (code === 'WORKFLOW_REPLACE_REQUIRES_CAS' || isLegacyReplacement) {
+        const workflowId = retainRejectedWorkflowReplacement(operationId)
+        if (workflowId) {
+          useWorkflowDiffStore
+            .getState()
+            .setWorkflowReconciliationError(
+              workflowId,
+              'Workflow replacement requires revision-checked persistence.'
+            )
+          useOperationQueueStore.getState().processNextOperation()
+        }
+        return
+      }
       logger.warn('Operation failed', { operationId, error, retryable })
 
       failOperation(operationId, retryable)
@@ -1011,6 +1052,7 @@ export function useCollaborativeWorkflow() {
     activeWorkflowId,
     queryClient,
     confirmOperation,
+    retainRejectedWorkflowReplacement,
     failOperation,
     emitWorkflowOperation,
   ])

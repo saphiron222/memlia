@@ -1,3 +1,4 @@
+// Modified by Memlia: closed full replacement socket and retained-queue regression coverage.
 /**
  * End-to-end guard for the socket operation ACL: the security boundary is not the
  * role table on its own but whether a role reaches `persistWorkflowOperation`.
@@ -148,6 +149,53 @@ describe('workflow operation ACL', () => {
         WORKFLOW_ID,
         expect.objectContaining({ operation: 'update-position' })
       )
+    })
+  })
+})
+
+describe('legacy workflow replacement refusal', () => {
+  it.each([undefined, 7])(
+    'refuses before persistence and broadcast even with revision %s',
+    async (revision) => {
+      mockAuthorizeWorkflow.mockResolvedValue({ allowed: true, workspacePermission: 'write' })
+      const { socket, handlers, toEmit } = createSocket(`replace-${revision}`)
+      const room = createRoomManager(socket.id, 'write')
+      setupOperationsHandlers(
+        socket as unknown as Parameters<typeof setupOperationsHandlers>[0],
+        room
+      )
+      await handlers['workflow-operation']({
+        operationId: 'legacy',
+        operation: 'replace-state',
+        target: 'workflow',
+        timestamp: Date.now(),
+        payload: {
+          state: { blocks: {}, edges: [], loops: {}, parallels: {}, expectedRevision: revision },
+        },
+      })
+      expect(mockPersist).not.toHaveBeenCalled()
+      expect(room.updateRoomLastModified).not.toHaveBeenCalled()
+      expect(toEmit).not.toHaveBeenCalled()
+      expect(socket.emit).toHaveBeenCalledExactlyOnceWith('operation-failed', {
+        operationId: 'legacy',
+        error: 'Workflow replacement requires revision-checked persistence.',
+        retryable: false,
+        code: 'WORKFLOW_REPLACE_REQUIRES_CAS',
+      })
+    }
+  )
+  it('refuses an uncorrelated legacy replacement without a success ACK', async () => {
+    const { socket, handlers, toEmit } = setup('replace-no-id', 'write')
+    await handlers['workflow-operation']({
+      operation: 'replace-state',
+      target: 'workflow',
+      timestamp: Date.now(),
+      payload: { state: {} },
+    })
+    expect(mockPersist).not.toHaveBeenCalled()
+    expect(toEmit).not.toHaveBeenCalled()
+    expect(socket.emit).toHaveBeenCalledExactlyOnceWith('operation-error', {
+      error: 'Workflow replacement requires revision-checked persistence.',
     })
   })
 })

@@ -1,3 +1,4 @@
+// Modified by Memlia: commit historical replacements only against the observed stack.
 import { createLogger } from '@sim/logger'
 import { UNDO_REDO_OPERATIONS } from '@sim/realtime-protocol/constants'
 import type { Edge } from '@xyflow/react'
@@ -10,15 +11,27 @@ import type {
   BatchRemoveBlocksOperation,
   BatchRemoveEdgesOperation,
   BatchUpdateParentOperation,
+  HistoryTicket,
   Operation,
   OperationEntry,
   UndoRedoState,
 } from '@/stores/undo-redo/types'
+import { registerUserDataReset } from '@/stores/user-data-reset-registry'
 import type { BlockState } from '@/stores/workflows/workflow/types'
 
 const logger = createLogger('UndoRedoStore')
 const DEFAULT_CAPACITY = 100
 const MAX_STACKS = 5
+
+let historyTickets = new WeakMap<
+  HistoryTicket,
+  {
+    key: string
+    stack: UndoRedoState['stacks'][string]
+    fingerprint: string
+    direction: 'undo' | 'redo'
+  }
+>()
 
 let recordingSuspendDepth = 0
 
@@ -125,6 +138,51 @@ export const useUndoRedoStore = create<UndoRedoState>()(
     (set, get) => ({
       stacks: {},
       capacity: DEFAULT_CAPACITY,
+
+      captureHistoryTicket: (workflowId, userId, direction) => {
+        const key = getStackKey(workflowId, userId)
+        const stack = get().stacks[key]
+        const entry = stack?.[direction].at(-1)
+        if (!entry) return null
+        const ticket = Object.freeze({
+          workflowId,
+          userId,
+          direction,
+          entry: structuredClone(entry),
+        })
+        historyTickets.set(ticket, { key, stack, direction, fingerprint: JSON.stringify(stack) })
+        return ticket
+      },
+
+      isHistoryTicketCurrent: (ticket) => {
+        const owned = historyTickets.get(ticket)
+        return (
+          !!owned &&
+          get().stacks[owned.key] === owned.stack &&
+          JSON.stringify(owned.stack) === owned.fingerprint
+        )
+      },
+
+      commitHistoryTicket: (ticket) => {
+        if (!get().isHistoryTicketCurrent(ticket)) return false
+        const owned = historyTickets.get(ticket)!
+        historyTickets.delete(ticket)
+        const { key, stack, direction } = owned
+        const other = direction === 'undo' ? 'redo' : 'undo'
+        const entry = stack[direction].at(-1)!
+        set((state) => ({
+          stacks: {
+            ...state.stacks,
+            [key]: {
+              ...stack,
+              [direction]: stack[direction].slice(0, -1),
+              [other]: [...stack[other], entry].slice(-state.capacity),
+              lastUpdated: Date.now(),
+            },
+          },
+        }))
+        return true
+      },
 
       push: (workflowId: string, userId: string, entry: OperationEntry) => {
         if (isRecordingSuspended()) {
@@ -509,3 +567,8 @@ export const useUndoRedoStore = create<UndoRedoState>()(
     }
   )
 )
+
+registerUserDataReset('undo-redo', () => {
+  historyTickets = new WeakMap()
+  useUndoRedoStore.setState({ stacks: {} })
+})

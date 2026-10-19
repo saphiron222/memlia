@@ -176,3 +176,21 @@ describe('subblock update with canonical modes persistence', () => {
     expect(mockSet).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('legacy workflow replacement persistence guard', () => {
+  it('rejects before even resolving the workflow or starting a transaction', async () => {
+    await expect(
+      persistWorkflowOperation('workflow-1', {
+        operation: 'replace-state',
+        target: 'workflow',
+        payload: { state: {} },
+        timestamp: Date.now(),
+      })
+    ).rejects.toThrow('Workflow replacement requires revision-checked persistence.')
+    expect(workflowAuthzMockFns.mockGetActiveWorkflowContext).not.toHaveBeenCalled()
+    expect(mockTransaction).not.toHaveBeenCalled()
+    expect(mockSet).not.toHaveBeenCalled()
+    expect(transaction.delete).not.toHaveBeenCalled()
+    expect(transaction.insert).not.toHaveBeenCalled()
+  })
+})

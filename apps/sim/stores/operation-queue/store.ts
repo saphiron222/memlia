@@ -1,3 +1,4 @@
+// Modified by Memlia: retain legacy full replacements in the existing in-memory queue.
 import { createLogger } from '@sim/logger'
 import { create } from 'zustand'
 import type {
@@ -136,6 +137,28 @@ function dropOperationForMissingTarget(operation: QueuedOperation): boolean {
   return true
 }
 
+function isWorkflowReplacement(op: QueuedOperation): boolean {
+  return op.operation.target === 'workflow' && op.operation.operation === 'replace-state'
+}
+
+// Presence alone blocks legacy/inherited entries, even before the refusal is marked.
+function isWorkflowBlocked(operations: QueuedOperation[], workflowId: string): boolean {
+  return operations.some((op) => op.workflowId === workflowId && isWorkflowReplacement(op))
+}
+
+function hasActiveProcessing(operations: QueuedOperation[]): boolean {
+  return operations.some(
+    (op) => op.status === 'processing' && !isWorkflowBlocked(operations, op.workflowId)
+  )
+}
+
+function clearTimersForOperation(id: string): void {
+  clearTimeout(retryTimeouts.get(id))
+  retryTimeouts.delete(id)
+  clearTimeout(operationTimeouts.get(id))
+  operationTimeouts.delete(id)
+}
+
 export const useOperationQueueStore = create<OperationQueueState>((set, get) => ({
   operations: [],
   workflowOperationVersions: {},
@@ -199,17 +222,21 @@ export const useOperationQueueStore = create<OperationQueueState>((set, get) => 
       return
     }
 
-    const duplicateContent = state.operations.find(
-      (op) =>
-        !shouldDropPendingOperation(op) &&
-        op.operation.operation === operation.operation.operation &&
-        op.operation.target === operation.operation.target &&
-        op.workflowId === operation.workflowId &&
-        ((operation.operation.target === 'block' &&
-          op.operation.payload?.id === operation.operation.payload?.id) ||
-          (operation.operation.target !== 'block' &&
-            JSON.stringify(op.operation.payload) === JSON.stringify(operation.operation.payload)))
-    )
+    const blocked = isWorkflowBlocked(state.operations, operation.workflowId)
+    if (blocked) shouldDropPendingOperation = () => false
+    const duplicateContent =
+      !blocked &&
+      state.operations.find(
+        (op) =>
+          !shouldDropPendingOperation(op) &&
+          op.operation.operation === operation.operation.operation &&
+          op.operation.target === operation.operation.target &&
+          op.workflowId === operation.workflowId &&
+          ((operation.operation.target === 'block' &&
+            op.operation.payload?.id === operation.operation.payload?.id) ||
+            (operation.operation.target !== 'block' &&
+              JSON.stringify(op.operation.payload) === JSON.stringify(operation.operation.payload)))
+      )
 
     const isReplaceStateWorkflowOp =
       operation.operation.target === 'workflow' && operation.operation.operation === 'replace-state'
@@ -248,8 +275,42 @@ export const useOperationQueueStore = create<OperationQueueState>((set, get) => 
     get().processNextOperation()
   },
 
+  // This is a hold, not a retry, confirmation or reconciliation. Session reset is
+  // deliberately still a security purge; this memory is not durable across reloads.
+  retainRejectedWorkflowReplacement: (operationId) => {
+    const state = get()
+    const operation = state.operations.find((op) => op.id === operationId)
+    if (!operation || !isWorkflowReplacement(operation)) return null
+    for (const op of state.operations) {
+      if (op.workflowId === operation.workflowId) clearTimersForOperation(op.id)
+    }
+    if (
+      operation.status !== 'failed' ||
+      operation.failureCode !== 'WORKFLOW_REPLACE_REQUIRES_CAS'
+    ) {
+      const operations = state.operations.map((op) =>
+        op.id === operationId
+          ? {
+              ...op,
+              status: 'failed' as const,
+              failureCode: 'WORKFLOW_REPLACE_REQUIRES_CAS' as const,
+            }
+          : op
+      )
+      set({ operations, isProcessing: hasActiveProcessing(operations) })
+    }
+    return operation.workflowId
+  },
+
   confirmOperation: (operationId) => {
     const state = get()
+    const operation = state.operations.find((op) => op.id === operationId)
+    if (!operation) return
+    if (isWorkflowBlocked(state.operations, operation.workflowId)) {
+      get().retainRejectedWorkflowReplacement(operationId)
+      get().processNextOperation()
+      return
+    }
     const newOperations = state.operations.filter((op) => op.id !== operationId)
 
     const retryTimeout = retryTimeouts.get(operationId)
@@ -269,7 +330,7 @@ export const useOperationQueueStore = create<OperationQueueState>((set, get) => 
       remainingOps: newOperations.length,
     })
 
-    set({ operations: newOperations, isProcessing: false })
+    set({ operations: newOperations, isProcessing: hasActiveProcessing(newOperations) })
 
     get().processNextOperation()
   },
@@ -279,6 +340,13 @@ export const useOperationQueueStore = create<OperationQueueState>((set, get) => 
     const operation = state.operations.find((op) => op.id === operationId)
     if (!operation) {
       logger.warn('Attempted to fail operation that does not exist in queue', { operationId })
+      return
+    }
+
+    if (isWorkflowBlocked(state.operations, operation.workflowId)) {
+      get().retainRejectedWorkflowReplacement(operationId)
+      clearTimersForOperation(operationId)
+      get().processNextOperation()
       return
     }
 
@@ -375,6 +443,9 @@ export const useOperationQueueStore = create<OperationQueueState>((set, get) => 
   },
 
   processNextOperation: () => {
+    for (const op of get().operations) {
+      if (isWorkflowReplacement(op)) get().retainRejectedWorkflowReplacement(op.id)
+    }
     const state = get()
 
     if (state.isProcessing) {
@@ -386,7 +457,10 @@ export const useOperationQueueStore = create<OperationQueueState>((set, get) => 
     }
 
     const nextOperation = state.operations.find(
-      (op) => op.status === 'pending' && op.workflowId === currentRegisteredWorkflowId
+      (op) =>
+        op.status === 'pending' &&
+        op.workflowId === currentRegisteredWorkflowId &&
+        !isWorkflowBlocked(state.operations, op.workflowId)
     )
     if (!nextOperation) {
       return
@@ -483,6 +557,7 @@ export const useOperationQueueStore = create<OperationQueueState>((set, get) => 
     workflowId: string,
     timeoutMs = DEFAULT_WORKFLOW_DRAIN_TIMEOUT_MS
   ) => {
+    if (isWorkflowBlocked(get().operations, workflowId)) return Promise.resolve('failed' as const)
     const waitResetVersion = resetVersion
     if (!get().hasPendingOperations(workflowId)) {
       return Promise.resolve('drained' as const)
@@ -503,7 +578,7 @@ export const useOperationQueueStore = create<OperationQueueState>((set, get) => 
           return
         }
 
-        if (state.hasOperationError) {
+        if (state.hasOperationError || isWorkflowBlocked(state.operations, workflowId)) {
           clearTimeout(timeout)
           unsubscribe()
           resolve('failed')
@@ -524,6 +599,7 @@ export const useOperationQueueStore = create<OperationQueueState>((set, get) => 
 
     const state = get()
     const operationsToCancel = state.operations.filter((op) => {
+      if (isWorkflowBlocked(state.operations, op.workflowId)) return false
       const { target, payload, operation } = op.operation
 
       if (target === 'block' && payload?.id === blockId) return true
@@ -560,6 +636,7 @@ export const useOperationQueueStore = create<OperationQueueState>((set, get) => 
     })
 
     const newOperations = state.operations.filter((op) => {
+      if (isWorkflowBlocked(state.operations, op.workflowId)) return true
       const { target, payload, operation } = op.operation
 
       if (target === 'block' && payload?.id === blockId) return false
@@ -583,7 +660,7 @@ export const useOperationQueueStore = create<OperationQueueState>((set, get) => 
 
     set({
       operations: newOperations,
-      isProcessing: false,
+      isProcessing: hasActiveProcessing(newOperations),
     })
 
     logger.debug('Cancelled operations for block', {
@@ -600,9 +677,10 @@ export const useOperationQueueStore = create<OperationQueueState>((set, get) => 
     const state = get()
     const operationsToCancel = state.operations.filter(
       (op) =>
-        (op.operation.target === 'variable' && op.operation.payload?.variableId === variableId) ||
-        (op.operation.target === 'variable' &&
-          op.operation.payload?.sourceVariableId === variableId)
+        !isWorkflowBlocked(state.operations, op.workflowId) &&
+        ((op.operation.target === 'variable' && op.operation.payload?.variableId === variableId) ||
+          (op.operation.target === 'variable' &&
+            op.operation.payload?.sourceVariableId === variableId))
     )
 
     operationsToCancel.forEach((op) => {
@@ -621,6 +699,7 @@ export const useOperationQueueStore = create<OperationQueueState>((set, get) => 
 
     const newOperations = state.operations.filter(
       (op) =>
+        isWorkflowBlocked(state.operations, op.workflowId) ||
         !(
           (op.operation.target === 'variable' && op.operation.payload?.variableId === variableId) ||
           (op.operation.target === 'variable' &&
@@ -630,7 +709,7 @@ export const useOperationQueueStore = create<OperationQueueState>((set, get) => 
 
     set({
       operations: newOperations,
-      isProcessing: false,
+      isProcessing: hasActiveProcessing(newOperations),
     })
 
     logger.debug('Cancelled operations for variable', {
@@ -643,6 +722,7 @@ export const useOperationQueueStore = create<OperationQueueState>((set, get) => 
 
   cancelOperationsForWorkflow: (workflowId: string) => {
     const state = get()
+    if (isWorkflowBlocked(state.operations, workflowId)) return
     retryTimeouts.forEach((timeout, opId) => {
       const op = state.operations.find((o) => o.id === opId)
       if (op && op.workflowId === workflowId) {
@@ -659,7 +739,7 @@ export const useOperationQueueStore = create<OperationQueueState>((set, get) => 
     })
     set((s) => ({
       operations: s.operations.filter((op) => op.workflowId !== workflowId),
-      isProcessing: false,
+      isProcessing: hasActiveProcessing(s.operations.filter((op) => op.workflowId !== workflowId)),
     }))
   },
 
@@ -669,7 +749,9 @@ export const useOperationQueueStore = create<OperationQueueState>((set, get) => 
     clearOperationQueueTimers()
 
     set({
-      operations: [],
+      operations: get().operations.filter((op) =>
+        isWorkflowBlocked(get().operations, op.workflowId)
+      ),
       isProcessing: false,
       hasOperationError: true,
     })
@@ -717,6 +799,7 @@ export function useOperationQueue() {
     },
     hasOperationError,
     addToQueue: actions.addToQueue,
+    retainRejectedWorkflowReplacement: actions.retainRejectedWorkflowReplacement,
     confirmOperation: actions.confirmOperation,
     failOperation: actions.failOperation,
     processNextOperation: actions.processNextOperation,

@@ -6,7 +6,10 @@ import { fetchWorkflowEnvelope } from '@/hooks/queries/utils/fetch-workflow-enve
 import { workflowKeys } from '@/hooks/queries/utils/workflow-keys'
 import { useOperationQueueStore } from '@/stores/operation-queue/store'
 import { useWorkflowDiffStore } from '@/stores/workflow-diff/store'
-import { applyWorkflowStateToStores } from '@/stores/workflow-diff/utils'
+import {
+  applyWorkflowStateToStores,
+  WorkflowSnapshotPublicationError,
+} from '@/stores/workflow-diff/utils'
 import { useWorkflowRegistry } from '@/stores/workflows/registry/store'
 import { useWorkflowStore } from '@/stores/workflows/workflow/store'
 import type { DraftSyncVersions, WorkflowState } from '@/stores/workflows/workflow/types'
@@ -127,14 +130,19 @@ export function applyRawDraftSnapshot(
     !canApplyDraftSnapshot(workflowId, versions)
   )
     return false
-  applyWorkflowStateToStores(
-    workflowId,
-    { ...state, currentWorkflowId: workflowId },
-    {
-      draftRevisionAttestation: { workflowId, revision, versions },
-    }
-  )
-  return true
+  try {
+    applyWorkflowStateToStores(
+      workflowId,
+      { ...state, currentWorkflowId: workflowId },
+      {
+        draftRevisionAttestation: { workflowId, revision, versions },
+      }
+    )
+    return true
+  } catch (error) {
+    if (error instanceof WorkflowSnapshotPublicationError) return false
+    throw error
+  }
 }
 
 /** Join payload ownership is captured before HTTP can yield to newer local/remote work. */
@@ -235,21 +243,26 @@ export async function syncLocalDraftFromServer(workflowId: string): Promise<bool
     : { ...wireState }
   // double-cast-allowed: workflowStateSchema is a wire supertype; normalized workflow state is persisted in store-compatible shape
   const workflowState = draftState as unknown as WorkflowState
-  applyWorkflowStateToStores(
-    workflowId,
-    { ...workflowState, currentWorkflowId: workflowId },
-    {
-      updateLastSaved: true,
-      ...(Object.hasOwn(envelope, 'variables')
-        ? {
-            draftRevisionAttestation: {
-              workflowId,
-              revision: envelope.draftRevision,
-              versions: snapshotVersions,
-            },
-          }
-        : {}),
-    }
-  )
-  return true
+  try {
+    applyWorkflowStateToStores(
+      workflowId,
+      { ...workflowState, currentWorkflowId: workflowId },
+      {
+        updateLastSaved: true,
+        ...(Object.hasOwn(envelope, 'variables')
+          ? {
+              draftRevisionAttestation: {
+                workflowId,
+                revision: envelope.draftRevision,
+                versions: snapshotVersions,
+              },
+            }
+          : {}),
+      }
+    )
+    return true
+  } catch (error) {
+    if (error instanceof WorkflowSnapshotPublicationError) return false
+    throw error
+  }
 }

@@ -8,6 +8,7 @@ import { requestJson } from '@/lib/api/client/request'
 import { getWorkflowNormalizedStateContract } from '@/lib/api/contracts/workflows'
 import { stripWorkflowDiffMarkers, WorkflowDiffEngine } from '@/lib/workflows/diff'
 import { Serializer } from '@/serializer'
+import { useUndoRedoStore } from '@/stores/undo-redo/store'
 import { registerUserDataReset } from '@/stores/user-data-reset-registry'
 import { useWorkflowRegistry } from '../workflows/registry/store'
 import { getAttestedDraftRevision } from '../workflows/sync-local-draft'
@@ -22,6 +23,8 @@ import {
   captureDiffObservation,
   cloneWorkflowState,
   createBatchedUpdater,
+  type DiffObservation,
+  decodeDiffWorkflowSnapshot,
   diffSnapshotFingerprint,
   observeAppliedDiff,
   persistWorkflowStateToServer,
@@ -231,7 +234,7 @@ export const useWorkflowDiffStore = create<WorkflowDiffState & WorkflowDiffActio
       }
       async function readback(
         actionId: string,
-        previous: ReturnType<typeof captureDiffObservation>,
+        previous: DiffObservation,
         expected: number | undefined,
         baseline: WorkflowState
       ) {
@@ -244,7 +247,7 @@ export const useWorkflowDiffStore = create<WorkflowDiffState & WorkflowDiffActio
             params: { id: previous.workflowId },
           }
         )
-        const state = cloneWorkflowState(received)
+        const state = cloneWorkflowState(decodeDiffWorkflowSnapshot({ draftRevision, ...received }))
         assertOwner(actionId)
         assertDiffObservation(observation)
         if (expected !== undefined && draftRevision !== expected)
@@ -272,17 +275,25 @@ export const useWorkflowDiffStore = create<WorkflowDiffState & WorkflowDiffActio
       function publishDiff(
         actionId: string,
         baseline: WorkflowState,
-        confirmed: Awaited<ReturnType<typeof readback>>
+        confirmed: Awaited<ReturnType<typeof readback>>,
+        assertExternal?: () => void
       ) {
         assertOwner(actionId)
         assertDiffObservation(confirmed.observation)
         const workflowId = confirmed.observation.workflowId
         const epoch = displayEpoch
+        const beforeGraph = useWorkflowStore.getState().blocks
+        let graphPublished = false
         const assertPublication = () => {
+          assertExternal?.()
           assertOwner(actionId)
           assertDisplay(workflowId, epoch)
+          if (!graphPublished && useWorkflowStore.getState().blocks !== beforeGraph)
+            throw new Error('The workflow changed during publication.')
         }
+        assertPublication()
         if (
+          !assertExternal &&
           isEmptyDiffAnalysis(confirmed.diff.diffAnalysis) &&
           diffSnapshotFingerprint(baseline) === diffSnapshotFingerprint(confirmed.state)
         ) {
@@ -305,7 +316,7 @@ export const useWorkflowDiffStore = create<WorkflowDiffState & WorkflowDiffActio
           diffMetadata: confirmed.diff.metadata,
           diffError: null,
         })
-        assertOwner(actionId)
+        assertPublication()
         assertDiffObservation(confirmed.observation)
         applyWorkflowStateToStores(
           workflowId,
@@ -316,6 +327,7 @@ export const useWorkflowDiffStore = create<WorkflowDiffState & WorkflowDiffActio
           undefined,
           assertPublication
         )
+        graphPublished = true
         assertPublication()
         observeAppliedDiff(confirmed.observation, confirmed.state)
         consumeCoveredNotification(confirmed.observation)
@@ -389,7 +401,9 @@ export const useWorkflowDiffStore = create<WorkflowDiffState & WorkflowDiffActio
               get().detachedDiffs[workflowId]?.consultationRequest !== requestId
             )
               throw new Error('The detached intention changed.')
-            const snapshot = cloneWorkflowState(received)
+            const snapshot = cloneWorkflowState(
+              decodeDiffWorkflowSnapshot({ draftRevision, ...received })
+            )
             if (!Number.isSafeInteger(draftRevision) || draftRevision < 0)
               throw new Error('Invalid server revision.')
             assertExactDiffSnapshot(snapshot)
@@ -447,6 +461,139 @@ export const useWorkflowDiffStore = create<WorkflowDiffState & WorkflowDiffActio
           get().setWorkflowReconciliationError(workflowId, null)
           assertDisplay(workflowId, epoch)
           notifyDiffSettled(workflowId)
+        },
+
+        applyHistorySnapshot: async (options) => {
+          const { workflowId, ticket, assertIdentity } = options
+          const assertTicket = () => {
+            assertIdentity()
+            if (
+              ticket.workflowId !== workflowId ||
+              !useUndoRedoStore.getState().isHistoryTicketCurrent(ticket)
+            )
+              throw new Error('History changed. Keep newer edits and synchronize before retrying.')
+          }
+          assertTicket()
+          const requireComplete = (state: WorkflowState) => {
+            if (
+              !state ||
+              !['blocks', 'edges', 'loops', 'parallels', 'variables'].every((key) =>
+                Object.hasOwn(state, key)
+              ) ||
+              !state.variables ||
+              typeof state.variables !== 'object' ||
+              Array.isArray(state.variables)
+            )
+              throw new Error('Incomplete history. A complete graph and variables are required.')
+            const owned = stripWorkflowDiffMarkers(cloneWorkflowState(state))
+            assertExactDiffSnapshot(owned)
+            validateCandidate(owned)
+            return owned
+          }
+          const target = requireComplete(options.target)
+          const baseline =
+            options.overlayBaseline === undefined
+              ? undefined
+              : requireComplete(options.overlayBaseline)
+          const prior = get().action
+          if (
+            get().detachedDiffs[workflowId] ||
+            (prior &&
+              (prior.workflowId !== workflowId ||
+                prior.phase !== 'confirmed' ||
+                !prior.confirmed)) ||
+            (!prior && get().hasActiveDiff)
+          )
+            throw new Error('Resolve the current intention before using history.')
+          const revision = prior?.confirmed?.revision ?? getAttestedDraftRevision(workflowId)
+          if (revision === null || !Number.isSafeInteger(revision) || revision < 0)
+            throw new Error(
+              'Synchronize the workflow before using history; no source revision is attested.'
+            )
+          const observation = prior?.confirmed
+            ? {
+                ...prior.confirmed.observation,
+                versions: { ...prior.confirmed.observation.versions },
+              }
+            : captureDiffObservation(workflowId)
+          assertDiffObservation(observation)
+          const actionId = crypto.randomUUID()
+          const epoch = displayEpoch
+          const assertHistory = () => {
+            assertTicket()
+            assertOwner(actionId)
+            assertDisplay(workflowId, epoch)
+          }
+          runningActions.add(actionId)
+          set({
+            action: {
+              id: actionId,
+              workflowId,
+              phase: 'saving',
+              intendedState: cloneWorkflowState(target),
+            },
+            diffError: null,
+          })
+          try {
+            assertHistory()
+            get().setWorkflowReconciliationInProgress(workflowId, true)
+            assertHistory()
+            assertDiffObservation(observation)
+            const receipt = await persistWorkflowStateToServer(workflowId, target, revision)
+            assertHistory()
+            const confirmed = await readback(
+              actionId,
+              observation,
+              receipt.draftRevision,
+              baseline ?? target
+            )
+            assertHistory()
+            if (diffSnapshotFingerprint(confirmed.state) !== diffSnapshotFingerprint(target))
+              throw new Error(
+                'The historical replacement was not confirmed exactly. Synchronize before continuing.'
+              )
+            if (baseline) {
+              publishDiff(actionId, baseline, confirmed, assertHistory)
+              assertHistory()
+            } else {
+              const beforeGraph = useWorkflowStore.getState().blocks
+              applyWorkflowStateToStores(
+                workflowId,
+                { ...confirmed.state, currentWorkflowId: workflowId },
+                undefined,
+                () => {
+                  assertHistory()
+                  if (useWorkflowStore.getState().blocks !== beforeGraph)
+                    throw new Error('The workflow changed during publication.')
+                }
+              )
+              assertHistory()
+              observeAppliedDiff(confirmed.observation, confirmed.state)
+              consumeCoveredNotification(confirmed.observation)
+              assertHistory()
+              observeAppliedDiff(confirmed.observation, confirmed.state, 0)
+            }
+            // Consume only the still-current entry. Never restore a snapshot of either pile.
+            if (!useUndoRedoStore.getState().commitHistoryTicket(ticket))
+              throw new Error('History changed during publication. Synchronize before continuing.')
+            assertIdentity()
+            assertOwner(actionId)
+            assertDisplay(workflowId, epoch)
+            observeAppliedDiff(confirmed.observation, confirmed.state, 0)
+            if (!baseline) {
+              batchedUpdate.cancel()
+              diffEngine.clearDiff()
+              set(RESET_DIFF_STATE)
+              assertDisplay(workflowId, epoch)
+              if (get().action) throw new Error('A new intention replaced the history action.')
+              notifyDiffSettled(workflowId)
+            }
+          } catch (error) {
+            failAction(actionId, error)
+            throw error
+          } finally {
+            finishAction(actionId, workflowId)
+          }
         },
 
         setProposedChanges: async (proposedState, diffAnalysis, options) => {
@@ -601,7 +748,32 @@ export const useWorkflowDiffStore = create<WorkflowDiffState & WorkflowDiffActio
             baselineWorkflowId &&
             baselineWorkflowId === activeWorkflowId
           ) {
-            applyWorkflowStateToStores(baselineWorkflowId, baselineWorkflow)
+            const epoch = displayEpoch
+            const assertBaseline = () => {
+              assertDisplay(baselineWorkflowId, epoch)
+              if (get().baselineWorkflow !== baselineWorkflow || get().action)
+                throw new Error('The baseline changed during publication.')
+            }
+            try {
+              applyWorkflowStateToStores(
+                baselineWorkflowId,
+                baselineWorkflow,
+                undefined,
+                assertBaseline
+              )
+              assertBaseline()
+            } catch (error) {
+              // A subscriber can supersede a legacy baseline during publication.
+              // Keep the intention and report it without erasing newer state.
+              if (displayEpoch === epoch && get().baselineWorkflow === baselineWorkflow)
+                set({
+                  diffError:
+                    error instanceof Error
+                      ? error.message
+                      : 'The workflow changed during publication.',
+                })
+              return
+            }
           }
 
           diffEngine.clearDiff()
@@ -695,7 +867,8 @@ export const useWorkflowDiffStore = create<WorkflowDiffState & WorkflowDiffActio
             assertDiffObservation(observation)
             if (
               source.draftRevision !== revision ||
-              diffSnapshotFingerprint(source) !== diffSnapshotFingerprint(sourceState)
+              diffSnapshotFingerprint(decodeDiffWorkflowSnapshot(source)) !==
+                diffSnapshotFingerprint(sourceState)
             )
               throw new Error('The saved diff changed. Synchronize before rejecting it.')
             validateCandidate(target)

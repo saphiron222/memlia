@@ -5,9 +5,11 @@ import { ApiClientError } from '@/lib/api/client/errors'
 import {
   getWorkflowNormalizedStateContract,
   putWorkflowNormalizedStateContract,
+  workflowStateResponseSchema,
 } from '@/lib/api/contracts/workflows'
 import { useOperationQueueStore } from '@/stores/operation-queue/store'
 import { resetAllStores } from '@/stores/reset-all-stores'
+import { useUndoRedoStore } from '@/stores/undo-redo/store'
 import { resetRegisteredUserData } from '@/stores/user-data-reset-registry'
 import { useVariablesStore } from '@/stores/variables/store'
 import { useWorkflowRegistry } from '@/stores/workflows/registry/store'
@@ -53,6 +55,20 @@ function graph(name = 'Original'): WorkflowState {
     variables: { v: { id: 'v', name: 'threshold', type: 'number', value: 3 } },
   }
 }
+// HTTP fixtures carry the same server stamp and parsing as the real GET response.
+// UI baselines above intentionally remain ordinary WorkflowState values.
+function wireSnapshot(state: WorkflowState, draftRevision: number) {
+  return workflowStateResponseSchema.parse({
+    ...state,
+    variables: Object.fromEntries(
+      Object.entries(state.variables ?? {}).map(([key, value]) => [
+        key,
+        { ...value, workflowId: id },
+      ])
+    ),
+    draftRevision,
+  })
+}
 function deferred<T>() {
   let resolve!: (v: T) => void
   let reject!: (e: unknown) => void
@@ -71,7 +87,7 @@ function setupHttp() {
           draftRevision: input.body.expectedRevision + 1,
           warnings: [],
         }
-      : { ...graph('Proposed'), draftRevision: 8 }
+      : wireSnapshot(graph('Proposed'), 8)
   )
 }
 function edit() {
@@ -184,7 +200,7 @@ describe('diff CAS with real engine, stores and queue; controlled HTTP/socket', 
     void run.catch(() => {})
     await vi.waitFor(() => expect(transport.request).toHaveBeenCalledTimes(2))
     diff.getState().markExternalUpdatePending(id)
-    read.resolve({ ...graph('Proposed'), draftRevision: 8 })
+    read.resolve(wireSnapshot(graph('Proposed'), 8))
     await expect(run).rejects.toThrow()
     expect(diff.getState().pendingExternalUpdates[id]).toBe(2)
     expect(useWorkflowStore.getState().blocks.b.name).toBe('Original')
@@ -195,7 +211,7 @@ describe('diff CAS with real engine, stores and queue; controlled HTTP/socket', 
         diff.getState().markExternalUpdatePending(id)
         return { success: true, baseRevision: 7, draftRevision: 8, warnings: [] }
       }
-      return { ...graph('Proposed'), draftRevision: 8 }
+      return wireSnapshot(graph('Proposed'), 8)
     })
     await diff.getState().setProposedChanges(graph('Proposed'))
     expect(diff.getState().pendingExternalUpdates[id]).toBeUndefined()
@@ -206,9 +222,9 @@ describe('diff CAS with real engine, stores and queue; controlled HTTP/socket', 
     await diff.getState().setProposedChanges(graph('Proposed'))
     transport.request.mockReset()
     transport.request
-      .mockResolvedValueOnce({ ...graph('Proposed'), draftRevision: 8 })
+      .mockResolvedValueOnce(wireSnapshot(graph('Proposed'), 8))
       .mockResolvedValueOnce({ success: true, baseRevision: 8, draftRevision: 9, warnings: [] })
-      .mockResolvedValueOnce({ ...graph(), draftRevision: 9 })
+      .mockResolvedValueOnce(wireSnapshot(graph(), 9))
     await diff.getState().rejectChanges()
     expect(transport.request.mock.calls.map((c) => c[0])).toEqual([
       getWorkflowNormalizedStateContract,
@@ -267,7 +283,7 @@ it('refuses navigation while reading a persisted snapshot', async () => {
   const run = diff.getState().showPersistedChanges(id)
   void run.catch(() => {})
   useWorkflowRegistry.setState({ activeWorkflowId: 'workflow-b' })
-  wait.resolve({ ...graph('Proposed'), draftRevision: 8 })
+  wait.resolve(wireSnapshot(graph('Proposed'), 8))
   await expect(run).rejects.toThrow()
   expect(useWorkflowStore.getState().blocks.b.name).toBe('Original')
 })
@@ -291,7 +307,7 @@ it.each(['get', 'engine'] as const)(
     await vi.waitFor(() => expect(transport.request).toHaveBeenCalled())
     await new Promise((resolve) => setTimeout(resolve, 0))
     edit()
-    wait.resolve({ ...graph('Proposed'), draftRevision: 8 })
+    wait.resolve(wireSnapshot(graph('Proposed'), 8))
     await expect(run).rejects.toThrow()
     expect(useWorkflowStore.getState().blocks.b.name).toBe('Human')
   }
@@ -326,7 +342,7 @@ it('refuses newer readback revision rather than using it to rebase the proposal'
   transport.request.mockImplementation(async (contract) =>
     contract === putWorkflowNormalizedStateContract
       ? { success: true, baseRevision: 7, draftRevision: 8, warnings: [] }
-      : { ...graph('New collaborator'), draftRevision: 9 }
+      : wireSnapshot(graph('New collaborator'), 9)
   )
   await expect(diff.getState().setProposedChanges(graph('Proposed'))).rejects.toThrow()
   expect(useWorkflowStore.getState().blocks.b.name).toBe('Original')
@@ -337,7 +353,7 @@ it('retains the confirmed candidate and variables on rejection conflict', async 
   await diff.getState().showPersistedChanges(id)
   transport.request
     .mockReset()
-    .mockResolvedValueOnce({ ...graph('Proposed'), draftRevision: 8 })
+    .mockResolvedValueOnce(wireSnapshot(graph('Proposed'), 8))
     .mockRejectedValueOnce(new ApiClientError({ status: 409, message: 'Conflict', body: {} }))
   await expect(diff.getState().rejectChanges()).rejects.toMatchObject({ status: 409 })
   expect(useWorkflowStore.getState().blocks.b.name).toBe('Proposed')
@@ -348,7 +364,7 @@ it('retains the confirmed candidate and variables on rejection conflict', async 
 })
 it('refuses an inverse if the server revision changed before its preflight', async () => {
   await diff.getState().showPersistedChanges(id)
-  transport.request.mockReset().mockResolvedValueOnce({ ...graph('Other'), draftRevision: 9 })
+  transport.request.mockReset().mockResolvedValueOnce(wireSnapshot(graph('Other'), 9))
   await expect(diff.getState().rejectChanges()).rejects.toThrow()
   expect(transport.request.mock.calls.map((c) => c[0])).toEqual([
     getWorkflowNormalizedStateContract,
@@ -376,11 +392,15 @@ it('does not accept or reject an unconfirmed write, and preserves queued work', 
   )
 })
 it('rejects snapshots requiring destructive normalization without changing the canvas', async () => {
-  transport.request.mockResolvedValueOnce({
-    ...graph('Proposed'),
-    edges: [{ id: 'dangling', source: 'missing', target: 'b' }],
-    draftRevision: 8,
-  })
+  transport.request.mockResolvedValueOnce(
+    wireSnapshot(
+      {
+        ...graph('Proposed'),
+        edges: [{ id: 'dangling', source: 'missing', target: 'b' }],
+      },
+      8
+    )
+  )
   await expect(diff.getState().showPersistedChanges(id)).rejects.toThrow('normalization')
   expect(useWorkflowStore.getState().blocks.b.name).toBe('Original')
   expect(useWorkflowStore.getState().edges).toEqual([])
@@ -414,7 +434,7 @@ it('cannot substitute a historical baseline for the attested live source', async
 it('can display a second persisted edit using the original inverse baseline', async () => {
   await diff.getState().showPersistedChanges(id)
   diff.getState().markExternalUpdatePending(id)
-  transport.request.mockResolvedValueOnce({ ...graph('Second'), draftRevision: 9 })
+  transport.request.mockResolvedValueOnce(wireSnapshot(graph('Second'), 9))
   await diff.getState().showPersistedChanges(id)
   expect(useWorkflowStore.getState().blocks.b.name).toBe('Second')
   expect(diff.getState().baselineWorkflow?.blocks.b.name).toBe('Original')
@@ -458,7 +478,7 @@ it('does not let an undo-event subscriber mutate the owned inverse baseline', as
   }
 })
 it('does not stage or record a persisted diff with no semantic changes', async () => {
-  transport.request.mockResolvedValueOnce({ ...graph(), draftRevision: 8 })
+  transport.request.mockResolvedValueOnce(wireSnapshot(graph(), 8))
   const record = vi.fn()
   window.addEventListener('record-diff-operation', record)
   try {
@@ -482,8 +502,8 @@ it('owns the confirmed source primitives before the inverse preflight awaits', a
   retained.observation.versions.remoteUpdate = 99
   transport.request
     .mockResolvedValueOnce({ success: true, baseRevision: 8, draftRevision: 9, warnings: [] })
-    .mockResolvedValueOnce({ ...graph(), draftRevision: 9 })
-  wait.resolve({ ...graph('Proposed'), draftRevision: 8 })
+    .mockResolvedValueOnce(wireSnapshot(graph(), 9))
+  wait.resolve(wireSnapshot(graph('Proposed'), 8))
   await run
   expect(transport.request.mock.calls[1][1].body.expectedRevision).toBe(8)
   expect(useWorkflowStore.getState().blocks.b.name).toBe('Original')
@@ -499,7 +519,7 @@ it('writes explicitly empty variables in the same CAS as the graph', async () =>
   transport.request.mockImplementation(async (contract) =>
     contract === putWorkflowNormalizedStateContract
       ? { success: true, baseRevision: 7, draftRevision: 8, warnings: [] }
-      : { ...state, draftRevision: 8 }
+      : wireSnapshot(state, 8)
   )
   await diff.getState().setProposedChanges(state)
   expect(transport.request.mock.calls[0][1].body.variables).toEqual({})
@@ -559,7 +579,7 @@ describe('navigation detaches ownership without settling the old intention', () 
       wait.resolve(
         phase === 'PUT'
           ? { success: true, baseRevision: 7, draftRevision: 8, warnings: [] }
-          : { ...graph('Proposed'), draftRevision: 8 }
+          : wireSnapshot(graph('Proposed'), 8)
       )
       await expect(run).rejects.toThrow()
       expect(useWorkflowStore.getState().blocks.b.name).toBe('New visit')
@@ -581,7 +601,7 @@ describe('navigation detaches ownership without settling the old intention', () 
     useWorkflowStore.getState().replaceWorkflowState({ ...graph('Return'), currentWorkflowId: id })
     useSubBlockStore.getState().initializeFromWorkflow(id, graph('Return').blocks)
     expect(() => diff.getState().abandonDetachedDiff(id)).toThrow()
-    transport.request.mockResolvedValueOnce({ ...graph('Server'), draftRevision: 11 })
+    transport.request.mockResolvedValueOnce(wireSnapshot(graph('Server'), 11))
     await diff.getState().consultDetachedDiff(id)
     expect(useWorkflowStore.getState().blocks.b.name).toBe('Return')
     expect(diff.getState().detachedDiffs[id].action!.phase).toBe('unknown')
@@ -605,7 +625,7 @@ describe('navigation detaches ownership without settling the old intention', () 
     void run.catch(() => {})
     navigate('workflow-b')
     useWorkflowRegistry.setState({ activeWorkflowId: id })
-    wait.resolve({ ...graph('Server'), draftRevision: 8 })
+    wait.resolve(wireSnapshot(graph('Server'), 8))
     await expect(run).rejects.toThrow()
     expect(diff.getState().detachedDiffs[id].consultation).toBeUndefined()
   })
@@ -687,7 +707,7 @@ it('permits only one server consultation at a time for a detached intention', as
   const count = transport.request.mock.calls.length
   await expect(diff.getState().consultDetachedDiff(id)).rejects.toThrow()
   expect(transport.request).toHaveBeenCalledTimes(count)
-  wait.resolve({ ...graph('Consulted'), draftRevision: 9 })
+  wait.resolve(wireSnapshot(graph('Consulted'), 9))
   await first
   expect(diff.getState().detachedDiffs[id].consultation!.revision).toBe(9)
 })
@@ -867,5 +887,178 @@ describe('native workspace switching detaches before identities disappear', () =
     expect(diff.getState().action).toBe(before)
     expect(diff.getState().detachedDiffs).toEqual({})
     expect(canApplyHydrationSnapshot('workflow-b', captureDraftVersions('workflow-b'))).toBe(false)
+  })
+})
+
+describe('historical replacement confirmation', () => {
+  function ticket() {
+    const op = {
+      id: 'history-op',
+      type: 'apply-diff' as const,
+      timestamp: 1,
+      workflowId: id,
+      userId: 'author',
+      data: { baselineSnapshot: graph('Target'), proposedState: graph('Source'), diffAnalysis: {} },
+    }
+    useUndoRedoStore.setState({ stacks: {} })
+    useUndoRedoStore.getState().push(id, 'author', {
+      id: 'history-entry',
+      createdAt: 1,
+      operation: op,
+      inverse: structuredClone(op),
+    })
+    return useUndoRedoStore.getState().captureHistoryTicket(id, 'author', 'undo')!
+  }
+  it.each(['revision', 'graph'] as const)(
+    'refuses an incompatible %s readback without consuming the history entry',
+    async (changed) => {
+      const owned = ticket()
+      const stacks = useUndoRedoStore.getState().stacks
+      const blocks = useWorkflowStore.getState().blocks
+      transport.request
+        .mockResolvedValueOnce({ success: true, baseRevision: 7, draftRevision: 8, warnings: [] })
+        .mockResolvedValueOnce(
+          wireSnapshot(
+            graph(changed === 'graph' ? 'Other writer' : 'Target'),
+            changed === 'revision' ? 9 : 8
+          )
+        )
+      await expect(
+        diff.getState().applyHistorySnapshot({
+          workflowId: id,
+          target: graph('Target'),
+          ticket: owned,
+          assertIdentity: () => {},
+        })
+      ).rejects.toThrow()
+      expect(useUndoRedoStore.getState().stacks).toBe(stacks)
+      expect(useWorkflowStore.getState().blocks).toBe(blocks)
+      expect(diff.getState().action?.phase).toBe('unknown')
+      expect(transport.request).toHaveBeenCalledTimes(2)
+    }
+  )
+  it('owns the complete target before HTTP yields', async () => {
+    const owned = ticket()
+    const target = graph('Target')
+    const wait = deferred<any>()
+    transport.request
+      .mockImplementationOnce(() => wait.promise)
+      .mockResolvedValueOnce(wireSnapshot(graph('Target'), 8))
+    const run = diff
+      .getState()
+      .applyHistorySnapshot({ workflowId: id, target, ticket: owned, assertIdentity: () => {} })
+    target.blocks.b.name = 'Mutated after send'
+    target.variables!.v.value = 999
+    wait.resolve({ success: true, baseRevision: 7, draftRevision: 8, warnings: [] })
+    await run
+    expect(useWorkflowStore.getState().blocks.b.name).toBe('Target')
+    expect(useVariablesStore.getState().variables.v.value).toBe(3)
+    expect(useUndoRedoStore.getState().getStackSizes(id, 'author')).toEqual({
+      undoSize: 0,
+      redoSize: 1,
+    })
+  })
+})
+
+it('retains a legacy baseline and reports a refused clearDiff publication without throwing', () => {
+  const baseline = graph('Baseline')
+  diff.setState({
+    baselineWorkflow: baseline,
+    baselineWorkflowId: id,
+    status: 'showing',
+    hasActiveDiff: true,
+  })
+  let entered = false
+  const stop = useSubBlockStore.subscribe(() => {
+    if (entered) return
+    entered = true
+    useVariablesStore.setState((s) => ({
+      variables: { ...s.variables, v: { ...s.variables.v, value: 99 } },
+    }))
+  })
+  const settled = vi.fn()
+  window.addEventListener('workflow-diff-settled', settled)
+  try {
+    expect(() => diff.getState().clearDiff()).not.toThrow()
+  } finally {
+    stop()
+    window.removeEventListener('workflow-diff-settled', settled)
+  }
+  expect(entered).toBe(true)
+  expect(useVariablesStore.getState().variables.v.value).toBe(99)
+  expect(useWorkflowStore.getState().blocks.b.name).toBe('Original')
+  expect(diff.getState().baselineWorkflow).toBe(baseline)
+  expect(diff.getState().hasActiveDiff).toBe(true)
+  expect(diff.getState().diffError).toContain('changed during publication')
+  expect(settled).not.toHaveBeenCalled()
+})
+
+describe('GET editor representation refusals preserve native diff intentions', () => {
+  const refusal = 'The server snapshot is not representable by this editor.'
+  function nonRepresentable() {
+    const response = wireSnapshot(graph('Unrepresentable server state'), 8)
+    response.blocks.b.subBlocks.code.value = true
+    return response
+  }
+  async function useNativeHttp(response: unknown) {
+    const native = await vi.importActual<typeof import('@/lib/api/client/request')>(
+      '@/lib/api/client/request'
+    )
+    transport.request.mockImplementation(native.requestJson)
+    return vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async (_url, init) =>
+        Response.json(
+          init?.method === 'PUT'
+            ? { success: true, baseRevision: 7, draftRevision: 8, warnings: [] }
+            : response
+        )
+      )
+  }
+  it('retains the proposal and original graph when PUT succeeds but its GET cannot be represented', async () => {
+    const http = await useNativeHttp(nonRepresentable())
+    const before = useWorkflowStore.getState().blocks
+    const variables = useVariablesStore.getState().variables
+    await expect(diff.getState().setProposedChanges(graph('Intended'))).rejects.toThrow(refusal)
+    expect(http).toHaveBeenCalledTimes(2)
+    expect(useWorkflowStore.getState().blocks).toBe(before)
+    expect(useVariablesStore.getState().variables).toBe(variables)
+    expect(diff.getState().action?.phase).toBe('unknown')
+    expect(
+      Object.values(diff.getState().action!.intendedState.blocks).map((block) => block.name)
+    ).toEqual(['Intended'])
+    expect(diff.getState().baselineWorkflow?.blocks.b.name).toBe('Original')
+    expect(getAttestedDraftRevision(id)).toBeNull()
+  })
+  it('retains the confirmed diff and never PUTs when the pre-rejection GET cannot be represented', async () => {
+    await diff.getState().showPersistedChanges(id)
+    const before = useWorkflowStore.getState().blocks
+    const variables = useVariablesStore.getState().variables
+    const http = await useNativeHttp(nonRepresentable())
+    await expect(diff.getState().rejectChanges()).rejects.toThrow(refusal)
+    expect(http).toHaveBeenCalledTimes(1)
+    expect(http.mock.calls[0][1]?.method).not.toBe('PUT')
+    expect(useWorkflowStore.getState().blocks).toBe(before)
+    expect(useVariablesStore.getState().variables).toBe(variables)
+    expect(diff.getState().action?.intendedState.blocks.b.name).toBe('Original')
+    expect(diff.getState().baselineWorkflow?.blocks.b.name).toBe('Original')
+    expect(diff.getState().hasActiveDiff).toBe(true)
+  })
+  it('retains a detached unknown intention and never publishes a failed consultation', async () => {
+    transport.request.mockRejectedValueOnce(new TypeError('Response lost'))
+    await expect(diff.getState().setProposedChanges(graph('Intended'))).rejects.toThrow()
+    diff.getState().detachDiffForNavigation(id, 'workflow-b')
+    const intended = diff.getState().detachedDiffs[id].action?.intendedState
+    const before = useWorkflowStore.getState().blocks
+    const variables = useVariablesStore.getState().variables
+    const http = await useNativeHttp(nonRepresentable())
+    await expect(diff.getState().consultDetachedDiff(id)).rejects.toThrow(refusal)
+    expect(http).toHaveBeenCalledTimes(1)
+    expect(useWorkflowStore.getState().blocks).toBe(before)
+    expect(useVariablesStore.getState().variables).toBe(variables)
+    expect(diff.getState().detachedDiffs[id].action?.intendedState).toBe(intended)
+    expect(diff.getState().detachedDiffs[id].action?.phase).toBe('unknown')
+    expect(diff.getState().detachedDiffs[id].consultation).toBeUndefined()
+    expect(() => diff.getState().abandonDetachedDiff(id)).toThrow()
   })
 })

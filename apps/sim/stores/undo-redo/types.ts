@@ -1,3 +1,4 @@
+// Modified by Memlia: conditional tickets for confirmed historical full replacements.
 import type { UNDO_REDO_OPERATIONS, UndoRedoOperation } from '@sim/realtime-protocol/constants'
 import type { Edge } from '@xyflow/react'
 import type { BlockState } from '@/stores/workflows/workflow/types'
@@ -176,7 +177,22 @@ export interface OperationEntry {
   createdAt: number
 }
 
+/** Opaque identity; only the issuing store can validate or consume it. */
+export interface HistoryTicket {
+  readonly workflowId: string
+  readonly userId: string
+  readonly direction: 'undo' | 'redo'
+  readonly entry: OperationEntry
+}
+
 export interface UndoRedoState {
+  captureHistoryTicket: (
+    workflowId: string,
+    userId: string,
+    direction: 'undo' | 'redo'
+  ) => HistoryTicket | null
+  isHistoryTicketCurrent: (ticket: HistoryTicket) => boolean
+  commitHistoryTicket: (ticket: HistoryTicket) => boolean
   stacks: Record<
     string,
     {

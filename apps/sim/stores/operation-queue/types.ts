@@ -1,3 +1,6 @@
+// Modified by Memlia: retain rejected full replacements without acknowledging them.
+import type { OperationFailedBroadcast } from '@sim/realtime-protocol/events'
+
 /**
  * Emit functions return whether the payload was actually sent over the socket.
  * A `false` return means the emit was skipped (room not joined/visible) and the
@@ -39,6 +42,7 @@ export interface QueuedOperation {
   retryCount: number
   status: 'pending' | 'processing' | 'confirmed' | 'failed'
   userId: string
+  failureCode?: OperationFailedBroadcast['code']
 }
 
 export type WorkflowOperationsDrainResult = 'drained' | 'failed' | 'cancelled'
@@ -60,6 +64,7 @@ export interface OperationQueueState {
   addToQueue: (operation: Omit<QueuedOperation, 'timestamp' | 'retryCount' | 'status'>) => void
   /** Records that a remote collaborator's operation was applied to local stores. */
   markRemoteApplied: (workflowId: string) => void
+  retainRejectedWorkflowReplacement: (operationId: string) => string | null
   confirmOperation: (operationId: string) => void
   failOperation: (operationId: string, retryable?: boolean) => void
   handleOperationTimeout: (operationId: string) => void

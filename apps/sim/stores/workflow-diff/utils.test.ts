@@ -1,12 +1,21 @@
 // Modified by Memlia: bind draft revision attestations to applied client snapshots.
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { useOperationQueueStore } from '@/stores/operation-queue/store'
 import { useVariablesStore } from '@/stores/variables/store'
+import { RESET_DIFF_STATE, useWorkflowDiffStore } from '@/stores/workflow-diff/store'
 import {
   applyWorkflowStateToStores,
   applyWorkflowVariablesToStore,
   createBatchedUpdater,
+  decodeDiffWorkflowSnapshot,
 } from '@/stores/workflow-diff/utils'
+import { useWorkflowRegistry } from '@/stores/workflows/registry/store'
 import { useSubBlockStore } from '@/stores/workflows/subblock/store'
+import {
+  applyRawDraftSnapshot,
+  captureDraftVersions,
+  syncSocketDraftFromSnapshot,
+} from '@/stores/workflows/sync-local-draft'
 import { useWorkflowStore } from '@/stores/workflows/workflow/store'
 import type { WorkflowState } from '@/stores/workflows/workflow/types'
 
@@ -242,4 +251,314 @@ it('cancels only the pending batch and permits a fresh display update', () => {
   } finally {
     vi.useRealTimers()
   }
+})
+
+describe('publication guards against synchronous subscribers', () => {
+  const id = 'workflow-a'
+  const target: WorkflowState = {
+    currentWorkflowId: id,
+    blocks: {},
+    edges: [],
+    loops: {},
+    parallels: {},
+    variables: { v: { id: 'v', name: 'v', type: 'plain', value: 'target' } },
+  }
+  beforeEach(() => {
+    useWorkflowStore.getState().replaceWorkflowState(target)
+    useWorkflowStore.getState().invalidateDraftRevisionAttestation()
+    useSubBlockStore.getState().setWorkflowValues(id, { old: { value: 'source' } })
+    useVariablesStore.setState({
+      variables: { v: { id: 'v', workflowId: id, name: 'v', type: 'plain', value: 'source' } },
+    })
+  })
+  it.each(['variable', 'graph', 'subblocks'] as const)(
+    'preserves a human %s edit during subblock publication',
+    (kind) => {
+      let entered = false
+      const stop = useSubBlockStore.subscribe(() => {
+        if (entered) return
+        entered = true
+        if (kind === 'variable')
+          useVariablesStore.setState((s) => ({
+            variables: { ...s.variables, v: { ...s.variables.v, value: 'human' } },
+          }))
+        if (kind === 'graph')
+          useWorkflowStore.setState({ edges: [{ id: 'human', source: 'a', target: 'b' }] })
+        if (kind === 'subblocks')
+          useSubBlockStore.getState().setWorkflowValues(id, { human: { value: 'human' } })
+      })
+      try {
+        expect(() => applyWorkflowStateToStores(id, target)).toThrow('changed during publication')
+      } finally {
+        stop()
+      }
+      expect(entered).toBe(true)
+      expect(useVariablesStore.getState().variables.v.value).toBe(
+        kind === 'variable' ? 'human' : 'source'
+      )
+      expect(useWorkflowStore.getState().edges).toEqual(
+        kind === 'graph' ? [{ id: 'human', source: 'a', target: 'b' }] : []
+      )
+      if (kind === 'subblocks')
+        expect(useSubBlockStore.getState().workflowValues[id]).toEqual({
+          human: { value: 'human' },
+        })
+      expect(useWorkflowStore.getState().draftRevisionAttestation).toBeNull()
+    }
+  )
+  it('does not adopt an in-place variable mutation after its own setter', () => {
+    const stop = useVariablesStore.subscribe((s) => {
+      s.variables.v.value = 'human'
+    })
+    try {
+      expect(() => applyWorkflowStateToStores(id, target)).toThrow('changed during publication')
+    } finally {
+      stop()
+    }
+    expect(useVariablesStore.getState().variables.v.value).toBe('human')
+  })
+  it('does not adopt an in-place graph mutation after graph publication', () => {
+    const stop = useWorkflowStore.subscribe((s) => {
+      if (s.draftRevisionAttestation) s.edges.push({ id: 'human', source: 'a', target: 'b' })
+    })
+    try {
+      expect(() =>
+        applyWorkflowStateToStores(id, target, {
+          draftRevisionAttestation: {
+            workflowId: id,
+            revision: 8,
+            versions: { localOperation: 0, remoteApply: 0, remoteUpdate: 0 },
+          },
+        })
+      ).toThrow('changed during publication')
+    } finally {
+      stop()
+    }
+    expect(useWorkflowStore.getState().edges).toEqual([{ id: 'human', source: 'a', target: 'b' }])
+    expect(useWorkflowStore.getState().draftRevisionAttestation).toBeNull()
+  })
+  it('permits edits to another workflow while publishing the owned workflow', () => {
+    const stop = useSubBlockStore.subscribe(() =>
+      useVariablesStore.setState((s) => ({
+        variables: {
+          ...s.variables,
+          other: {
+            id: 'other',
+            workflowId: 'workflow-b',
+            name: 'other',
+            type: 'plain',
+            value: 'human',
+          },
+        },
+      }))
+    )
+    try {
+      applyWorkflowStateToStores(id, target)
+    } finally {
+      stop()
+    }
+    expect(useVariablesStore.getState().variables.v.value).toBe('target')
+    expect(useVariablesStore.getState().variables.other.value).toBe('human')
+  })
+})
+
+const publicationHttp = vi.hoisted(() => ({ fetch: vi.fn() }))
+vi.mock('@/app/_shell/providers/get-query-client', () => ({
+  getQueryClient: () => ({ fetchQuery: publicationHttp.fetch }),
+}))
+
+describe('native sync refuses a partial publication rather than raw retry', () => {
+  it.each(['socket-http', 'raw-direct'] as const)(
+    'preserves a human edit through %s',
+    async (path) => {
+      const id = 'workflow-a'
+      const state: WorkflowState = {
+        currentWorkflowId: id,
+        blocks: {},
+        edges: [],
+        loops: {},
+        parallels: {},
+      }
+      const variables = { v: { id: 'v', name: 'v', type: 'plain' as const, value: 'server' } }
+      useOperationQueueStore.getState().reset()
+      useWorkflowDiffStore.setState({
+        ...RESET_DIFF_STATE,
+        detachedDiffs: {},
+        pendingExternalUpdates: {},
+        remoteUpdateVersions: {},
+        reconcilingWorkflows: {},
+        reconciliationErrors: {},
+      })
+      useWorkflowRegistry.setState({ activeWorkflowId: id })
+      useWorkflowStore.getState().replaceWorkflowState(state)
+      useVariablesStore.setState({
+        variables: { v: { ...variables.v, workflowId: id, value: 'source' } },
+      })
+      publicationHttp.fetch
+        .mockReset()
+        .mockResolvedValue({ id, state, variables, draftRevision: 7 })
+      let entered = false
+      const stop = useSubBlockStore.subscribe(() => {
+        if (entered) return
+        entered = true
+        useVariablesStore.setState((s) => ({
+          variables: { ...s.variables, v: { ...s.variables.v, value: 'human' } },
+        }))
+      })
+      let result: unknown
+      try {
+        result =
+          path === 'socket-http'
+            ? await syncSocketDraftFromSnapshot({ id, state, variables, draftRevision: 7 })
+            : applyRawDraftSnapshot(id, { ...state, variables }, 7, captureDraftVersions(id))
+      } finally {
+        stop()
+      }
+      expect(entered).toBe(true)
+      expect(useVariablesStore.getState().variables.v.value).toBe('human')
+      expect(result).toBe(false)
+      expect(useWorkflowStore.getState().draftRevisionAttestation).toBeNull()
+      expect(publicationHttp.fetch).toHaveBeenCalledTimes(path === 'socket-http' ? 1 : 0)
+    }
+  )
+})
+
+describe('GET snapshot representation boundary', () => {
+  const source = () => ({
+    draftRevision: 7,
+    blocks: {
+      legacy: {
+        id: 'legacy',
+        type: 'retired-but-preserved',
+        name: 'Legacy',
+        position: { x: 1, y: 2 },
+        enabled: true,
+        subBlocks: {
+          text: { id: 'text', type: 'short-input', value: 'keep' },
+          matrix: { id: 'matrix', type: 'table', value: [['b', 'a'], ['c']] },
+        },
+        outputs: {
+          plain: 'string',
+          structured: {
+            type: 'json',
+            description: 'keep',
+            hiddenFromDisplay: false,
+            extension: { ordered: [3, 1, 2] },
+            condition: {
+              field: 'mode',
+              value: ['x', false, 2],
+              not: false,
+              allowReference: true,
+              extension: 'keep',
+              and: { field: 'other', value: [null, 'a', true], extension: { keep: true } },
+            },
+          },
+        },
+      },
+    },
+    edges: [],
+    loops: {
+      loop: {
+        id: 'loop',
+        nodes: ['legacy'],
+        iterations: 3,
+        loopType: 'for',
+        enabled: false,
+        locked: false,
+      },
+    },
+    parallels: {
+      parallel: {
+        id: 'parallel',
+        nodes: ['legacy'],
+        parallelType: 'count',
+        count: 0,
+        enabled: true,
+      },
+    },
+    variables: {
+      v: {
+        id: 'v',
+        workflowId: 'workflow-a',
+        name: 'v',
+        type: 'object',
+        value: { ordered: [false, 1, null] },
+      },
+    },
+  })
+  it('preserves the exact represented graph, legacy blocks, output extensions, variables and array order, removing only R', () => {
+    const input = source()
+    const original = structuredClone(input)
+    const { draftRevision: _revision, ...expected } = original
+    expect(decodeDiffWorkflowSnapshot(input)).toEqual(expected)
+    expect(input).toEqual(original)
+  })
+  it.each([
+    'boolean-value',
+    'object-value',
+    'missing-enabled',
+    'unknown-type',
+    'invalid-output',
+    'missing-and-value',
+  ] as const)('refuses %s with a fixed error instead of coercing or dropping it', (kind) => {
+    const input = source()
+    if (kind === 'boolean-value') Reflect.set(input.blocks.legacy.subBlocks.text, 'value', true)
+    if (kind === 'object-value')
+      Reflect.set(input.blocks.legacy.subBlocks.text, 'value', { secret: 'fictional' })
+    if (kind === 'missing-enabled') Reflect.deleteProperty(input.loops.loop, 'enabled')
+    if (kind === 'unknown-type') input.blocks.legacy.subBlocks.text.type = 'future-unknown-kind'
+    if (kind === 'invalid-output')
+      Reflect.set(input.blocks.legacy.outputs.structured.condition, 'value', { bad: true })
+    if (kind === 'missing-and-value')
+      Reflect.deleteProperty(input.blocks.legacy.outputs.structured.condition.and, 'value')
+    const original = structuredClone(input)
+    expect(() => decodeDiffWorkflowSnapshot(input)).toThrow(
+      'The server snapshot is not representable by this editor. Synchronize before continuing.'
+    )
+    expect(input).toEqual(original)
+  })
+  it('preserves explicit undefined allowed by the native output condition without inventing a missing property', () => {
+    const input = source()
+    Reflect.set(input.blocks.legacy.outputs.structured.condition.and, 'value', undefined)
+    const { draftRevision: _revision, ...expected } = input
+    expect(decodeDiffWorkflowSnapshot(input)).toEqual(expected)
+    const output = decodeDiffWorkflowSnapshot(input).blocks.legacy.outputs.structured
+    if (typeof output === 'string' || !output.condition?.and)
+      throw new Error('Expected structured output')
+    expect(Object.hasOwn(output.condition.and, 'value')).toBe(true)
+  })
+  it('refuses silently stripped fields and explicit null handles instead of normalizing them', () => {
+    const extra = source()
+    Reflect.set(extra.blocks.legacy, 'unparsedExtension', { keep: true })
+    expect(() => decodeDiffWorkflowSnapshot(extra)).toThrow('not representable')
+    const edge = {
+      id: 'e',
+      source: 'legacy',
+      target: 'legacy',
+      sourceHandle: null,
+      targetHandle: null,
+    }
+    expect(() => decodeDiffWorkflowSnapshot({ ...source(), edges: [edge] })).toThrow(
+      'not representable'
+    )
+  })
+  it('preserves the edge representation already validated by the actual GET contract', async () => {
+    const { workflowStateResponseSchema } = await import('@/lib/api/contracts/workflows')
+    const response = workflowStateResponseSchema.parse({
+      ...source(),
+      edges: [
+        {
+          id: 'second',
+          source: 'legacy',
+          target: 'legacy',
+          sourceHandle: null,
+          targetHandle: null,
+          data: { order: [2, 1] },
+        },
+        { id: 'first', source: 'legacy', target: 'legacy', sourceHandle: 'x', targetHandle: 'y' },
+      ],
+    })
+    const { draftRevision: _revision, ...expected } = response
+    expect(decodeDiffWorkflowSnapshot(response)).toEqual(expected)
+  })
 })

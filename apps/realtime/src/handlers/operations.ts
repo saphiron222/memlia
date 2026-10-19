@@ -90,6 +90,25 @@ export function setupOperationsHandlers(socket: AuthenticatedSocket, roomManager
       operationId = validatedOperation.operationId
       const { operation, target, payload, timestamp } = validatedOperation
 
+      // Modified by Memlia: full replacements must use revision-checked persistence.
+      if (
+        target === OPERATION_TARGETS.WORKFLOW &&
+        operation === WORKFLOW_OPERATIONS.REPLACE_STATE
+      ) {
+        const error = 'Workflow replacement requires revision-checked persistence.'
+        if (operationId) {
+          socket.emit('operation-failed', {
+            operationId,
+            error,
+            retryable: false,
+            code: 'WORKFLOW_REPLACE_REQUIRES_CAS',
+          })
+        } else {
+          socket.emit('operation-error', { error })
+        }
+        return
+      }
+
       // For position updates, preserve client timestamp to maintain ordering
       // For other operations, use server timestamp for consistency
       const isPositionUpdate =
@@ -273,46 +292,6 @@ export function setupOperationsHandlers(socket: AuthenticatedSocket, roomManager
         ([VARIABLE_OPERATIONS.ADD, VARIABLE_OPERATIONS.REMOVE] as VariableOperation[]).includes(
           operation as VariableOperation
         )
-      ) {
-        await persistWorkflowOperation(workflowId, {
-          operation,
-          target,
-          payload,
-          timestamp: operationTimestamp,
-          userId: session.userId,
-        })
-
-        await roomManager.updateRoomLastModified(wf(workflowId))
-
-        const broadcastData = {
-          operation,
-          target,
-          payload,
-          timestamp: operationTimestamp,
-          senderId: socket.id,
-          userId: session.userId,
-          userName: session.userName,
-          metadata: {
-            workflowId,
-            operationId: generateId(),
-          },
-        }
-
-        socket.to(workflowId).emit('workflow-operation', broadcastData)
-
-        if (operationId) {
-          socket.emit('operation-confirmed', {
-            operationId,
-            serverTimestamp: Date.now(),
-          })
-        }
-
-        return
-      }
-
-      if (
-        target === OPERATION_TARGETS.WORKFLOW &&
-        operation === WORKFLOW_OPERATIONS.REPLACE_STATE
       ) {
         await persistWorkflowOperation(workflowId, {
           operation,

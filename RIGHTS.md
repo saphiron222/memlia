@@ -14,6 +14,8 @@ Les adaptations suivantes renforcent les sauvegardes du diff, le suivi des inten
 
 Le raccordement optionnel de cette prévisualisation aux providers conserve l'intégralité du schéma natif, en relocalisant ses références JSON lors de l'enveloppement SDK. Les données de refus restent des échecs ; aucune route Chat ou permission d'envoi n'est activée par ce port. Ce raccordement original reste sous droits réservés.
 
+Les adaptations de l'historique Annuler/Rétablir, du refus des anciens remplacements socket et de la représentation des snapshots conservent les notices Sim des fichiers modifiés. Le helper socket retiré n'est pas remplacé par du code Enterprise. Le nouveau port d'observation des capacités Excel et ses tests sont des ajouts Memlia sous droits réservés ; le noyau et les bibliothèques gardent leurs licences propres.
+
 ## Ajouts Memlia
 
 Copyright 2026 Memlia. Tous droits réservés sur les nouveaux développements propres à Memlia. Le propriétaire a autorisé leur visibilité publique pendant le développement ; leur licence logicielle future n’est pas encore choisie. Aucune licence Apache, MIT ou autre licence libre ne leur est implicitement attribuée. Cette réserve ne restreint aucun droit fourni indépendamment par une licence tierce, la loi ou les conditions de la plateforme d’hébergement.

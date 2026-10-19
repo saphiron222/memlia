@@ -423,6 +423,10 @@ export async function persistWorkflowOperation(workflowId: string, operation: an
   const startTime = Date.now()
   try {
     const { operation: op, target, payload, timestamp, userId } = operation
+    // Modified by Memlia: reject the retired writer before any workflow read or transaction.
+    if (target === OPERATION_TARGETS.WORKFLOW && op === WORKFLOW_OPERATIONS.REPLACE_STATE) {
+      throw new Error('Workflow replacement requires revision-checked persistence.')
+    }
 
     const activeWorkflow = await getActiveWorkflowContext(workflowId)
     if (!activeWorkflow) {
@@ -474,9 +478,6 @@ export async function persistWorkflowOperation(workflowId: string, operation: an
           break
         case OPERATION_TARGETS.VARIABLE:
           await handleVariableOperationTx(tx, workflowId, op, payload)
-          break
-        case OPERATION_TARGETS.WORKFLOW:
-          await handleWorkflowOperationTx(tx, workflowId, op, payload)
           break
         default:
           throw new Error(`Unknown operation target: ${target}`)
@@ -2132,118 +2133,5 @@ async function handleVariableOperationTx(
     default:
       logger.warn(`Unknown variable operation: ${operation}`)
       throw new Error(`Unsupported variable operation: ${operation}`)
-  }
-}
-
-/** Replaces the complete workflow state. */
-async function handleWorkflowOperationTx(
-  tx: any,
-  workflowId: string,
-  operation: string,
-  payload: any
-) {
-  switch (operation) {
-    case WORKFLOW_OPERATIONS.REPLACE_STATE: {
-      if (!payload.state) {
-        throw new Error('Missing state for replace-state operation')
-      }
-
-      const { blocks, edges, loops, parallels } = payload.state
-
-      logger.info(`Replacing workflow state for ${workflowId}`, {
-        blockCount: Object.keys(blocks || {}).length,
-        edgeCount: (edges || []).length,
-        loopCount: Object.keys(loops || {}).length,
-        parallelCount: Object.keys(parallels || {}).length,
-      })
-
-      await tx.delete(workflowBlocks).where(eq(workflowBlocks.workflowId, workflowId))
-
-      await tx.delete(workflowSubflows).where(eq(workflowSubflows.workflowId, workflowId))
-
-      if (blocks && Object.keys(blocks).length > 0) {
-        const blockValues = Object.values(blocks).map((block: any) => ({
-          id: block.id,
-          workflowId,
-          type: block.type,
-          name: block.name,
-          positionX: block.position.x,
-          positionY: block.position.y,
-          errorEnabled: block.errorEnabled ?? false,
-          retry: block.retry ?? null,
-          data: block.data || {},
-          subBlocks: block.subBlocks || {},
-          outputs: block.outputs || {},
-          enabled: block.enabled ?? true,
-          horizontalHandles: block.horizontalHandles ?? true,
-          advancedMode: block.advancedMode ?? false,
-          triggerMode: block.triggerMode ?? false,
-          height: block.height || 0,
-          locked: block.locked ?? false,
-        }))
-
-        await tx.insert(workflowBlocks).values(blockValues)
-      }
-
-      if (edges && edges.length > 0) {
-        const canonicalEdges = (edges as Array<Record<string, unknown>>).map((edge) =>
-          canonicalizeEdgeAddCandidate({
-            id: edge.id as string,
-            source: edge.source as string,
-            target: edge.target as string,
-            sourceHandle: (edge.sourceHandle as string | null) ?? null,
-            targetHandle: (edge.targetHandle as string | null) ?? null,
-          })
-        )
-        const uniqueEdges = filterUniqueWorkflowEdges(canonicalEdges, [])
-        const edgeValues = uniqueEdges.map((edge) => ({
-          id: edge.id,
-          workflowId,
-          sourceBlockId: edge.source,
-          targetBlockId: edge.target,
-          sourceHandle: edge.sourceHandle ?? null,
-          targetHandle: edge.targetHandle ?? null,
-        }))
-
-        if (uniqueEdges.length < edges.length) {
-          logger.info(`Dropped ${edges.length - uniqueEdges.length} duplicate edge(s)`, {
-            operation: WORKFLOW_OPERATIONS.REPLACE_STATE,
-          })
-        }
-
-        if (edgeValues.length > 0) {
-          await tx.insert(workflowEdges).values(edgeValues)
-        }
-      }
-
-      if (loops && Object.keys(loops).length > 0) {
-        const loopValues = Object.entries(loops).map(([id, loop]: [string, any]) => ({
-          id,
-          workflowId,
-          type: 'loop',
-          config: loop,
-        }))
-
-        await tx.insert(workflowSubflows).values(loopValues)
-      }
-
-      if (parallels && Object.keys(parallels).length > 0) {
-        const parallelValues = Object.entries(parallels).map(([id, parallel]: [string, any]) => ({
-          id,
-          workflowId,
-          type: 'parallel',
-          config: parallel,
-        }))
-
-        await tx.insert(workflowSubflows).values(parallelValues)
-      }
-
-      logger.info(`Successfully replaced workflow state for ${workflowId}`)
-      break
-    }
-
-    default:
-      logger.warn(`Unknown workflow operation: ${operation}`)
-      throw new Error(`Unsupported workflow operation: ${operation}`)
   }
 }

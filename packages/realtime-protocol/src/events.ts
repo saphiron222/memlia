@@ -150,7 +150,9 @@ export interface OperationConfirmedBroadcast {
 }
 
 /** `operation-failed` rejection for a previously-emitted operation. */
+// Modified by Memlia: closed legacy workflow replacement refusal.
 export interface OperationFailedBroadcast {
+  code?: 'WORKFLOW_REPLACE_REQUIRES_CAS'
   operationId: string
   error: string
   retryable?: boolean

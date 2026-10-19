@@ -1,5 +1,7 @@
 // Modified by Memlia: track confirmed diff actions independently of draft attestations.
+
 import type { DiffAnalysis, WorkflowDiff } from '@/lib/workflows/diff'
+import type { HistoryTicket } from '@/stores/undo-redo/types'
 import type { WorkflowState } from '../workflows/workflow/types'
 import type { DiffObservation } from './utils'
 
@@ -79,6 +81,13 @@ interface DiffActionOptions {
 }
 
 export interface WorkflowDiffActions {
+  applyHistorySnapshot: (options: {
+    workflowId: string
+    target: WorkflowState
+    overlayBaseline?: WorkflowState
+    ticket: HistoryTicket
+    assertIdentity: () => void
+  }) => Promise<void>
   /** Returns a guard revoked by any later detach or identity reset. */
   detachDiffForWorkspaceChange: (
     sourceWorkflowId: string | null,

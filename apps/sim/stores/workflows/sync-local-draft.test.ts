@@ -4,15 +4,18 @@ import {
   workflowRegistryStoreMockFns,
 } from '@sim/testing/mocks/workflow-registry-store.mock'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { WorkflowSnapshotPublicationError } from '@/stores/workflow-diff/utils'
 import { useWorkflowStore } from '@/stores/workflows/workflow/store'
 
 const {
   mockFetchQuery,
+  MockPublicationError,
   mockApplyWorkflowStateToStores,
   mockHasPendingOperations,
   mockGetOperationQueueState,
   mockGetWorkflowDiffState,
 } = vi.hoisted(() => ({
+  MockPublicationError: class extends Error {},
   mockFetchQuery: vi.fn(),
   mockApplyWorkflowStateToStores: vi.fn(),
   mockHasPendingOperations: vi.fn(() => false),
@@ -44,7 +47,9 @@ vi.mock('@/hooks/queries/utils/workflow-keys', () => ({
   },
 }))
 
+// This suite isolates transport decisions; utils.test.ts exercises the real error/helper/stores.
 vi.mock('@/stores/workflow-diff/utils', () => ({
+  WorkflowSnapshotPublicationError: MockPublicationError,
   applyWorkflowStateToStores: mockApplyWorkflowStateToStores,
 }))
 
@@ -467,6 +472,54 @@ describe('usable revision and guarded raw snapshots', () => {
         },
       }
     )
+  })
+  it('returns false on a typed HTTP publication refusal without a second raw application', async () => {
+    mockFetchQuery.mockResolvedValueOnce({
+      id: 'workflow-a',
+      draftRevision: 7,
+      state: graph,
+      variables: {},
+    })
+    mockApplyWorkflowStateToStores.mockImplementationOnce(() => {
+      throw new WorkflowSnapshotPublicationError()
+    })
+    await expect(
+      syncSocketDraftFromSnapshot({
+        id: 'workflow-a',
+        draftRevision: 7,
+        state: graph,
+        variables: {},
+      })
+    ).resolves.toBe(false)
+    expect(mockApplyWorkflowStateToStores).toHaveBeenCalledTimes(1)
+  })
+  it('returns false only for the typed raw publication refusal', () => {
+    mockApplyWorkflowStateToStores.mockImplementationOnce(() => {
+      throw new WorkflowSnapshotPublicationError()
+    })
+    expect(applyRawDraftSnapshot('workflow-a', graph, 7, captureDraftVersions('workflow-a'))).toBe(
+      false
+    )
+    const other = new Error('Unrelated setter failure')
+    mockApplyWorkflowStateToStores.mockImplementationOnce(() => {
+      throw other
+    })
+    expect(() =>
+      applyRawDraftSnapshot('workflow-a', graph, 7, captureDraftVersions('workflow-a'))
+    ).toThrow(other)
+  })
+  it('does not mask unrelated HTTP publication failures', async () => {
+    mockFetchQuery.mockResolvedValueOnce({
+      id: 'workflow-a',
+      draftRevision: 7,
+      state: graph,
+      variables: {},
+    })
+    const other = new Error('Unrelated setter failure')
+    mockApplyWorkflowStateToStores.mockImplementationOnce(() => {
+      throw other
+    })
+    await expect(syncLocalDraftFromServer('workflow-a')).rejects.toBe(other)
   })
   it('does not attest raw graph-only envelopes whose variables are missing', async () => {
     mockFetchQuery.mockRejectedValueOnce(new Error('Controlled HTTP failure'))

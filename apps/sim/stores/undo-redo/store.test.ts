@@ -1,3 +1,4 @@
+// Modified by Memlia: qualify conditional history tickets without weakening native delta history.
 /**
  * Tests for the undo/redo store.
  *
@@ -22,6 +23,7 @@ import {
 import { beforeEach, describe, expect, it } from 'vitest'
 import { runWithUndoRedoRecordingSuspended, useUndoRedoStore } from '@/stores/undo-redo/store'
 import type { UpdateParentOperation } from '@/stores/undo-redo/types'
+import { resetRegisteredUserData } from '@/stores/user-data-reset-registry'
 
 describe('useUndoRedoStore', () => {
   const workflowId = 'wf-test'
@@ -351,4 +353,53 @@ describe('useUndoRedoStore', () => {
       expect(getStackSizes(workflowId, userId).undoSize).toBe(1)
     })
   })
+})
+
+describe('conditional history tickets', () => {
+  const workflowId = 'ticket-workflow'
+  const userId = 'ticket-user'
+  beforeEach(() => {
+    useUndoRedoStore.setState({ stacks: {}, capacity: 100 })
+  })
+  it('observes without popping and commits only once', () => {
+    const store = useUndoRedoStore.getState()
+    store.push(workflowId, userId, createAddBlockEntry('one', { workflowId, userId }))
+    const before = useUndoRedoStore.getState().stacks
+    const ticket = store.captureHistoryTicket(workflowId, userId, 'undo')!
+    expect(useUndoRedoStore.getState().stacks).toBe(before)
+    expect(store.isHistoryTicketCurrent(ticket)).toBe(true)
+    expect(store.commitHistoryTicket(ticket)).toBe(true)
+    expect(store.commitHistoryTicket(ticket)).toBe(false)
+    expect(store.getStackSizes(workflowId, userId)).toEqual({ undoSize: 0, redoSize: 1 })
+  })
+  it.each(['push', 'clear', 'clearRedo', 'capacity', 'mutate'] as const)(
+    'refuses a stale ticket after %s without restoring an old stack',
+    (change) => {
+      const store = useUndoRedoStore.getState()
+      const entry = createAddBlockEntry('one', { workflowId, userId })
+      store.push(workflowId, userId, entry)
+      const ticket = store.captureHistoryTicket(workflowId, userId, 'undo')!
+      if (change === 'push')
+        store.push(workflowId, userId, createAddBlockEntry('two', { workflowId, userId }))
+      if (change === 'clear') store.clear(workflowId, userId)
+      if (change === 'clearRedo') store.clearRedo(workflowId, userId)
+      if (change === 'capacity') store.setCapacity(50)
+      if (change === 'mutate') entry.createdAt += 1
+      const latest = useUndoRedoStore.getState().stacks
+      expect(store.isHistoryTicketCurrent(ticket)).toBe(false)
+      expect(store.commitHistoryTicket(ticket)).toBe(false)
+      expect(useUndoRedoStore.getState().stacks).toBe(latest)
+    }
+  )
+})
+
+it('rejects copied tickets and revokes all issued tickets on native identity reset', () => {
+  useUndoRedoStore.setState({ stacks: {}, capacity: 100 })
+  const store = useUndoRedoStore.getState()
+  store.push('a', 'u', createAddBlockEntry('one', { workflowId: 'a', userId: 'u' }))
+  const ticket = store.captureHistoryTicket('a', 'u', 'undo')!
+  expect(store.commitHistoryTicket({ ...ticket })).toBe(false)
+  resetRegisteredUserData()
+  expect(store.commitHistoryTicket(ticket)).toBe(false)
+  expect(useUndoRedoStore.getState().stacks).toEqual({})
 })
