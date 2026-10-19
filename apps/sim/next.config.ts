@@ -12,6 +12,7 @@ import {
 } from './lib/core/security/csp'
 import { LANDING_ROUTES } from './lib/landing/routes'
 import { LIBRARY_MERGED_SLUGS, LIBRARY_MOVED_BLOG_SLUGS } from './lib/library/retired-slugs'
+import { getMemliaWebpackBuildProfile } from './next-webpack-memory-profile'
 
 /**
  * `Accept` header patterns for Markdown negotiation. `text/markdown` must be one of the listed
@@ -27,8 +28,10 @@ const MARKDOWN_REQUEST = {
 }
 
 const isMemliaLocalBuild = process.env.MEMLIA_LOCAL_BUILD === '1'
+const memliaWebpackBuildProfile = getMemliaWebpackBuildProfile(isMemliaLocalBuild)
 
 const nextConfig: NextConfig = {
+  ...memliaWebpackBuildProfile,
   devIndicators: false,
   poweredByHeader: false,
   // Safe here since this repo's source is already fully public on GitHub -
@@ -172,6 +175,7 @@ const nextConfig: NextConfig = {
     ],
   },
   experimental: {
+    ...memliaWebpackBuildProfile.experimental,
     ...(isMemliaLocalBuild
       ? { serverSourceMaps: false, cpus: 2, webpackMemoryOptimizations: true }
       : {}),
