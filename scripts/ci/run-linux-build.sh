@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright 2026 Memlia. All rights reserved.
-# Product validation or full build, dedicated Docker cgroups, quantitative output only.
+# Product validation or full build, dedicated Docker cgroups, bounded metrics and TS locations.
 set -euo pipefail
 umask 077
 scope=build
@@ -104,6 +104,18 @@ assert disk.free>=8*1024**3
 assert not (root/'node_modules').exists() and not (root/'apps/sim/.next').exists() and not (root/'.turbo').exists()
 PY
 # No cache restore or global cache/SDK deletion on the runner.
+# Private inventory from the public commit, never printed or uploaded.
+python3 - "$root" "$private/tracked-sources.json" <<'PY'
+import importlib.util,sys
+from pathlib import Path
+module=Path(sys.argv[1])/'scripts/ci/linux-build-metrics.py'
+spec=importlib.util.spec_from_file_location('metrics',module)
+metrics=importlib.util.module_from_spec(spec); spec.loader.exec_module(metrics)
+try:
+    metrics.write_tracked_sources(Path(sys.argv[1]),Path(sys.argv[2]))
+except Exception:
+    raise SystemExit('Tracked source inventory unavailable')
+PY
 current_stage=pull_node
 docker pull --platform linux/amd64 "$image" > "$private/pull-node.log" 2>&1
 current_stage=pull_database
@@ -168,9 +180,10 @@ PY
     --mount "type=bind,source=$root,target=/work" \
     --mount "type=bind,source=$private,target=/scratch" \
     --mount "type=bind,source=$private/tools,target=/tools,readonly" \
+    --mount "type=bind,source=$private/tracked-sources.json,target=/scratch/tracked-sources.json,readonly" \
     --mount "type=bind,source=$metrics,target=/metrics" --workdir "$cwd" \
     "$image" python3 /work/scripts/ci/linux-build-metrics.py --phase "$label" \
-    --report "/metrics/$label.json" -- "$@" > "$private/$label.log" 2>&1 || code=$?
+    --report "/metrics/$label.json" --tracked-sources /scratch/tracked-sources.json --source-root /work -- "$@" > "$private/$label.log" 2>&1 || code=$?
   docker inspect --format '{{json .State}}' "$name" > "$private/state.json"
   python3 - "$metrics/$label-container.json" "$private/state.json" "$code" "$metrics/$label.json" <<'PY'
 import json,sys
@@ -207,7 +220,7 @@ run_product_phases() {
 phase inventory /work/apps/sim bun run ../../packages/sim-cli/scripts/print-command-inventory.ts
 phase typegen /work/apps/sim node ../../node_modules/next/dist/bin/next typegen --webpack
 # The installed TypeScript launcher selects the Linux native compiler via execve.
-phase typecheck /work/apps/sim node ../../node_modules/typescript/bin/tsc --noEmit --singleThreaded
+phase typecheck /work/apps/sim node ../../node_modules/typescript/bin/tsc --noEmit --singleThreaded --pretty false
 phase cli /work/apps/sim bun run build:cli-runtime
 phase sandbox /work/apps/sim bun run build:sandbox-bundles
 if [[ "$scope" == validation ]]; then

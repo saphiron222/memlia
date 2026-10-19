@@ -57,7 +57,7 @@ la fin normale du mode sélectionné. Une phase manquante, un signal, une erreur
 commande, un nettoyage incomplet ou un échec d'écriture/émission du reçu rend le
 processus non nul ; aucun `continue-on-error` ne transforme cela en réussite.
 
-Les reçus de chaque phase restent quantitatifs : temps, mémoire cgroup (dont cache
+Les reçus de chaque phase conservent les mesures : temps, mémoire cgroup (dont cache
 comptabilisé par le noyau), RSS échantillonnée, descendants, swap et événements OOM.
 Une réussite d'une phase n'est pas une réussite de la construction entière. Aucun
 log brut, source, source map, cache, dépendance, bundle ou image n'est uploadé.
@@ -105,3 +105,35 @@ indiquées. Une réussite de ces tests ne qualifie pas l'installation Linux ni l
 du futur snapshot : seule l'Action réelle sur ce snapshot peut le faire.
 
 Copyright 2026 Memlia. Tous droits réservés.
+
+## Positions TypeScript publiables
+
+Seule la phase `typecheck` peut joindre `typeScriptDiagnostics.locations` : au plus
+100 tuples uniques `{path, line, column, code}`. Aucun message, extrait de source,
+valeur ou commande n’est repris. `--pretty false` stabilise uniquement le format
+du diagnostic ; le code de sortie et les critères de réussite restent inchangés.
+
+Avant les phases, une liste privée est construite depuis les blobs réguliers TS,
+TSX, MTS et CTS du commit Git courant. Ni fichiers non suivis, ni liens symboliques,
+ni noms ambigus ne sont admis. Le manifeste, plafonné à 2 Mio et 50 000 chemins,
+est monté en lecture seule ; il n’est ni imprimé ni uploadé. Les chemins publics
+émis sont relatifs à la racine du dépôt, ASCII, sans segment vide, `.` ou `..`,
+et limités à 512 caractères. La correspondance `../../packages/...` depuis
+`apps/sim` est une clé exacte précalculée depuis cette liste ; aucune normalisation
+d’un chemin fourni par le compilateur n’autorise une nouvelle cible.
+
+L’extraction ne lit que les derniers 64 Kio de sortie. Si cette fenêtre commence
+en cours de fichier, sa première ligne est ignorée par précaution. Les lignes
+incomplètes, de plus de 4 096 octets ou contenant des contrôles/ANSI sont rejetées.
+Lignes et colonnes doivent être positives et au plus 1 000 000 ; le code TS compte
+3 à 5 chiffres. Une liste absente/invalide ne publie aucun chemin. Le champ
+`truncated` signale une fenêtre réduite ou un plafond atteint ; cette liste n’est
+pas un inventaire exhaustif des erreurs. Les diagnostics sans fichier versionné
+(restes générés `.next`, dépendances, diagnostics globaux) ne produisent pas de
+position. Les codes TS agrégés existants restent disponibles séparément.
+
+Les tests portables utilisent de vrais dépôts Git jetables et un processus enfant
+réel ; la lecture cgroup de ce test est une doublure explicitement déclarée. Ils
+ne qualifient pas un nouveau typecheck Linux complet ni un build Next. Les journaux
+bruts restent éphémères et sont détruits ; seules ces positions bornées sont ajoutées
+aux reçus publics.

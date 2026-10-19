@@ -7,6 +7,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
+from types import SimpleNamespace
 
 HERE = Path(__file__).parent
 spec = importlib.util.spec_from_file_location('metrics', HERE / 'linux-build-metrics.py')
@@ -293,6 +295,110 @@ class MetricsTests(unittest.TestCase):
                 if passed:
                     receipt=json.loads((root/'metrics/toolchain.json').read_text())
                     self.assertEqual(receipt['expectedNext'],pin)
+
+
+class TypeScriptDiagnosticTests(unittest.TestCase):
+    def test_exact_tracked_paths_only_and_no_message_or_source(self):
+        with tempfile.TemporaryFile() as output:
+            output.write(b'lib/x.ts(2,3): error TS2322: PRIVATE_CANARY_VALUE\n'
+                         b'../../packages/a/src/x.ts(4,5): error TS2339: PRIVATE_CANARY_VALUE\n'
+                         b'lib/x.ts(2,3): error TS2322: duplicate\n'
+                         b'lib/untracked.ts(1,1): error TS2322: PRIVATE_CANARY_VALUE\n'
+                         b'../../../private.ts(1,1): error TS2322: PRIVATE_CANARY_VALUE\n'
+                         b'./lib/x.ts(1,1): error TS2322: ambiguous\n'
+                         b'/work/apps/sim/lib/x.ts(1,1): error TS2322: absolute\n'
+                         b'lib/../lib/x.ts(1,1): error TS2322: normalization\n'
+                         b'\x1b[31mlib/x.ts(1,1): error TS2322: ansi\n'
+                         b'lib/x.ts(1,1): error TS2322: ansi\x1b[0m\n'
+                         b'lib/x.ts(1,1): error TS2322: csi\x9b0m\n'
+                         b'lib/x.ts(1,1): error TS2322: tab\tvalue\n'
+                         b'lib/x.ts(999999999,1): error TS2322: huge\n'
+                         b'lib/x.ts(0,1): error TS2322: zero\n'
+                         b'lib/x.ts(1,1): error TS99999999: invalid\n')
+            result=metrics.typescript_locations(output,['apps/sim/lib/x.ts','packages/a/src/x.ts'],'apps/sim')
+            self.assertEqual(result['locations'],[
+                {'path':'apps/sim/lib/x.ts','line':2,'column':3,'code':2322},
+                {'path':'packages/a/src/x.ts','line':4,'column':5,'code':2339}])
+            self.assertNotIn('PRIVATE_CANARY',json.dumps(result))
+            self.assertTrue(all(set(item)=={'path','line','column','code'} for item in result['locations']))
+
+    def test_window_partial_line_limits_and_large_coordinates(self):
+        with tempfile.TemporaryFile() as output:
+            # Place an otherwise valid header exactly at the tail boundary, but inside a line.
+            suffix=b'x.ts(1,1): error TS2322: hidden\n'
+            rest=b'\n'*(65536-len(suffix))
+            output.write(b'PRIVATE_CANARY'+suffix+rest)
+            result=metrics.typescript_locations(output,['x.ts'],'')
+            self.assertEqual(result['locations'],[])
+            self.assertTrue(result['truncated'])
+        with tempfile.TemporaryFile() as output:
+            for line in range(1,103): output.write(f'x.ts({line},1): error TS2322: secret\n'.encode())
+            result=metrics.typescript_locations(output,['x.ts'],'')
+            self.assertEqual(len(result['locations']),100)
+            self.assertTrue(result['truncated'])
+        with tempfile.TemporaryFile() as output:
+            output.write(b'x.ts(1000001,1): error TS2322: huge\n'+b'x.ts(1,1): error TS2322: '+b'x'*4096+b'\n')
+            self.assertEqual(metrics.typescript_locations(output,['x.ts'],'')['locations'],[])
+
+    def test_git_allowlist_excludes_untracked_symlink_and_unsafe_names(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary); repo=root/'repo'; repo.mkdir()
+            def git(*args):
+                return subprocess.run(['git','-C',str(repo),*args],check=True,capture_output=True)
+            git('init','-q')
+            for name in ['safe.ts','with space.ts','unsafe\nname.ts','not-source.txt']:
+                (repo/name).write_text('fictitious')
+            (repo/'link.ts').symlink_to('safe.ts')
+            git('add','--all');git('-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','fixture')
+            (repo/'untracked.ts').write_text('untracked')
+            manifest=root/'paths.json'; metrics.write_tracked_sources(repo,manifest)
+            self.assertEqual(metrics.load_tracked_sources(manifest),['safe.ts'])
+            self.assertEqual(metrics.load_tracked_sources(root/'absent.json'),[])
+            for value in [['../private.ts'],['/absolute.ts'],['safe.ts','safe.ts'],['x'*513+'.ts'],['safe.ts',4],{'message':'PRIVATE_CANARY'}]:
+                manifest.write_text(json.dumps(value))
+                self.assertEqual(metrics.load_tracked_sources(manifest),[])
+            manifest.write_bytes(b'x'*(2*1024*1024+1))
+            self.assertEqual(metrics.load_tracked_sources(manifest),[])
+
+    def test_real_child_receipt_keeps_failure_and_drops_message(self):
+        # Real subprocess/output/receipt; only Linux cgroup observations are doubles.
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary); manifest=root/'paths.json'; manifest.write_text('["x.ts"]')
+            args=SimpleNamespace(cgroup=str(root),report=str(root/'receipt.json'),phase='typecheck',
+                                 tracked_sources=str(manifest),source_root=str(root),timeout=5,
+                                 command=[sys.executable,'-c',
+                                          'print("x.ts(2,3): error TS2322: PRIVATE_CANARY_VALUE"); raise SystemExit(2)'])
+            reading={'pids':[os.getpid()],'limitBytes':1024,'swapBytes':0,'events':{}}
+            previous=Path.cwd()
+            try:
+                os.chdir(root)
+                with patch.object(metrics,'cgroup_read',return_value=reading), \
+                     patch.object(metrics,'host_memory',return_value={'availableBytes':1024,'swapUsedBytes':0}):
+                    self.assertEqual(metrics.run(args),1)
+            finally:
+                os.chdir(previous)
+            encoded=(root/'receipt.json').read_text(); receipt=json.loads(encoded)
+            self.assertEqual(receipt['status'],'failed')
+            self.assertEqual(receipt['childExitCode'],2)
+            self.assertEqual(receipt['typeScriptDiagnostics']['locations'],[
+                {'path':'x.ts','line':2,'column':3,'code':2322}])
+            self.assertNotIn('PRIVATE_CANARY',encoded)
+            self.assertEqual(receipt['typeScriptErrorCodes'],[2322])
+
+    def test_non_typecheck_phase_cannot_emit_locations(self):
+        # Integration boundary uses real output and manifest; cgroup observation is tested separately.
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary); manifest=root/'paths.json'; manifest.write_text('["x.ts"]')
+            for phase in ['test','install','next','typecheck']:
+                with tempfile.TemporaryFile() as output:
+                    output.write(b'x.ts(1,1): error TS2322: PRIVATE_CANARY\n')
+                    result=metrics.phase_typescript_locations(phase,output,manifest,root,root)
+                    self.assertEqual(len(result['locations']),1 if phase=='typecheck' else 0)
+                    self.assertNotIn('PRIVATE_CANARY',json.dumps(result))
+                    self.assertEqual(metrics.phase_typescript_locations(
+                        phase,output,root/'absent.json',root,root)['locations'],[])
+                    self.assertEqual(metrics.phase_typescript_locations(
+                        phase,output,manifest,root,root.parent)['locations'],[])
 
 if __name__ == '__main__':
     unittest.main()

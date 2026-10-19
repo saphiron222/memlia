@@ -2,7 +2,7 @@
 # Copyright 2026 Memlia. All rights reserved.
 """Measure one build phase inside its own non-privileged cgroup-v2 container.
 
-Only numeric/status metadata is persisted. Command output stays in an ephemeral
+Only numeric/status metadata and allowlisted TS locations are persisted. Command output stays in an ephemeral
 file, never stdout/artifacts. PID 1 remains alive to read memory.peak after the
 child exits. This is not the macOS build guard and never controls other groups.
 """
@@ -97,6 +97,111 @@ def terminate_owned(root, child=None):
     return list(identities(cgroup_read(root)['pids'])), errors
 
 
+# Only names from the public commit may cross the raw-output boundary.
+SOURCE_PATH = re.compile(r'[A-Za-z0-9_@+.()/\[\]-]+\.(?:ts|tsx|mts|cts)\Z')
+
+
+def safe_source_path(value):
+    return (isinstance(value, str) and len(value) <= 512 and value.isascii()
+            and SOURCE_PATH.fullmatch(value) is not None
+            and all(part not in ('', '.', '..') for part in value.split('/')))
+
+
+def write_tracked_sources(root, destination):
+    result = subprocess.run(['git', '-C', str(root), 'ls-tree', '-rz', '--full-tree', 'HEAD'],
+                            capture_output=True, timeout=10)
+    if result.returncode or len(result.stdout) > 8 * 1024 * 1024:
+        raise ValueError('Tracked source inventory unavailable')
+    paths = []
+    for record in result.stdout.split(b'\0'):
+        if not record:
+            continue
+        header, raw_path = record.split(b'\t', 1)
+        mode, kind, _ = header.split(b' ')
+        if mode not in (b'100644', b'100755') or kind != b'blob':
+            continue
+        try:
+            path = raw_path.decode('ascii')
+        except UnicodeDecodeError:
+            continue
+        if safe_source_path(path):
+            paths.append(path)
+    encoded = json.dumps(sorted(paths))
+    if len(paths) > 50000 or len(encoded) > 2 * 1024 * 1024:
+        raise ValueError('Tracked source inventory exceeds bound')
+    Path(destination).write_text(encoded)
+
+
+def load_tracked_sources(manifest):
+    try:
+        with Path(manifest).open('rb') as source:
+            raw = source.read(2 * 1024 * 1024 + 1)
+        if len(raw) > 2 * 1024 * 1024:
+            return []
+        paths = json.loads(raw)
+        if (not isinstance(paths, list) or len(paths) > 50000
+                or not all(safe_source_path(path) for path in paths)
+                or len(set(paths)) != len(paths)):
+            return []
+        return paths
+    except (OSError, TypeError, ValueError):
+        return []
+
+
+def typescript_locations(output, paths, relative_cwd):
+    # Precalculate exact spellings; never normalize a compiler-provided path.
+    allowed = {os.path.relpath(path, relative_cwd or '.'): path for path in paths}
+    output.seek(0, os.SEEK_END)
+    end = output.tell()
+    offset = max(0, end - 65536)
+    output.seek(offset)
+    data = output.read(65536)
+    if offset:
+        # The first bytes may begin in the middle of a path or message.
+        data = data.partition(b'\n')[2]
+    result = {'locations': [], 'truncated': bool(offset)}
+    seen = set()
+    header = re.compile(rb'^([A-Za-z0-9_@+.()/\[\]-]{1,512})\(([1-9][0-9]{0,6}),([1-9][0-9]{0,6})\): error TS([1-9][0-9]{2,4}):')
+    for raw in data.splitlines(keepends=True):
+        if not raw.endswith(b'\n') or len(raw) > 4096:
+            result['truncated'] = True
+            continue
+        line = raw[:-1]
+        if line.endswith(b'\r'):
+            line = line[:-1]
+        if any(byte < 32 or 127 <= byte <= 159 for byte in line):
+            continue
+        match = header.match(line)
+        if not match:
+            continue
+        spelling, row, column, code = match.groups()
+        path = allowed.get(spelling.decode('ascii'))
+        row, column, code = int(row), int(column), int(code)
+        if path is None or row > 1000000 or column > 1000000:
+            continue
+        key = (path, row, column, code)
+        if key in seen:
+            continue
+        if len(seen) == 100:
+            result['truncated'] = True
+            break
+        seen.add(key)
+        result['locations'].append({'path': path, 'line': row, 'column': column, 'code': code})
+    return result
+
+
+def phase_typescript_locations(phase, output, manifest, root, cwd):
+    empty = {'locations': [], 'truncated': False}
+    if phase != 'typecheck':
+        return empty
+    try:
+        relative_cwd = Path(cwd).resolve().relative_to(Path(root).resolve()).as_posix()
+        paths = load_tracked_sources(manifest)
+        return typescript_locations(output, paths, relative_cwd) if paths else empty
+    except (OSError, TypeError, ValueError):
+        return empty
+
+
 def run(args):
     root, report = Path(args.cgroup), Path(args.report)
     receipt = {'phase': args.phase, 'status': 'failed', 'normalCompletion': False,
@@ -138,6 +243,9 @@ def run(args):
                     receipt['errors'].append('interrupted' if interrupted else 'timeout')
                     break
                 time.sleep(0.25)
+            receipt['typeScriptDiagnostics'] = phase_typescript_locations(
+                args.phase, output, getattr(args, 'tracked_sources', None),
+                getattr(args, 'source_root', '/work'), Path.cwd())
             output.seek(max(0, output.tell() - 65536))
             tail = output.read().lower()
             receipt['v8HeapOOM'] = b'heap out of memory' in tail
@@ -183,6 +291,8 @@ if __name__ == '__main__':
     parser.add_argument('--report', required=True)
     parser.add_argument('--phase', required=True, choices=['install','inventory','typegen','typecheck','cli','sandbox','next','standalone','test'])
     parser.add_argument('--timeout', type=float, default=1800)
+    parser.add_argument('--tracked-sources')
+    parser.add_argument('--source-root', default='/work')
     parser.add_argument('command', nargs=argparse.REMAINDER)
     arguments = parser.parse_args()
     if arguments.command[:1] == ['--']:
