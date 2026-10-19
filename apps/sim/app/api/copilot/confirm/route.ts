@@ -1,3 +1,4 @@
+// Modified by Memlia: server-owned proposals cannot be settled by client reports.
 import type { Span } from '@opentelemetry/api'
 import { createLogger } from '@sim/logger'
 import { getErrorMessage, toError } from '@sim/utils/errors'
@@ -6,6 +7,7 @@ import { type NextRequest, NextResponse } from 'next/server'
 import { copilotConfirmContract } from '@/lib/api/contracts/copilot'
 import { parseRequest, validationErrorResponse } from '@/lib/api/server'
 import { withRouteHandler } from '@/lib/core/utils/with-route-handler'
+import { WORKFLOW_PROPOSAL_TOOL } from '@/lib/memlia/chat/workflow-proposals.server'
 import {
   ASYNC_TOOL_CONFIRMATION_STATUS,
   ASYNC_TOOL_STATUS,
@@ -239,6 +241,11 @@ export const POST = withRouteHandler((req: NextRequest) => {
         if (run.userId !== authenticatedUserId) {
           span.setAttribute(TraceAttr.CopilotConfirmOutcome, CopilotConfirmOutcome.Forbidden)
           return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+        }
+
+        if (existing.toolName === WORKFLOW_PROPOSAL_TOOL) {
+          span.setAttribute(TraceAttr.CopilotConfirmOutcome, CopilotConfirmOutcome.ToolCallNotFound)
+          return createNotFoundResponse('Tool call not found')
         }
 
         if (

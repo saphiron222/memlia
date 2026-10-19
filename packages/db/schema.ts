@@ -1,4 +1,4 @@
-// Modified by Memlia: add the common workflow draft revision.
+// Modified by Memlia: add the common workflow draft revision and bounded Chat cost reservations.
 import { WHITESPACE_CHARACTER_CLASS } from '@sim/utils/string'
 import { type SQL, sql } from 'drizzle-orm'
 import {
@@ -6004,6 +6004,88 @@ export const usageLog = pgTable(
       table.createdAt
     ),
     executionIdIdx: index('usage_log_execution_id_idx').on(table.executionId),
+  })
+)
+
+/** Memlia USD budget policy; administered explicitly, never created by a model request. */
+export const memliaChatCostWindow = pgTable(
+  'memlia_chat_cost_window',
+  {
+    id: text('id').primaryKey(),
+    version: integer('version').notNull(),
+    currency: text('currency').notNull(),
+    startsAt: timestamp('starts_at', { withTimezone: true }).notNull(),
+    endsAt: timestamp('ends_at', { withTimezone: true }).notNull(),
+    limitUsd: decimal('limit_usd', { precision: 21, scale: 12 }).notNull(),
+    // Optional immutable administrative estimate provenance; legacy windows remain null.
+    pricingProfile: jsonb('pricing_profile'),
+    state: text('state').$type<'open' | 'blocked'>().notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    policyBounds: check(
+      'memlia_chat_cost_window_bounds',
+      sql`
+      length(${table.id}) BETWEEN 1 AND 128 AND ${table.version} > 0
+      AND ${table.currency} = 'USD' AND ${table.startsAt} < ${table.endsAt}
+      AND ${table.limitUsd} >= 0 AND ${table.limitUsd} <= 999999999
+      AND ${table.state} IN ('open', 'blocked')`
+    ),
+  })
+)
+
+/** Commitments survive deletion of actors/workspaces and detect missing settled ledger rows. */
+export const memliaChatCostReservation = pgTable(
+  'memlia_chat_cost_reservation',
+  {
+    attemptId: text('attempt_id').primaryKey(),
+    windowId: text('window_id')
+      .notNull()
+      .references(() => memliaChatCostWindow.id, { onDelete: 'restrict' }),
+    windowVersion: integer('window_version').notNull(),
+    actorUserId: text('actor_user_id').notNull(),
+    workspaceId: text('workspace_id').notNull(),
+    billedAccountUserId: text('billed_account_user_id').notNull(),
+    organizationId: text('organization_id'),
+    billingEntityType: billingEntityTypeEnum('billing_entity_type').notNull(),
+    billingEntityId: text('billing_entity_id').notNull(),
+    billingPeriodStart: timestamp('billing_period_start').notNull(),
+    billingPeriodEnd: timestamp('billing_period_end').notNull(),
+    attribution: jsonb('attribution').notNull(),
+    maximumCostUsd: decimal('maximum_cost_usd', { precision: 21, scale: 12 }).notNull(),
+    // Captured from the locked window, never supplied as caller accounting data.
+    pricingProfile: jsonb('pricing_profile'),
+    state: text('state').$type<'reserved' | 'unknown' | 'settled'>().notNull(),
+    eventKey: text('event_key').notNull().unique(),
+    // No FK: a native user cascade must be detected rather than erase this receipt.
+    ledgerId: text('ledger_id'),
+    settledCostUsd: decimal('settled_cost_usd', { precision: 21, scale: 12 }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    settledAt: timestamp('settled_at', { withTimezone: true }),
+  },
+  (table) => ({
+    windowState: index('memlia_chat_cost_reservation_window_state_idx').on(
+      table.windowId,
+      table.state
+    ),
+    bounds: check(
+      'memlia_chat_cost_reservation_bounds',
+      sql`
+      length(${table.attemptId}) BETWEEN 1 AND 128 AND ${table.windowVersion} > 0
+      AND ${table.maximumCostUsd} > 0 AND ${table.maximumCostUsd} <= 999999999
+      AND ${table.billingPeriodStart} < ${table.billingPeriodEnd}
+      AND ${table.state} IN ('reserved', 'unknown', 'settled')`
+    ),
+    settlement: check(
+      'memlia_chat_cost_reservation_settlement',
+      sql`
+      (${table.state} IN ('reserved', 'unknown') AND ${table.ledgerId} IS NULL
+        AND ${table.settledCostUsd} IS NULL AND ${table.settledAt} IS NULL)
+      OR (${table.state} = 'settled' AND ${table.ledgerId} IS NOT NULL
+        AND ${table.settledCostUsd} IS NOT NULL
+        AND ${table.settledCostUsd} > 0 AND ${table.settledCostUsd} <= 999999999
+        AND ${table.settledAt} IS NOT NULL)`
+    ),
   })
 )
 

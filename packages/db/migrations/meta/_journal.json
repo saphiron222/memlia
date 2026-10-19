@@ -3054,6 +3054,20 @@
       "when": 1792394919379,
       "tag": "0436_workflow_draft_revision",
       "breakpoints": true
+    },
+    {
+      "idx": 437,
+      "version": "7",
+      "when": 1792422088472,
+      "tag": "0437_memlia_chat_cost_reservation",
+      "breakpoints": true
+    },
+    {
+      "idx": 438,
+      "version": "7",
+      "when": 1792430555886,
+      "tag": "0438_memlia_chat_pricing_profile",
+      "breakpoints": true
     }
   ]
 }

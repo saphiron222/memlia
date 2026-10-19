@@ -7,7 +7,8 @@ name = "memlia-excel"
 version = "0.1.0"
 description = "Noyau tabulaire fermé Memlia, sans orchestration ni mutation utilisateur"
 requires-python = ">=3.12"
-dependencies = ["openpyxl==3.1.5", "polars==2.0.0", "defusedxml==0.7.1"]
+license = "LicenseRef-Memlia-All-Rights-Reserved"
+dependencies = ["openpyxl==3.1.5", "polars==2.0.0", "defusedxml==0.7.1", "memlia-contracts==0.1.0"]
 
 [project.optional-dependencies]
 test = ["pytest==8.3.5", "pytest-cov==6.0.0"]

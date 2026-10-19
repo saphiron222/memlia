@@ -7,7 +7,7 @@ name = "memlia-windows-agent"
 version = "0.0.0"
 description = "Primitives locales de session de Memlia Agent"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = ["httpx==0.28.1", "cryptography==50.0.2"]
 license = "LicenseRef-Memlia-All-Rights-Reserved"
 license-files = ["LICENSE"]
 

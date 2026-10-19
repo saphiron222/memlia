@@ -1,3 +1,4 @@
+// Modified by Memlia: verify awaited optional server controls and native compatibility.
 import { createExecutionContext } from '@sim/testing'
 import { toolsMock, toolsMockFns } from '@sim/testing/mocks/tools.mock'
 import { describe, expect, it, vi } from 'vitest'
@@ -9,6 +10,10 @@ import { AGENT_MEMORY_RETRIEVAL_TOOL_ID } from '@/lib/memory/retrieval-tool-type
 import { AgentTurnStateMachine } from '@/lib/memory/turn-state'
 import { ResolvedSecretTraceRegistry } from '@/executor/utils/resolved-secret-trace-registry'
 import {
+  awaitProviderModelCall,
+  beforeProviderModelCall,
+  beginProviderModelAttempt,
+  completeProviderModelAttempt,
   type ExecuteProviderToolOptions,
   executeProviderTool as executeProviderToolWithInput,
   runWithProviderRuntimeContext,
@@ -21,6 +26,185 @@ import { prepareToolExecution } from '@/providers/utils'
 
 const mockExecuteTool = toolsMockFns.mockExecuteTool
 mockExecuteTool.mockImplementation(async () => ({ success: true, output: {} }))
+
+describe('optional asynchronous server model guard', () => {
+  it('preserves synchronous options and counts exactly once without an async guard', async () => {
+    const signal = new AbortController().signal
+    expect(beforeProviderModelCall()).toBeUndefined()
+    expect(await awaitProviderModelCall()).toBeUndefined()
+    expect(await awaitProviderModelCall(signal)).toEqual({ signal })
+    const count = vi.fn()
+    const options = await runWithProviderRuntimeContext(
+      {
+        controlledRun: {
+          signal,
+          beforeModelCall: count,
+          executeTool: async () => {
+            throw new Error('unused')
+          },
+        },
+      },
+      () => awaitProviderModelCall()
+    )
+    expect(options).toEqual({ maxRetries: 0, signal })
+    expect(count).toHaveBeenCalledOnce()
+  })
+
+  it('does not invoke an asynchronous guard when the synchronous budget refuses', async () => {
+    const guard = vi.fn(async () => {})
+    const failure = new Error('count-refusal')
+    await expect(
+      runWithProviderRuntimeContext(
+        {
+          controlledRun: {
+            signal: new AbortController().signal,
+            beforeModelCall() {
+              throw failure
+            },
+            beforeModelTransport: guard,
+            executeTool: async () => {
+              throw new Error('unused')
+            },
+          },
+        },
+        () => awaitProviderModelCall()
+      )
+    ).rejects.toBe(failure)
+    expect(guard).not.toHaveBeenCalled()
+  })
+
+  it('aborts the pending wait even when the server guard ignores its signal', async () => {
+    const abort = new AbortController()
+    let entered!: () => void
+    const started = new Promise<void>((resolve) => {
+      entered = resolve
+    })
+    let rejectLater!: (error: unknown) => void
+    const gate = new Promise<void>((_resolve, reject) => {
+      rejectLater = reject
+    })
+    const pending = runWithProviderRuntimeContext(
+      {
+        controlledRun: {
+          signal: abort.signal,
+          beforeModelCall() {},
+          beforeModelTransport() {
+            entered()
+            return gate
+          },
+          executeTool: async () => {
+            throw new Error('unused')
+          },
+        },
+      },
+      () => awaitProviderModelCall()
+    )
+    void pending.catch(() => {})
+    await started
+    abort.abort()
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+    rejectLater(new Error('PRIVATE_LATE_REFUSAL'))
+    await Promise.resolve()
+  })
+
+  it('uses the captured signal even if the context is mutated while waiting', async () => {
+    const abort = new AbortController()
+    let release!: () => void
+    let entered!: () => void
+    const started = new Promise<void>((resolve) => {
+      entered = resolve
+    })
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const controls = {
+      signal: abort.signal,
+      beforeModelCall() {},
+      beforeModelTransport() {
+        entered()
+        return gate
+      },
+      executeTool: async () => {
+        throw new Error('unused')
+      },
+    }
+    const pending = runWithProviderRuntimeContext({ controlledRun: controls }, () =>
+      awaitProviderModelCall()
+    )
+    void pending.catch(() => {})
+    await started
+    controls.signal = new AbortController().signal
+    abort.abort()
+    release()
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+  })
+
+  it('normalizes a rejected server guard without network code, cause or private message', async () => {
+    const error = await runWithProviderRuntimeContext(
+      {
+        controlledRun: {
+          signal: new AbortController().signal,
+          beforeModelCall() {},
+          beforeModelTransport: async () => {
+            throw Object.assign(new Error('PRIVATE_GUARD_CAUSE'), {
+              code: 'ECONNRESET',
+              cause: new Error('PRIVATE_NESTED'),
+            })
+          },
+          executeTool: async () => {
+            throw new Error('unused')
+          },
+        },
+      },
+      () => awaitProviderModelCall()
+    ).catch((caught: unknown) => caught)
+    expect(error).toMatchObject({ message: 'Server model transport guard refused.' })
+    expect(error).not.toHaveProperty('cause')
+    expect(error).not.toHaveProperty('code', 'ECONNRESET')
+    expect(String(error)).not.toContain('PRIVATE_')
+  })
+
+  it('keeps independent ALS guards isolated across concurrent waits', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const firstSignal = new AbortController().signal
+    const secondSignal = new AbortController().signal
+    const first = runWithProviderRuntimeContext(
+      {
+        controlledRun: {
+          signal: firstSignal,
+          beforeModelCall() {},
+          beforeModelTransport: async () => {
+            await gate
+          },
+          executeTool: async () => {
+            throw new Error('unused')
+          },
+        },
+      },
+      () => awaitProviderModelCall()
+    )
+    const second = runWithProviderRuntimeContext(
+      {
+        controlledRun: {
+          signal: secondSignal,
+          beforeModelCall() {},
+          beforeModelTransport: async () => {},
+          executeTool: async () => {
+            throw new Error('unused')
+          },
+        },
+      },
+      () => awaitProviderModelCall()
+    )
+    expect((await second)?.signal).toBe(secondSignal)
+    release()
+    expect((await first)?.signal).toBe(firstSignal)
+    expect(beforeProviderModelCall()).toBeUndefined()
+  })
+})
 
 async function executeProviderTool(
   toolId: string,
@@ -983,5 +1167,113 @@ describe('provider runtime context', () => {
     expect(registry.getActiveMatches()).toEqual([
       { plaintext: 'secret-value', replacement: '{{TOKEN}}' },
     ])
+  })
+})
+
+describe('opaque native model attempt observation', () => {
+  it('rejects foreign and concurrent duplicate closure, even when the observer is pending', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const observe = vi.fn(async () => {
+      await gate
+    })
+    const { reference } = await runWithProviderRuntimeContext(
+      {
+        controlledRun: {
+          signal: new AbortController().signal,
+          beforeModelCall() {},
+          observeModelAttempt: observe,
+          executeTool: async () => {
+            throw new Error('unused')
+          },
+        },
+      },
+      () => beginProviderModelAttempt()
+    )
+    const outcome = { kind: 'unknown', reason: 'incomplete' } as const
+    const pending = completeProviderModelAttempt(reference, outcome)
+    expect(await completeProviderModelAttempt(Object.freeze(Object.create(null)), outcome)).toBe(
+      false
+    )
+    expect(await completeProviderModelAttempt(reference, outcome)).toBe(false)
+    expect(observe).toHaveBeenCalledOnce()
+    release()
+    expect(await pending).toBe(true)
+    expect(await completeProviderModelAttempt(reference, outcome)).toBe(false)
+  })
+  it('captures the observer before awaiting the guard and snapshots nested counters', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let entered!: () => void
+    const started = new Promise<void>((resolve) => {
+      entered = resolve
+    })
+    const observe = vi.fn(async () => {
+      await gate
+    })
+    const replacement = vi.fn(async () => {})
+    const controls = {
+      signal: new AbortController().signal,
+      beforeModelCall() {},
+      beforeModelTransport: async () => {
+        entered()
+        await gate
+      },
+      observeModelAttempt: observe,
+      executeTool: async () => {
+        throw new Error('unused')
+      },
+    }
+    const pending = runWithProviderRuntimeContext({ controlledRun: controls }, () =>
+      beginProviderModelAttempt()
+    )
+    await started
+    controls.observeModelAttempt = replacement
+    release()
+    const { reference } = await pending
+    const outcome = {
+      kind: 'usage' as const,
+      usage: { input: 3, output: 1, cacheWrites: [{ tokens: 2, inputRateMultiplier: 1.25 }] },
+      cost: { kind: 'unavailable' as const },
+    }
+    const completion = completeProviderModelAttempt(reference, outcome)
+    outcome.usage.input = 90
+    outcome.usage.cacheWrites[0].tokens = 999
+    await completion
+    expect(replacement).not.toHaveBeenCalled()
+    expect(observe.mock.calls[0][1].usage).toMatchObject({ input: 3, cacheWrites: [{ tokens: 2 }] })
+    expect(Object.isFrozen(observe.mock.calls[0][1].usage.cacheWrites)).toBe(true)
+  })
+  it('a callback failure closes once and loses private retryable causes', async () => {
+    const observe = vi.fn(async () => {
+      throw Object.assign(new Error('PRIVATE_OBSERVATION'), {
+        cause: 'PRIVATE_CAUSE',
+        code: 'ECONNRESET',
+      })
+    })
+    const { reference } = await runWithProviderRuntimeContext(
+      {
+        controlledRun: {
+          signal: new AbortController().signal,
+          beforeModelCall() {},
+          observeModelAttempt: observe,
+          executeTool: async () => {
+            throw new Error('unused')
+          },
+        },
+      },
+      () => beginProviderModelAttempt()
+    )
+    const outcome = { kind: 'unknown', reason: 'incomplete' } as const
+    const error = await completeProviderModelAttempt(reference, outcome).catch((e: unknown) => e)
+    expect(error).toMatchObject({ message: 'Server model observation failed.' })
+    expect(error).not.toHaveProperty('cause')
+    expect(error).not.toHaveProperty('code')
+    expect(await completeProviderModelAttempt(reference, outcome)).toBe(false)
+    expect(observe).toHaveBeenCalledOnce()
   })
 })

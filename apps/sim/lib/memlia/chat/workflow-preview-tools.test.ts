@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Modified by Memlia: adapt Sim authoring fixtures to qualify the preview tool.
+
 import { workflowAuthzMockFns } from '@sim/testing'
 import {
   createDelegatedPrincipal,
@@ -11,6 +12,7 @@ import {
   blockVisibilityMock,
   blockVisibilityMockFns,
 } from '@sim/testing/mocks/block-visibility.mock'
+import { dbChainMockFns } from '@sim/testing/mocks/database.mock'
 import {
   permissionGroupScopeMock,
   permissionGroupScopeMockFns,
@@ -31,6 +33,9 @@ const infra = vi.hoisted(() => ({
   replace: vi.fn(),
   ids: vi.fn(),
   permission: vi.fn(),
+  rows: new Map<string, any>(),
+  run: vi.fn(),
+  readSnapshot: vi.fn(),
 }))
 // Real use case, edit engine, schemas, sanitizer, lint and authorization funnel.
 // Only infrastructure reads/writes and the static fixture registry are replaced.
@@ -59,7 +64,54 @@ vi.mock('@/lib/workflows/deployment-status', () => workflowDeploymentStatusMock)
 vi.mock('@/lib/core/config/block-visibility', () => blockVisibilityMock)
 vi.mock('@/lib/permission-groups/config-scope.server', () => permissionGroupScopeMock)
 
+vi.mock('@/lib/auth/ban', () => ({ getActivelyBannedUserIds: async () => [] }))
+vi.mock('@/lib/workflows/queries', () => ({ loadWorkflowReadSnapshot: infra.readSnapshot }))
+vi.mock('@/lib/mothership/async-runs/repository', () => ({
+  getRunSegment: infra.run,
+  getAsyncToolCall: async (id: string) => structuredClone(infra.rows.get(id) ?? null),
+  upsertAsyncToolCall: async (input: any) => {
+    if (!infra.rows.has(input.toolCallId))
+      infra.rows.set(input.toolCallId, {
+        ...structuredClone(input),
+        permissionRequestedAt: new Date(),
+        permissionDecision: null,
+        permissionDecidedAt: null,
+        executionStartedAt: null,
+        executionAttempts: 0,
+      })
+    return structuredClone(infra.rows.get(input.toolCallId))
+  },
+  recordToolPermissionDecision: async (id: string, decision: string) => {
+    const row = infra.rows.get(id)
+    if (row.permissionDecision || row.status !== 'pending') return null
+    row.permissionDecision = decision
+    row.permissionDecidedAt = new Date()
+    return structuredClone(row)
+  },
+}))
+vi.mock('@/lib/mothership/request/tools/execution-lifetime', () => ({
+  withToolExecutionLifetime: async (id: string, work: (arg: any) => unknown) =>
+    work({
+      signal: new AbortController().signal,
+      claim: async () => {
+        const row = infra.rows.get(id)
+        if (row.status !== 'pending') return { outcome: 'existing' }
+        row.status = 'running'
+        row.executionAttempts++
+        row.executionStartedAt = new Date()
+        return { outcome: 'claimed' }
+      },
+      complete: async (input: any) => {
+        Object.assign(infra.rows.get(id), input)
+      },
+    }),
+}))
+
 import { createWorkflowPreviewTools } from './workflow-preview-tools'
+import {
+  executeWorkflowProposal,
+  recordWorkflowProposalDecision,
+} from './workflow-proposals.server'
 
 const blockId = '11111111-1111-4111-8111-111111111111'
 const principal = createSessionPrincipal()
@@ -92,7 +144,12 @@ beforeEach(() => {
   infra.ids.mockReset().mockResolvedValue(undefined)
   workflowContextMockFns.mockResolveActiveWorkflowApplicationContext.mockReset().mockResolvedValue({
     workflowId: scope.workflowId,
-    workflow: { id: scope.workflowId, name: 'PRIVATE_NAME_CANARY', workspaceId: scope.workspaceId },
+    workflow: {
+      id: scope.workflowId,
+      name: 'PRIVATE_NAME_CANARY',
+      workspaceId: scope.workspaceId,
+      draftRevision: 7,
+    },
     workspaceId: scope.workspaceId,
     workspaceOrganizationId: null,
     allowPersonalApiKeys: true,
@@ -545,4 +602,62 @@ it('uses native enablement changes without modifying the stored snapshot fixture
   })
   expect(stored).toEqual(before)
   expect(infra.replace).not.toHaveBeenCalled()
+})
+
+it('refuses proposal creation without a server run while keeping the native preview read-only', async () => {
+  const result = await createWorkflowPreviewTools(scope).propose({
+    expectedRevision: 7,
+    operations: body().operations,
+    layout: 'none',
+  })
+  expect(result).toMatchObject({ ok: false, error: { code: 'tool_not_allowed' } })
+  expect(infra.replace).not.toHaveBeenCalled()
+})
+
+it('previews a server-owned proposal through the real native engine and applies only after consent', async () => {
+  dbChainMockFns.limit.mockResolvedValue([{ id: principal.sessionId }])
+  infra.rows.clear()
+  infra.run.mockResolvedValue({
+    id: 'run-preview',
+    userId: principal.userId,
+    workspaceId: scope.workspaceId,
+    workflowId: scope.workflowId,
+    organizationId: null,
+  })
+  infra.readSnapshot.mockResolvedValue({
+    workflowRecord: {
+      id: scope.workflowId,
+      workspaceId: scope.workspaceId,
+      draftRevision: 7,
+      variables: {},
+    },
+    normalizedData: state(),
+  })
+  const result = await createWorkflowPreviewTools({
+    ...scope,
+    proposalRunId: 'run-preview',
+  }).propose({ expectedRevision: 7, operations: body().operations, layout: 'none' })
+  expect(result).toMatchObject({ ok: true, proposal: { expectedRevision: 7 }, persisted: false })
+  expect(infra.replace).not.toHaveBeenCalled()
+  if (!('proposal' in result)) throw new Error('Expected a persisted proposal, not a graph write')
+  const proposal = result.proposal as { proposalId: string; digest: string }
+  await recordWorkflowProposalDecision({
+    toolCallId: proposal.proposalId,
+    expectedDigest: proposal.digest,
+    principal,
+    decision: 'allow',
+    single: true,
+  })
+  infra.replace.mockResolvedValue({ baseRevision: 7, draftRevision: 8, warnings: [] })
+  expect(
+    await executeWorkflowProposal(proposal.proposalId, 'run-preview', principal.userId)
+  ).toMatchObject({ status: 'applied', draftRevision: 8 })
+  expect(infra.replace).toHaveBeenCalledOnce()
+  expect(infra.replace.mock.calls[0][0]).toMatchObject({
+    expectedRevision: 7,
+    subjectUserId: principal.userId,
+    state: { blocks: { [blockId]: { name: 'After' } } },
+  })
+  expect(auditMockFns.mockRecordAudit).toHaveBeenCalledOnce()
+  expect(realtimeNotifyMockFns.mockNotifyWorkflowUpdated).toHaveBeenCalledOnce()
 })

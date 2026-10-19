@@ -1,8 +1,10 @@
+// Modified by Memlia: local Chat uses native SSE without worker title or recovery.
 import { type Context, context as otelContextApi } from '@opentelemetry/api'
 import { db } from '@sim/db'
 import { copilotChats } from '@sim/db/schema'
 import { createLogger } from '@sim/logger'
 import { getErrorMessage } from '@sim/utils/errors'
+import { toRecordOrNull } from '@sim/utils/object'
 import { and, eq, isNull } from 'drizzle-orm'
 import {
   assertBillingAttributionSnapshot,
@@ -13,6 +15,7 @@ import {
   resolveOrganizationBillingAttribution,
 } from '@/lib/billing/core/attribution'
 import { isHosted } from '@/lib/core/config/env-flags'
+import { captureLocalChatOptions } from '@/lib/memlia/chat/local-driver.server'
 import { createRunSegment, recordRunBillingAdmission } from '@/lib/mothership/async-runs/repository'
 import { buildChatTitleContext } from '@/lib/mothership/chat/title-context'
 import { publishChatStatusChanged } from '@/lib/mothership/chat-status'
@@ -114,9 +117,38 @@ export function createSSEStream(params: StreamingOrchestrationParams): ReadableS
     requestId,
     workspaceId,
     organizationId,
-    orchestrateOptions,
+    orchestrateOptions: suppliedOptions,
     otelRoot,
   } = params
+
+  const localChat =
+    suppliedOptions.localChat === undefined
+      ? undefined
+      : captureLocalChatOptions(suppliedOptions.localChat)
+  if (
+    localChat &&
+    (suppliedOptions.recovery ||
+      suppliedOptions.goRoute === '/api/tools/resume' ||
+      toRecordOrNull(params.admittedRun?.requestContext)?.recovery ||
+      !chatId ||
+      organizationId ||
+      userId !== localChat.principal.userId ||
+      workspaceId !== localChat.workspaceId ||
+      suppliedOptions.userId !== userId ||
+      suppliedOptions.workspaceId !== workspaceId ||
+      suppliedOptions.workflowId !== localChat.workflow?.workflowId ||
+      suppliedOptions.chatId !== chatId)
+  )
+    throw new Error('Local Chat is unavailable.')
+  const orchestrateOptions = localChat
+    ? {
+        ...suppliedOptions,
+        localChat,
+        executionContext: suppliedOptions.executionContext
+          ? { ...suppliedOptions.executionContext }
+          : undefined,
+      }
+    : suppliedOptions
 
   // Reuse caller's root if provided; otherwise start our own.
   const activeOtelRoot =
@@ -286,6 +318,7 @@ export function createSSEStream(params: StreamingOrchestrationParams): ReadableS
       RequestTraceV1Outcome.error,
       requestId
     )
+    if (localChat) return
     try {
       const { requestExplicitStreamAbort } = await import(
         '@/lib/mothership/request/session/explicit-abort'
@@ -339,7 +372,9 @@ export function createSSEStream(params: StreamingOrchestrationParams): ReadableS
             ...(params.admittedRun?.requestContext ?? {}),
             requestId,
             controllerToken: lease?.value,
-            recovery: await streamRecoveryConfig(orchestrateOptions, requestPayload),
+            recovery: localChat
+              ? undefined
+              : await streamRecoveryConfig(orchestrateOptions, requestPayload),
           }
           try {
             if (chatId && !orchestrateOptions.recovery) {
@@ -400,21 +435,22 @@ export function createSSEStream(params: StreamingOrchestrationParams): ReadableS
               })
             }
 
-            fireTitleGeneration({
-              inventory: requestPayload.inventory,
-              chatId,
-              currentChat,
-              userId,
-              message,
-              titleModel,
-              titleProvider,
-              workspaceId,
-              organizationId,
-              billingAttribution: orchestrateOptions.billingAttribution,
-              requestId,
-              publisher,
-              otelContext,
-            })
+            if (!localChat)
+              fireTitleGeneration({
+                inventory: requestPayload.inventory,
+                chatId,
+                currentChat,
+                userId,
+                message,
+                titleModel,
+                titleProvider,
+                workspaceId,
+                organizationId,
+                billingAttribution: orchestrateOptions.billingAttribution,
+                requestId,
+                publisher,
+                otelContext,
+              })
 
             const result = await runCopilotLifecycle(requestPayload, {
               ...orchestrateOptions,

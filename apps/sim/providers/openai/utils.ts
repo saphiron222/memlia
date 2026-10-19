@@ -1,3 +1,4 @@
+// Modified by Memlia: observe native terminal usage without reparsing provider streams.
 import { isRecordLike } from '@sim/utils/object'
 import type OpenAI from 'openai'
 import { Stream } from 'openai/streaming'
@@ -6,7 +7,9 @@ import {
   getNativeConversationMessage,
   retainConversationMessageSource,
 } from '@/providers/conversation-metadata'
-import type { ModelUsage } from '@/providers/cost-policy'
+import { LIST_PRICE_POLICY, type ModelUsage, priceModelUsage } from '@/providers/cost-policy'
+import { getModelPricing } from '@/providers/pricing'
+import type { ProviderModelObservation } from '@/providers/runtime-context'
 import type { AgentStreamEvent } from '@/providers/stream-events'
 import type { Message } from '@/providers/types'
 
@@ -422,6 +425,69 @@ export function parseResponsesUsage(
   }
 }
 
+/** Validate completeness before using the native normalizer; its defaults are not usage evidence. */
+export function observeOpenAIUsage(
+  model: string,
+  response?: OpenAI.Responses.Response
+): ProviderModelObservation {
+  if (!response || response.status !== 'completed') return { kind: 'unknown', reason: 'incomplete' }
+  const raw = response.usage
+  const count = (value: unknown): value is number =>
+    typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+  if (
+    !raw ||
+    !count(raw.input_tokens) ||
+    !count(raw.output_tokens) ||
+    !count(raw.total_tokens) ||
+    raw.total_tokens !== raw.input_tokens + raw.output_tokens
+  )
+    return { kind: 'unknown', reason: 'usage_unavailable' }
+  const inputDetails = raw.input_tokens_details
+  const outputDetails = raw.output_tokens_details
+  if (
+    (inputDetails !== undefined &&
+      (!inputDetails || typeof inputDetails !== 'object' || Array.isArray(inputDetails))) ||
+    (outputDetails !== undefined &&
+      (!outputDetails || typeof outputDetails !== 'object' || Array.isArray(outputDetails)))
+  )
+    return { kind: 'unknown', reason: 'usage_unavailable' }
+  for (const [details, keys] of [
+    [inputDetails, ['cached_tokens', 'cache_write_tokens']],
+    [outputDetails, ['reasoning_tokens']],
+  ] as const) {
+    if (details)
+      for (const key of keys) {
+        if (
+          Object.hasOwn(details, key) &&
+          !count((details as unknown as Record<string, unknown>)[key])
+        )
+          return { kind: 'unknown', reason: 'usage_unavailable' }
+      }
+  }
+  const read = inputDetails?.cached_tokens ?? 0
+  const write =
+    (inputDetails as { cache_write_tokens?: number } | undefined)?.cache_write_tokens ?? 0
+  const reasoning = outputDetails?.reasoning_tokens ?? 0
+  if (
+    ![read, write, reasoning].every(count) ||
+    read + write > raw.input_tokens ||
+    reasoning > raw.output_tokens
+  )
+    return { kind: 'unknown', reason: 'usage_unavailable' }
+  const usage = toOpenAIModelUsage(parseResponsesUsage(raw)!)
+  const pricing = getModelPricing(model)
+  if (!pricing) return { kind: 'usage', usage, cost: { kind: 'unavailable' } }
+  const cost = priceModelUsage(model, usage, LIST_PRICE_POLICY)
+  return {
+    kind: 'usage',
+    usage,
+    cost:
+      Number.isFinite(cost.total) && cost.total >= 0
+        ? { kind: 'list_price_estimate', usd: cost.total }
+        : { kind: 'unavailable' },
+  }
+}
+
 /**
  * Creates an agent-events-v1 stream from a Responses API SSE stream.
  *
@@ -437,7 +503,8 @@ export function createReadableStreamFromResponses(
     usage?: ResponsesUsageTokens,
     thinking?: string,
     response?: OpenAI.Responses.Response
-  ) => void | Promise<void>
+  ) => void | Promise<void>,
+  observeTerminal?: (response?: OpenAI.Responses.Response) => Promise<void>
 ): ReadableStream<AgentStreamEvent> {
   const streamAbortController = new AbortController()
 
@@ -511,17 +578,23 @@ export function createReadableStreamFromResponses(
             throw new Error('OpenAI Responses stream ended without a completed response')
           }
 
+          if (observeTerminal) await observeTerminal(terminalResponse)
           await onComplete?.(fullContent, finalUsage, fullThinking || undefined, terminalResponse)
           controller.close()
         } catch (error) {
-          if (!streamAbortController.signal.aborted) {
-            controller.error(error)
+          let failure = error
+          try {
+            if (observeTerminal) await observeTerminal()
+          } catch (observationError) {
+            failure = observationError
           }
+          if (!streamAbortController.signal.aborted) controller.error(failure)
         }
       })()
     },
-    cancel(reason) {
+    async cancel(reason) {
       streamAbortController.abort(reason)
+      if (observeTerminal) await observeTerminal()
     },
   })
 }

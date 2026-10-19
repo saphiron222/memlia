@@ -1,6 +1,6 @@
 # Raccordement catalogue, lectures et prévisualisation aux providers Sim
 
-`runCatalogProvider({ provider, request, principal, workspaceId, workflow?, limits, signal })`
+`runCatalogProvider({ provider, request, principal, workspaceId, workflow?, limits, signal, beforeModelTransport?, observeModelAttempt? })`
 compose `runModelAdapter`, `createCatalogTools`, les lectures optionnelles de
 `createWorkflowReadTools`, la prévisualisation optionnelle `createWorkflowPreviewTools`
 et les providers **existants**
@@ -172,6 +172,78 @@ reste fixe. Le comportement de refus des quatre outils catalogue est inchangé.
 Les erreurs de transport/model restent celles du provider et nécessitent encore
 une projection sûre avant exposition HTTP.
 
+## Attente serveur optionnelle avant chaque transport
+
+`beforeModelTransport(signal, attempt?): Promise<void>` est une option du serveur capturée
+une seule fois à la création du binding. Elle n'est ni un argument du modèle,
+ni un champ de `request`, ni un outil annoncé. Une valeur présente non callable
+est refusée avec un message fixe. Sans option, les politiques natives restent
+identiques ; le helper synchrone `beforeProviderModelCall` est conservé.
+
+Le nouveau helper attendu réutilise ce compteur synchrone une fois par tentative,
+puis attend le callback avant le fetch OpenAI ou l'appel SDK Anthropic. Cela couvre
+les retries OpenAI, le fallback de résumé, les tours d'outils et la synthèse finale,
+ainsi que les trois entrées Anthropic. Les retries SDK cachés restent désactivés
+uniquement sous contrôle ALS. Un refus du compteur empêche aussi le callback.
+Le signal est capturé avant l'attente ; une annulation avant, pendant ou après
+celle-ci interdit le transport. L'attente peut être interrompue même si le callback
+ignore son signal, et ses rejets tardifs sont consommés. Le callback doit néanmoins
+coopérer pour arrêter son propre travail : cette primitive ne peut pas annuler une
+écriture déjà engagée dans un service externe.
+
+Un rejet du callback devient `Server model transport guard refused.`, sans cause,
+code réseau ni message privé, et ne déclenche pas de retry de transport. Les autres
+erreurs natives et compteurs conservent leur sémantique. Sans observateur OpenAI, le callback ne reçoit que
+le signal ; sa résolution n'est **pas** une preuve d'autorité, de tarif, de réservation
+COMMIT ou de règlement. Aucun port budgétaire, principal, clé, route HTTP ou politique
+d'activation n'est ajouté ici. Le futur raccordement P06 doit encore établir ces
+preuves avant chaque envoi ; un refus ou une annulation ne libère aucun engagement
+budgétaire par cette seule interface.
+
+## Observation optionnelle OpenAI par tentative physique
+
+`observeModelAttempt(attempt, observation): Promise<void>` est une seconde option
+serveur, capturée une fois par le binding. Elle exige OpenAI ; Anthropic est refusé
+avant transport, son mécanisme d'attente existant restant inchangé. Le port natif
+OpenAI refuse également l'observation hors streaming ou pour un autre provider
+compatible Responses. Aucun champ d'observation n'est transmis au modèle ou au SDK.
+
+Avec cette option, le hook prétransport reçoit en second argument une référence
+opaque locale, vide et gelée. Elle existe avant l'attente et peut corréler une future
+réservation serveur ; elle n'atteste aucune autorité ni COMMIT. Une WeakMap locale
+lie la réponse HTTP physique à cette référence. Chaque retry, fallback de résumé
+et synthèse reçoit sa propre référence. Les parseurs SSE existants fournissent leur
+réponse terminale au port : aucun second parseur, répartition du cumul, identifiant
+modèle ou journal de contenu n'est ajouté.
+
+La fermeture est marquée avant le callback et ne s'exécute qu'une fois ; références
+étrangères, doublons et notifications tardives sont sans effet. Les compteurs et
+l'estimation sont copiés/gelés avant l'attente du callback. La référence est locale
+à ce processus et n'est pas un reçu durable. Les fonctions d'observation sont des
+ports internes de confiance, jamais une validation d'une facture fournie par un client.
+
+- `unknown` : raisons fixes `not_sent`, `transport_error`, `http_error`, `incomplete`
+  ou `usage_unavailable`. Aucune de ces raisons ne signifie coût zéro ni libération.
+- `usage` : les compteurs terminalement observés sont validés avant les normaliseurs
+  natifs (entiers sûrs non négatifs, total cohérent, caches non supérieurs à l'entrée,
+  raisonnement non supérieur à la sortie). Les détails cache/raisonnement absents
+  suivent les valeurs optionnelles natives ; une valeur présente invalide est refusée.
+  Les réponses partielles, même utilisables pour du texte, restent inconnues ici.
+- `cost.kind=list_price_estimate` : estimation au tarif liste enregistré, via
+  `priceModelUsage` et sa politique liste, caches/paliers natifs inclus. Ce nombre
+  arrondi n'est ni une facture fournisseur, ni une preuve USD/ledger, ni une garantie
+  de plafond. Zéro estimé n'autorise pas un règlement gratuit ; P06 garde sa règle
+  native de réconciliation quand aucun événement ledger modèle ne peut être écrit.
+  Sans tarif enregistré, `cost.kind=unavailable` ; le fallback d'affichage n'est pas utilisé.
+
+Un observateur rejeté produit seulement `Server model observation failed.`, sans
+cause/code réseau ; même sur HTTP503 il ne provoque aucun retry. La fermeture n'est
+pas rejouée après cet échec : le futur port budgétaire doit conserver l'incertitude.
+L'annulation après un premier tour peut laisser ce tour observé et la tentative
+suivante inconnue ; la collecte d'un coût déjà engagé ne dépend pas d'un nouveau droit
+d'envoi. Le callback doit être borné par son propre port ; aucune transaction DB,
+politique de libération, relance ou règlement n'est fournie par ce raccordement.
+
 ## Vérifications et limites
 
 Les tests composent les boucles des providers, leur préparation d'arguments, les
@@ -199,3 +271,22 @@ confirmation, mutation ou exécution. Les hooks de transport sont qualifiés pou
 ces chemins précis ; leur présence ne rend pas automatiquement d'autres SDK
 bornés. Le choix et l'appel d'un modèle réel, sa qualité et le Chat complet
 restent à qualifier. Ce raccordement n'est pas le backend conversationnel final.
+
+## Diagnostics d'erreur OpenAI sous contrôle serveur
+
+Le chemin OpenAI capture la présence du contrôle serveur avant les attentes et
+conserve cette décision dans la boucle. Ses erreurs de transport, de requête,
+d'outil et de streaming sont journalisées avec des codes fixes, sans message,
+cause, stack ou en-tête du provider. Le retry natif reçoit une option interne
+explicite : ses avertissements conservent seulement le code, le numéro de
+tentative, la limite et le délai. Aucun champ modèle ne choisit cette politique.
+
+Hors de ce contrôle, les diagnostics natifs restent inchangés. Les exceptions,
+leurs causes et les résultats transmis au caller ne sont pas réécrits par cette
+projection de logs ; la fermeture des sorties HTTP/SSE appartient au caller.
+Anthropic et les autres providers ne sont pas requalifiés par ce changement.
+
+Le binding crée une requête et un contexte propres, sans `agentConversation`.
+Le helper natif `recordProviderConversationToolError` ne possède donc aucune
+cible durable dans ce contexte fermé. Cela ne garantit pas la même propriété
+pour une autre composition ALS qui ajouterait explicitement une conversation.

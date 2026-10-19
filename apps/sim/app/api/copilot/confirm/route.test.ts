@@ -1,3 +1,4 @@
+// Modified by Memlia: reject client settlement of server-owned proposals.
 import { copilotHttpMock, copilotHttpMockFns } from '@sim/testing'
 import { createRouteContext } from '@sim/testing/helpers/http'
 import { encryptionMock, encryptionMockFns } from '@sim/testing/mocks/encryption.mock'
@@ -78,6 +79,32 @@ describe('Copilot Confirm API Route', () => {
       body,
     })
   }
+
+  it.each(['success', 'error', 'cancelled', 'background'])(
+    'refuses client %s for a persisted server proposal despite a forged ordinary name',
+    async (status) => {
+      getAsyncToolCall.mockResolvedValue({
+        ...existingRow,
+        toolName: 'memlia_apply_workflow_proposal',
+      })
+      const response = await POST(
+        createMockPostRequest({
+          toolCallId: 'tool-call-123',
+          toolName: 'client_tool',
+          status,
+          data: { output: { status: 'applied' } },
+        }),
+        createRouteContext({})
+      )
+      expect(response.status).toBe(404)
+      expect(completeAsyncToolCall).not.toHaveBeenCalled()
+      expect(completeClaimedAsyncToolCall).not.toHaveBeenCalled()
+      expect(completePendingAsyncToolCall).not.toHaveBeenCalled()
+      expect(detachAsyncToolCall).not.toHaveBeenCalled()
+      expect(encryptSecret).not.toHaveBeenCalled()
+      expect(publishToolConfirmation).not.toHaveBeenCalled()
+    }
+  )
 
   it('returns 403 when the tool call belongs to a different user', async () => {
     getRunSegment.mockResolvedValue({ id: 'run-1', userId: 'user-2' })

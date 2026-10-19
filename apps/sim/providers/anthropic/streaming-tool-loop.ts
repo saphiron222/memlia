@@ -29,7 +29,7 @@ import {
   captureProviderConversationStep,
   recordProviderConversationToolError,
 } from '@/providers/conversation-history'
-import { beforeProviderModelCall, executeProviderTool } from '@/providers/runtime-context'
+import { awaitProviderModelCall, executeProviderTool } from '@/providers/runtime-context'
 import type { AgentStreamEvent, ToolCallEndStatus } from '@/providers/stream-events'
 import {
   isAbortError,
@@ -202,10 +202,9 @@ export function createAnthropicStreamingToolLoopStream(
 
           const modelStart = Date.now()
           const prepared = await prepareConversationGeneration(request, 'anthropic', turnPayload)
-          const messageStream = anthropic.messages.stream(
-            prepared,
-            beforeProviderModelCall(loopAbortController.signal)
-          )
+          const options = await awaitProviderModelCall(loopAbortController.signal)
+          options?.signal.throwIfAborted()
+          const messageStream = anthropic.messages.stream(prepared, options)
           activeMessageStream = messageStream
 
           const textChunks: string[] = []

@@ -1,3 +1,4 @@
+// Modified by Memlia: pin optional closed retry diagnostics and native compatibility.
 /**
  * Failure modes of the shared provider retry policy. A lost retry fails a run on a transient
  * upstream fault; a wrong one re-bills a completion or hammers a spent account.
@@ -356,4 +357,37 @@ describe('withProviderRetry', () => {
     )
     expect(operation).toHaveBeenCalledTimes(1)
   })
+})
+
+describe('explicit closed retry diagnostics', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+  for (const closedDiagnostics of [true, false]) {
+    it.each(['transport', 'status'] as const)(
+      `retains policy without private failure data closed=${closedDiagnostics}, %s`,
+      async (kind) => {
+        const marker = 'FICTITIOUS_RETRY_PRIVATE_CONTENT'
+        const warn = vi.fn()
+        const localLogger = { info: vi.fn(), warn, error: vi.fn(), debug: vi.fn() } as never
+        const failure = Object.assign(new Error(marker), { code: 'ECONNRESET' })
+        const send = vi.fn()
+        if (kind === 'transport') send.mockRejectedValueOnce(failure)
+        else send.mockImplementationOnce(reply(503, '', { 'x-request-id': marker }))
+        send.mockImplementation(reply(200))
+        const result = await settle(
+          fetchWithProviderRetry(send, { logger: localLogger, label: 'OpenAI', closedDiagnostics })
+        )
+        expect(result.status).toBe(200)
+        expect(send).toHaveBeenCalledTimes(2)
+        expect(warn).toHaveBeenCalledTimes(1)
+        expect(JSON.stringify(warn.mock.calls).includes(marker)).toBe(!closedDiagnostics)
+        const fields = warn.mock.calls[0][1]
+        expect(fields.attempt).toBe(1)
+        expect(fields.maxRetries).toBe(PROVIDER_MAX_RETRIES)
+        expect(fields.delayMs).toBeGreaterThanOrEqual(0)
+        if (closedDiagnostics)
+          expect(Object.keys(fields).sort()).toEqual(['attempt', 'code', 'delayMs', 'maxRetries'])
+      }
+    )
+  }
 })

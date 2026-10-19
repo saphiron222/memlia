@@ -21,6 +21,19 @@ import {
 } from '@sim/testing/mocks/workspace-context.mock'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
+const proposalInfra = vi.hoisted(() => ({ propose: vi.fn() }))
+vi.mock('@/lib/memlia/chat/workflow-preview-tools', async (original) => {
+  const actual = await original<typeof import('@/lib/memlia/chat/workflow-preview-tools')>()
+  return {
+    ...actual,
+    createWorkflowPreviewTools: (
+      options: Parameters<typeof actual.createWorkflowPreviewTools>[0]
+    ) => ({
+      ...actual.createWorkflowPreviewTools(options),
+      propose: (body: unknown, signal: AbortSignal) => proposalInfra.propose(options, body, signal),
+    }),
+  }
+})
 const previewInfra = vi.hoisted(() => ({ snapshot: vi.fn(), replace: vi.fn(), ids: vi.fn() }))
 vi.mock('@/lib/workflows/persistence/utils', () => ({
   loadWorkflowDraftSnapshot: previewInfra.snapshot,
@@ -67,9 +80,21 @@ import { openaiProvider } from '@/providers/openai'
 import {
   beforeProviderModelCall,
   executeProviderTool,
+  type ProviderModelAttempt,
+  type ProviderModelObservation,
   runWithProviderRuntimeContext,
 } from '@/providers/runtime-context'
 import { runCatalogProvider } from './provider-binding'
+
+function transportGate() {
+  let release!: () => void
+  let reject!: (reason: unknown) => void
+  const promise = new Promise<void>((resolve, fail) => {
+    release = resolve
+    reject = fail
+  })
+  return { promise, release, reject }
+}
 
 const principal = createSessionPrincipal({ userId: 'catalog-reader' })
 const scope = { principal, workspaceId: 'workspace-1' }
@@ -78,6 +103,348 @@ const modelRequest = {
   apiKey: 'FICTIVE_MEMLIA_TEST_ONLY',
   messages: [{ role: 'user' as const, content: 'Find the Loop block' }],
 }
+
+describe('awaited server transport gate — native loops, HTTP double only', () => {
+  it.each([null, false, {}])(
+    'refuses a non-callable server gate before any transport: %j',
+    (value) => {
+      const http = vi.fn()
+      vi.stubGlobal('fetch', http)
+      expect(() =>
+        runCatalogProvider({
+          ...scope,
+          provider: 'openai',
+          request: modelRequest,
+          beforeModelTransport: value as never,
+        })
+      ).toThrow('Invalid server model transport guard.')
+      expect(http).not.toHaveBeenCalled()
+    }
+  )
+
+  it('does not adopt a guard embedded in model request fields', async () => {
+    const injected = vi.fn(async () => {
+      throw new Error('MODEL_GUARD_NOT_AUTHORITY')
+    })
+    const http = vi.fn(async () => answer())
+    vi.stubGlobal('fetch', http)
+    const run = runCatalogProvider({
+      ...scope,
+      provider: 'openai',
+      request: {
+        ...modelRequest,
+        beforeModelTransport: injected,
+      } as never,
+    })
+    await collect(run.stream)
+    expect(injected).not.toHaveBeenCalled()
+    expect(http).toHaveBeenCalledOnce()
+    expect(JSON.stringify(JSON.parse(http.mock.calls[0][1].body))).not.toContain(
+      'beforeModelTransport'
+    )
+  })
+
+  it.each(['openai', 'anthropic'] as const)(
+    'captures the server guard before the first %s wait',
+    async (provider) => {
+      const gate = transportGate()
+      let calls = 0
+      const original = vi.fn(async () => {
+        if (++calls === 1) await gate.promise
+      })
+      const replacement = vi.fn(async () => {
+        throw new Error('PRIVATE_REPLACEMENT')
+      })
+      const http = vi
+        .fn()
+        .mockResolvedValueOnce(
+          provider === 'openai' ? sse(response([toolCall()])) : anthropicSse(true)
+        )
+        .mockResolvedValueOnce(provider === 'openai' ? answer() : anthropicSse())
+      vi.stubGlobal('fetch', http)
+      const options = {
+        ...scope,
+        provider,
+        request: {
+          ...modelRequest,
+          model: provider === 'openai' ? 'gpt-4.1' : 'claude-sonnet-4-5',
+        },
+        beforeModelTransport: original,
+      }
+      const run = runCatalogProvider(options)
+      const drain = collect(run.stream)
+      void drain.catch(() => {})
+      try {
+        await vi.waitFor(() => expect(calls + http.mock.calls.length).toBeGreaterThan(0))
+        expect(http).not.toHaveBeenCalled()
+        options.beforeModelTransport = replacement
+      } finally {
+        gate.release()
+        await drain.catch(() => {})
+      }
+      expect(http).toHaveBeenCalledTimes(2)
+      expect(original).toHaveBeenCalledTimes(2)
+      expect(replacement).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each(['openai', 'anthropic'] as const)(
+    'waits before the first physical %s request',
+    async (provider) => {
+      const gate = transportGate()
+      const beforeModelTransport = vi.fn(() => gate.promise)
+      const http = vi.fn(async () => (provider === 'openai' ? answer() : anthropicSse()))
+      vi.stubGlobal('fetch', http)
+      const run = runCatalogProvider({
+        ...scope,
+        provider,
+        request: {
+          ...modelRequest,
+          model: provider === 'openai' ? 'gpt-4.1' : 'claude-sonnet-4-5',
+        },
+        beforeModelTransport,
+      })
+      const drain = collect(run.stream)
+      void drain.catch(() => {})
+      try {
+        // Baseline can reach HTTP because it ignores the new server option: that
+        // observable send, not a missing export/type, is the intended RED witness.
+        await vi.waitFor(() =>
+          expect(beforeModelTransport.mock.calls.length + http.mock.calls.length).toBeGreaterThan(0)
+        )
+        expect(http).not.toHaveBeenCalled()
+        expect(beforeModelTransport).toHaveBeenCalledOnce()
+        expect(run.usage()).toEqual({ modelCalls: 1, toolCalls: 0 })
+      } finally {
+        gate.release()
+        await drain.catch(() => {})
+      }
+      expect(http).toHaveBeenCalledOnce()
+    }
+  )
+
+  it.each(['openai', 'anthropic'] as const)(
+    'refuses a server gate without leaking its error or retrying %s',
+    async (provider) => {
+      const beforeModelTransport = vi.fn(async () => {
+        throw Object.assign(new Error('PRIVATE_GUARD_CANARY'), { code: 'ECONNRESET' })
+      })
+      const http = vi.fn(async () => (provider === 'openai' ? answer() : anthropicSse()))
+      vi.stubGlobal('fetch', http)
+      const run = runCatalogProvider({
+        ...scope,
+        provider,
+        request: {
+          ...modelRequest,
+          model: provider === 'openai' ? 'gpt-4.1' : 'claude-sonnet-4-5',
+        },
+        beforeModelTransport,
+      })
+      const result = await collect(run.stream).then(
+        () => null,
+        (error: unknown) => error
+      )
+      expect(result).toMatchObject({ message: 'Server model transport guard refused.' })
+      expect(String(result)).not.toContain('PRIVATE_GUARD_CANARY')
+      expect(result).not.toHaveProperty('cause')
+      expect(http).not.toHaveBeenCalled()
+      expect(beforeModelTransport).toHaveBeenCalledOnce()
+      expect(run.usage()).toEqual({ modelCalls: 1, toolCalls: 0 })
+    }
+  )
+
+  it.each(['openai', 'anthropic'] as const)(
+    'aborts a pending gate without sending a late %s request',
+    async (provider) => {
+      const gate = transportGate()
+      const beforeModelTransport = vi.fn(() => gate.promise)
+      const abort = new AbortController()
+      const http = vi.fn(async () => (provider === 'openai' ? answer() : anthropicSse()))
+      vi.stubGlobal('fetch', http)
+      const run = runCatalogProvider({
+        ...scope,
+        provider,
+        signal: abort.signal,
+        request: {
+          ...modelRequest,
+          model: provider === 'openai' ? 'gpt-4.1' : 'claude-sonnet-4-5',
+        },
+        beforeModelTransport,
+      })
+      const drain = collect(run.stream)
+      void drain.catch(() => {})
+      try {
+        await vi.waitFor(() =>
+          expect(beforeModelTransport.mock.calls.length + http.mock.calls.length).toBeGreaterThan(0)
+        )
+        expect(http).not.toHaveBeenCalled()
+        abort.abort(new DOMException('Fixture cancelled', 'AbortError'))
+        await expect(drain).rejects.toMatchObject({ name: 'AbortError' })
+        expect(beforeModelTransport.mock.calls[0][0].aborted).toBe(true)
+      } finally {
+        abort.abort()
+        gate.release()
+        await drain.catch(() => {})
+      }
+      await Promise.resolve()
+      expect(http).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each(['openai', 'anthropic'] as const)(
+    'rechecks cancellation when the %s gate resolves',
+    async (provider) => {
+      const abort = new AbortController()
+      const beforeModelTransport = vi.fn(async () => {
+        abort.abort(new DOMException('Fixture cancelled', 'AbortError'))
+      })
+      const http = vi.fn(async () => (provider === 'openai' ? answer() : anthropicSse()))
+      vi.stubGlobal('fetch', http)
+      const run = runCatalogProvider({
+        ...scope,
+        provider,
+        signal: abort.signal,
+        request: {
+          ...modelRequest,
+          model: provider === 'openai' ? 'gpt-4.1' : 'claude-sonnet-4-5',
+        },
+        beforeModelTransport,
+      })
+      await expect(collect(run.stream)).rejects.toMatchObject({ name: 'AbortError' })
+      expect(http).not.toHaveBeenCalled()
+      expect(beforeModelTransport).toHaveBeenCalledOnce()
+    }
+  )
+
+  it.each(['openai', 'anthropic'] as const)(
+    'waits again before %s synthesis after a real catalogue tool',
+    async (provider) => {
+      const gate = transportGate()
+      let calls = 0
+      const beforeModelTransport = vi.fn(async () => {
+        if (++calls === 2) await gate.promise
+      })
+      const http = vi
+        .fn()
+        .mockResolvedValueOnce(
+          provider === 'openai' ? sse(response([toolCall()])) : anthropicSse(true)
+        )
+        .mockResolvedValueOnce(provider === 'openai' ? answer() : anthropicSse())
+      vi.stubGlobal('fetch', http)
+      const run = runCatalogProvider({
+        ...scope,
+        provider,
+        request: {
+          ...modelRequest,
+          model: provider === 'openai' ? 'gpt-4.1' : 'claude-sonnet-4-5',
+        },
+        beforeModelTransport,
+      })
+      const drain = collect(run.stream)
+      void drain.catch(() => {})
+      try {
+        await vi.waitFor(() => expect(calls >= 2 || http.mock.calls.length >= 2).toBe(true))
+        expect(http).toHaveBeenCalledTimes(1)
+        expect(run.usage()).toEqual({ modelCalls: 2, toolCalls: 1 })
+      } finally {
+        gate.release()
+        await drain.catch(() => {})
+      }
+      expect(http).toHaveBeenCalledTimes(2)
+      expect(beforeModelTransport).toHaveBeenCalledTimes(2)
+      expect(toolsMockFns.mockExecuteTool).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each(['retry', 'summary-fallback'] as const)(
+    'waits again before an OpenAI %s',
+    async (path) => {
+      const gate = transportGate()
+      let calls = 0
+      const beforeModelTransport = vi.fn(async () => {
+        if (++calls === 2) await gate.promise
+      })
+      const first =
+        path === 'retry'
+          ? new Response('{}', { status: 503, headers: { 'retry-after-ms': '0' } })
+          : new Response(
+              JSON.stringify({ error: { message: 'reasoning.summary requires verification' } }),
+              { status: 400 }
+            )
+      const http = vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(answer())
+      vi.stubGlobal('fetch', http)
+      const run = runCatalogProvider({
+        ...scope,
+        provider: 'openai',
+        request: {
+          ...modelRequest,
+          model: path === 'summary-fallback' ? 'gpt-5.5' : modelRequest.model,
+        },
+        beforeModelTransport,
+      })
+      const drain = collect(run.stream)
+      void drain.catch(() => {})
+      try {
+        await vi.waitFor(() => expect(calls >= 2 || http.mock.calls.length >= 2).toBe(true))
+        expect(http).toHaveBeenCalledTimes(1)
+        expect(run.usage()).toEqual({ modelCalls: 2, toolCalls: 0 })
+      } finally {
+        gate.release()
+        await drain.catch(() => {})
+      }
+      expect(http).toHaveBeenCalledTimes(2)
+      expect(beforeModelTransport).toHaveBeenCalledTimes(2)
+    }
+  )
+
+  it.each([
+    { stream: true, maxTokens: 1024 },
+    { stream: false, maxTokens: 1024 },
+    { stream: false, maxTokens: 30000 },
+  ])('awaits the native Anthropic entry $stream/$maxTokens before the SDK', async (shape) => {
+    const gate = transportGate()
+    const beforeModelTransport = vi.fn(() => gate.promise)
+    const reserve = vi.fn()
+    const http = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            type: 'error',
+            error: { type: 'api_error', message: 'Fixture outage' },
+          }),
+          { status: 503 }
+        )
+    )
+    vi.stubGlobal('fetch', http)
+    const pending = runWithProviderRuntimeContext(
+      {
+        controlledRun: {
+          signal: new AbortController().signal,
+          beforeModelCall: reserve,
+          beforeModelTransport,
+          executeTool: async () => {
+            throw new Error('No fixture tool allowed')
+          },
+        },
+      },
+      () =>
+        anthropicProvider.executeRequest({ ...modelRequest, model: 'claude-sonnet-4-5', ...shape })
+    )
+    void pending.catch(() => {})
+    try {
+      await vi.waitFor(() =>
+        expect(beforeModelTransport.mock.calls.length + http.mock.calls.length).toBeGreaterThan(0)
+      )
+      expect(http).not.toHaveBeenCalled()
+      expect(reserve).toHaveBeenCalledOnce()
+    } finally {
+      gate.release()
+      await pending.catch(() => {})
+    }
+    expect(http).toHaveBeenCalledOnce()
+    expect(beforeModelTransport).toHaveBeenCalledOnce()
+  })
+})
 
 function response(output: unknown[]) {
   return {
@@ -1687,4 +2054,418 @@ describe('optional preview — native providers and edit engine, HTTP/DB doubles
       else z.globalRegistry.remove(schema)
     }
   })
+})
+
+describe('OpenAI physical usage observation — native parser, HTTP double', () => {
+  function observationOptions() {
+    const references: unknown[] = []
+    const observations: Array<{ reference: unknown; observation: ProviderModelObservation }> = []
+    return {
+      references,
+      observations,
+      beforeModelTransport: async (_signal: AbortSignal, reference?: unknown) => {
+        references.push(reference)
+      },
+      observeModelAttempt: async (
+        reference: ProviderModelAttempt,
+        observation: ProviderModelObservation
+      ) => {
+        observations.push({ reference, observation })
+      },
+    }
+  }
+
+  it('binds native terminal usage to the opaque pretransport attempt', async () => {
+    const observed = observationOptions()
+    const http = vi.fn(async () => answer())
+    vi.stubGlobal('fetch', http)
+    const run = runCatalogProvider({
+      ...scope,
+      provider: 'openai',
+      request: modelRequest,
+      ...observed,
+    })
+    await collect(run.stream)
+    expect(observed.observations).toHaveLength(1)
+    expect(observed.observations[0].reference).toBe(observed.references[0])
+    expect(Object.keys(observed.references[0] as object)).toEqual([])
+    expect(Object.isFrozen(observed.references[0])).toBe(true)
+    expect(observed.observations[0].observation).toMatchObject({
+      kind: 'usage',
+      usage: { input: 1, output: 1 },
+      cost: { kind: 'list_price_estimate' },
+    })
+    expect(run.usage()).toEqual({ modelCalls: 1, toolCalls: 0 })
+  })
+
+  it.each(['retry', 'summary'] as const)(
+    'keeps %s and the successful response as distinct attempts',
+    async (mode) => {
+      const observed = observationOptions()
+      const first =
+        mode === 'retry'
+          ? new Response('{}', { status: 503, headers: { 'retry-after-ms': '0' } })
+          : new Response(
+              JSON.stringify({ error: { message: 'reasoning.summary requires verification' } }),
+              { status: 400 }
+            )
+      const http = vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(answer())
+      vi.stubGlobal('fetch', http)
+      await collect(
+        runCatalogProvider({
+          ...scope,
+          provider: 'openai',
+          request: { ...modelRequest, model: mode === 'summary' ? 'o3' : modelRequest.model },
+          ...observed,
+        }).stream
+      )
+      expect(observed.observations.map((o) => o.observation.kind)).toEqual(['unknown', 'usage'])
+      expect(observed.references).toHaveLength(2)
+      expect(observed.references[0]).not.toBe(observed.references[1])
+      expect(observed.observations.map((o) => o.reference)).toEqual(observed.references)
+      expect(http).toHaveBeenCalledTimes(2)
+    }
+  )
+
+  it('reports each tool and synthesis response without assigning cumulative tokens', async () => {
+    const observed = observationOptions()
+    const second = response([])
+    second.usage = { input_tokens: 5, output_tokens: 3, total_tokens: 8 }
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(sse(response([toolCall()])))
+        .mockResolvedValueOnce(sse(second))
+    )
+    const run = runCatalogProvider({
+      ...scope,
+      provider: 'openai',
+      request: modelRequest,
+      ...observed,
+    })
+    await collect(run.stream)
+    expect(
+      observed.observations.map((o) =>
+        o.observation.kind === 'usage' ? o.observation.usage : undefined
+      )
+    ).toEqual([
+      expect.objectContaining({ input: 1, output: 1 }),
+      expect.objectContaining({ input: 5, output: 3 }),
+    ])
+    expect(run.usage()).toEqual({ modelCalls: 2, toolCalls: 1 })
+  })
+
+  it.each([
+    undefined,
+    {},
+    { input_tokens: 1, output_tokens: -1, total_tokens: 0 },
+    { input_tokens: 1, output_tokens: 1.5, total_tokens: 2.5 },
+  ])('does not turn missing or malformed native usage into known zero: %j', async (usage) => {
+    const observed = observationOptions()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => sse({ ...response([]), usage } as never))
+    )
+    await collect(
+      runCatalogProvider({ ...scope, provider: 'openai', request: modelRequest, ...observed })
+        .stream
+    )
+    expect(observed.observations).toHaveLength(1)
+    expect(observed.observations[0].observation).toEqual({
+      kind: 'unknown',
+      reason: 'usage_unavailable',
+    })
+  })
+
+  it('keeps counters but no known price for an unregistered model', async () => {
+    const observed = observationOptions()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => answer())
+    )
+    await collect(
+      runCatalogProvider({
+        ...scope,
+        provider: 'openai',
+        request: { ...modelRequest, model: 'unregistered-test-model' },
+        ...observed,
+      }).stream
+    )
+    expect(observed.observations[0]?.observation).toMatchObject({
+      kind: 'usage',
+      cost: { kind: 'unavailable' },
+    })
+  })
+
+  it('never retries an observation callback rejection after a response', async () => {
+    const observed = observationOptions()
+    const http = vi.fn(async () => answer())
+    vi.stubGlobal('fetch', http)
+    const observer = vi.fn(async () => {
+      throw Object.assign(new Error('PRIVATE_OBSERVER'), {
+        code: 'ECONNRESET',
+        cause: 'PRIVATE_CAUSE',
+      })
+    })
+    const run = runCatalogProvider({
+      ...scope,
+      provider: 'openai',
+      request: modelRequest,
+      ...observed,
+      observeModelAttempt: observer,
+    })
+    await expect(collect(run.stream)).rejects.toMatchObject({
+      message: 'Server model observation failed.',
+    })
+    expect(observer).toHaveBeenCalledOnce()
+    expect(http).toHaveBeenCalledOnce()
+  })
+
+  it('keeps the first known turn and marks the aborted second response unknown', async () => {
+    const observed = observationOptions()
+    const abort = new AbortController()
+    const http = vi
+      .fn()
+      .mockResolvedValueOnce(sse(response([toolCall()])))
+      .mockImplementationOnce(async () => {
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              abort.signal.addEventListener(
+                'abort',
+                () => controller.error(new DOMException('Aborted', 'AbortError')),
+                { once: true }
+              )
+            },
+          })
+        )
+      })
+    vi.stubGlobal('fetch', http)
+    const run = runCatalogProvider({
+      ...scope,
+      provider: 'openai',
+      request: modelRequest,
+      signal: abort.signal,
+      ...observed,
+    })
+    const drain = collect(run.stream)
+    void drain.catch(() => {})
+    await vi.waitFor(() => expect(http).toHaveBeenCalledTimes(2))
+    abort.abort()
+    await expect(drain).rejects.toMatchObject({ name: 'AbortError' })
+    await vi.waitFor(() => expect(observed.observations).toHaveLength(2))
+    expect(observed.observations.map((o) => o.observation.kind)).toEqual(['usage', 'unknown'])
+  })
+
+  it('refuses observation on Anthropic before any transport', () => {
+    const http = vi.fn()
+    vi.stubGlobal('fetch', http)
+    expect(() =>
+      runCatalogProvider({
+        ...scope,
+        provider: 'anthropic',
+        request: modelRequest,
+        ...observationOptions(),
+      })
+    ).toThrow('Model observation requires OpenAI streaming.')
+    expect(http).not.toHaveBeenCalled()
+  })
+})
+
+describe('OpenAI simple stream observation — native provider and HTTP double', () => {
+  async function nativeRun(observe?: (reference: unknown, outcome: unknown) => Promise<void>) {
+    const result = await runWithProviderRuntimeContext(
+      {
+        controlledRun: {
+          signal: new AbortController().signal,
+          beforeModelCall() {},
+          observeModelAttempt: observe,
+          executeTool: async () => {
+            throw new Error('unused')
+          },
+        },
+      },
+      () => openaiProvider.executeRequest({ ...modelRequest, stream: true })
+    )
+    if (!('stream' in result)) throw new Error('Expected native streaming result')
+    return result
+  }
+  it('preserves native aggregate output and events with observation enabled', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => answer())
+    )
+    const baseline = await nativeRun()
+    const oldEvents = await collect(baseline.stream)
+    const observer = vi.fn(async () => {})
+    const observed = await nativeRun(observer)
+    expect(await collect(observed.stream)).toEqual(oldEvents)
+    expect(observed.execution.output.tokens).toEqual(baseline.execution.output.tokens)
+    expect(observed.execution.output.cost).toEqual(baseline.execution.output.cost)
+    expect(observer).toHaveBeenCalledOnce()
+    expect(observer.mock.calls[0][1]).toMatchObject({ kind: 'usage' })
+  })
+  it('observes a truncated simple stream as unknown without another fetch', async () => {
+    const http = vi.fn(
+      async () =>
+        new Response('data: {"type":"response.output_text.delta","delta":"partial"}\n\n', {
+          headers: { 'Content-Type': 'text/event-stream' },
+        })
+    )
+    vi.stubGlobal('fetch', http)
+    const observer = vi.fn(async () => {})
+    const observed = await nativeRun(observer)
+    await expect(collect(observed.stream)).rejects.toThrow('without a completed response')
+    expect(observer.mock.calls[0][1]).toEqual({ kind: 'unknown', reason: 'incomplete' })
+    expect(http).toHaveBeenCalledOnce()
+  })
+  it('does not retry a refused observer on HTTP503 before native retry', async () => {
+    const http = vi.fn(
+      async () => new Response('{}', { status: 503, headers: { 'retry-after-ms': '0' } })
+    )
+    vi.stubGlobal('fetch', http)
+    const observer = vi.fn(async () => {
+      throw Object.assign(new Error('PRIVATE_OBSERVER'), { code: 'ECONNRESET' })
+    })
+    await expect(nativeRun(observer)).rejects.toMatchObject({
+      message: 'Server model observation failed.',
+    })
+    expect(observer).toHaveBeenCalledOnce()
+    expect(http).toHaveBeenCalledOnce()
+  })
+  it('never exposes the server observer or opaque reference in the SDK body', async () => {
+    const observer = vi.fn(async () => {})
+    const http = vi.fn().mockImplementation(async () => answer())
+    vi.stubGlobal('fetch', http)
+    const observed = await nativeRun(observer)
+    await collect(observed.stream)
+    const body = JSON.parse(http.mock.calls[0][1].body)
+    expect(body).not.toHaveProperty('observeModelAttempt')
+    expect(body).not.toHaveProperty('beforeModelTransport')
+    expect(body).not.toHaveProperty('reference')
+    expect(observer).toHaveBeenCalledOnce()
+  })
+})
+
+describe('server-owned proposal callback with real OpenAI loop and fake storage/HTTP', () => {
+  const intention = {
+    request: {
+      expectedRevision: 7,
+      operations: [{ operation_type: 'remove', block_id: 'b1' }],
+      layout: { mode: 'preserve' },
+    },
+  }
+  const selection = {
+    workflowId: 'bound-workflow',
+    policy: 'sanitized_details' as const,
+    previewOperations: true as const,
+  }
+  beforeEach(() =>
+    proposalInfra.propose.mockReset().mockResolvedValue({
+      ok: true,
+      proposal: { proposalId: 'server-proposal', expectedRevision: 7 },
+      persisted: false,
+    })
+  )
+  it('announces the native intent schema and awaits the server callback before synthesis', async () => {
+    const hold = transportGate()
+    const callback = vi.fn(async () => {
+      await hold.promise
+      return { status: 'skipped' as const }
+    })
+    const http = vi
+      .fn()
+      .mockResolvedValueOnce(sse(response([toolCall('propose_workflow_operations', intention)])))
+      .mockResolvedValueOnce(answer())
+    vi.stubGlobal('fetch', http)
+    const options = {
+      ...scope,
+      provider: 'openai' as const,
+      request: modelRequest,
+      workflow: selection,
+      proposal: { runId: 'run-a', onProposal: callback },
+    }
+    const run = runCatalogProvider(options)
+    const pending = collect(run.stream)
+    await vi.waitFor(() => expect(callback).toHaveBeenCalledOnce())
+    expect(http).toHaveBeenCalledOnce()
+    expect(proposalInfra.propose.mock.calls[0][0]).toMatchObject({
+      proposalRunId: 'run-a',
+      workflowId: 'bound-workflow',
+      principal,
+    })
+    const tools = JSON.parse(http.mock.calls[0][1].body).tools
+    const schema = tools.find((t: { name: string }) => t.name === 'propose_workflow_operations')
+    expect(schema.parameters.properties.request.required).toContain('expectedRevision')
+    expect(JSON.stringify(schema)).not.toMatch(/onProposal|sessionId|run-a|server-proposal/)
+    hold.release()
+    await pending
+    const out = JSON.parse(http.mock.calls[1][1].body).input.find(
+      (i: { type: string }) => i.type === 'function_call_output'
+    )
+    expect(JSON.parse(out.output)).toEqual({ status: 'skipped' })
+    expect(toolsMockFns.mockExecuteTool).not.toHaveBeenCalled()
+  })
+  it.each([
+    { principal: { userId: 'model-owner' } },
+    { runId: 'model-run' },
+    { toolCallId: 'forged' },
+  ])('refuses model authority fields before creating a proposal: %j', async (extra) => {
+    const callback = vi.fn()
+    const http = vi
+      .fn()
+      .mockResolvedValueOnce(
+        sse(response([toolCall('propose_workflow_operations', { ...intention, ...extra })]))
+      )
+      .mockResolvedValueOnce(answer())
+    vi.stubGlobal('fetch', http)
+    await collect(
+      runCatalogProvider({
+        ...scope,
+        provider: 'openai',
+        request: modelRequest,
+        workflow: selection,
+        proposal: { runId: 'run-a', onProposal: callback },
+      }).stream
+    )
+    expect(proposalInfra.propose).not.toHaveBeenCalled()
+    expect(callback).not.toHaveBeenCalled()
+    expect(JSON.stringify(JSON.parse(http.mock.calls[1][1].body))).toContain('invalid_input')
+  })
+  it('rejects a proposal option without its explicit preview scope before transport', () => {
+    const http = vi.fn()
+    vi.stubGlobal('fetch', http)
+    expect(() =>
+      runCatalogProvider({
+        ...scope,
+        provider: 'openai',
+        request: modelRequest,
+        proposal: { runId: 'run-a', onProposal: vi.fn() },
+      })
+    ).toThrow()
+    expect(http).not.toHaveBeenCalled()
+  })
+})
+
+it('controlled native provider failures do not expose a fictive transport canary in logger calls', async () => {
+  const { getAllMockLoggers } = await import('@sim/testing/mocks/logger.mock')
+  const { inspect } = await import('node:util')
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            error: { message: 'FICTIVE_NATIVE_LOG_CANARY', type: 'invalid_request_error' },
+          }),
+          { status: 400, headers: { 'content-type': 'application/json' } }
+        )
+    )
+  )
+  await collect(
+    runCatalogProvider({ ...scope, provider: 'openai', request: modelRequest }).stream
+  ).catch(() => {})
+  const calls = getAllMockLoggers().flatMap((l) => [...l.error.mock.calls, ...l.warn.mock.calls])
+  expect(inspect(calls, { depth: 8 })).not.toContain('FICTIVE_NATIVE_LOG_CANARY')
 })

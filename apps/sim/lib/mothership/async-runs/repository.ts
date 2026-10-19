@@ -1,3 +1,4 @@
+// Modified by Memlia: atomically bind proposal consent to server-owned JSONB and expiry.
 import { SpanKind, trace } from '@opentelemetry/api'
 import { db } from '@sim/db'
 import {
@@ -2163,8 +2164,25 @@ export async function replaceTerminalAsyncToolCallResult(input: {
  */
 export async function recordToolPermissionDecision(
   toolCallId: string,
-  decision: CopilotToolPermissionDecision
+  decision: CopilotToolPermissionDecision,
+  proposalFence?: { expectedArgsJSONB: string; expiresAt: Date }
 ) {
+  // Copy primitives before tracing/await; this optional fence is server-owned,
+  // not an authority object accepted from a model or HTTP payload.
+  let fence: { args: string; expiresAt: Date } | undefined
+  if (proposalFence !== undefined) {
+    try {
+      const args = proposalFence.expectedArgsJSONB
+      const expires = proposalFence.expiresAt.getTime()
+      if (typeof args !== 'string' || args.length > 10 * 1024 * 1024 || !Number.isFinite(expires))
+        throw new Error()
+      const parsed = JSON.parse(args)
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error()
+      fence = { args, expiresAt: new Date(expires) }
+    } catch {
+      throw new Error('proposal_decision_fence_invalid')
+    }
+  }
   return await withDbSpan(
     TraceSpan.CopilotAsyncRunsMarkAsyncToolStatus,
     'UPDATE',
@@ -2174,6 +2192,42 @@ export async function recordToolPermissionDecision(
       [TraceAttr.CopilotAsyncToolPermissionDecision]: decision,
     },
     async () => {
+      if (fence) {
+        const expected = fence
+        return db.transaction(async (tx) => {
+          // UPDATE may evaluate its predicate and timestamp before waiting for a
+          // row lock. Acquire that lock first, then evaluate expiry in a fresh
+          // statement in the same transaction, without accepting an older clock.
+          const [locked] = await tx
+            .select({ toolCallId: copilotAsyncToolCalls.toolCallId })
+            .from(copilotAsyncToolCalls)
+            .where(eq(copilotAsyncToolCalls.toolCallId, toolCallId))
+            .for('update')
+          if (!locked) return null
+          const [row] = await tx
+            .update(copilotAsyncToolCalls)
+            .set({
+              permissionDecision: decision,
+              permissionDecidedAt: sql`clock_timestamp()`,
+              pickupDeadlineAt: sql`CASE WHEN ${copilotAsyncToolCalls.permissionRequestedAt} IS NULL THEN ${copilotAsyncToolCalls.pickupDeadlineAt} END`,
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(copilotAsyncToolCalls.toolCallId, toolCallId),
+                isNull(copilotAsyncToolCalls.permissionDecision),
+                eq(copilotAsyncToolCalls.status, ASYNC_TOOL_STATUS.pending),
+                sql`${copilotAsyncToolCalls.args} = ${expected.args}::jsonb`,
+                eq(copilotAsyncToolCalls.executionDeadlineAt, expected.expiresAt),
+                sql`${copilotAsyncToolCalls.executionDeadlineAt} > clock_timestamp()`,
+                isNull(copilotAsyncToolCalls.executionStartedAt),
+                eq(copilotAsyncToolCalls.toolName, 'memlia_apply_workflow_proposal')
+              )
+            )
+            .returning()
+          return row ?? null
+        })
+      }
       const now = new Date()
       const [row] = await db
         .update(copilotAsyncToolCalls)

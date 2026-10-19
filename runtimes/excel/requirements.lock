@@ -1,0 +1,49 @@
+# Copyright (c) 2026 Memlia. All rights reserved.
+# Third-party wheels only. memlia-contracts and memlia-excel MUST be built locally.
+# Profiles: linux-cp312-x86_64, macos-cp312-arm64. No sdist, no extras.
+# Format: wheel <profile> <filename> <sha256> ; used by scripts/package.py.
+# wheel linux-cp312-x86_64 attrs-26.1.0-py3-none-any.whl c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309
+# wheel macos-cp312-arm64 attrs-26.1.0-py3-none-any.whl c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309
+attrs==26.1.0 --hash=sha256:c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309
+# wheel linux-cp312-x86_64 defusedxml-0.7.1-py2.py3-none-any.whl a352e7e428770286cc899e2542b6cdaedb2b4953ff269a210103ec58f6198a61
+# wheel macos-cp312-arm64 defusedxml-0.7.1-py2.py3-none-any.whl a352e7e428770286cc899e2542b6cdaedb2b4953ff269a210103ec58f6198a61
+defusedxml==0.7.1 --hash=sha256:a352e7e428770286cc899e2542b6cdaedb2b4953ff269a210103ec58f6198a61
+# wheel linux-cp312-x86_64 et_xmlfile-2.0.0-py3-none-any.whl 7a91720bc756843502c3b7504c77b8fe44217c85c537d85037f0f536151b2caa
+# wheel macos-cp312-arm64 et_xmlfile-2.0.0-py3-none-any.whl 7a91720bc756843502c3b7504c77b8fe44217c85c537d85037f0f536151b2caa
+et-xmlfile==2.0.0 --hash=sha256:7a91720bc756843502c3b7504c77b8fe44217c85c537d85037f0f536151b2caa
+# wheel linux-cp312-x86_64 jsonschema_specifications-2025.9.1-py3-none-any.whl 98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe
+# wheel macos-cp312-arm64 jsonschema_specifications-2025.9.1-py3-none-any.whl 98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe
+jsonschema-specifications==2025.9.1 --hash=sha256:98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe
+# wheel linux-cp312-x86_64 jsonschema-4.26.0-py3-none-any.whl d489f15263b8d200f8387e64b4c3a75f06629559fb73deb8fdfb525f2dab50ce
+# wheel macos-cp312-arm64 jsonschema-4.26.0-py3-none-any.whl d489f15263b8d200f8387e64b4c3a75f06629559fb73deb8fdfb525f2dab50ce
+jsonschema==4.26.0 --hash=sha256:d489f15263b8d200f8387e64b4c3a75f06629559fb73deb8fdfb525f2dab50ce
+# wheel linux-cp312-x86_64 openpyxl-3.1.5-py2.py3-none-any.whl 5282c12b107bffeef825f4617dc029afaf41d0ea60823bbb665ef3079dc79de2
+# wheel macos-cp312-arm64 openpyxl-3.1.5-py2.py3-none-any.whl 5282c12b107bffeef825f4617dc029afaf41d0ea60823bbb665ef3079dc79de2
+openpyxl==3.1.5 --hash=sha256:5282c12b107bffeef825f4617dc029afaf41d0ea60823bbb665ef3079dc79de2
+# wheel linux-cp312-x86_64 packaging-26.3-py3-none-any.whl d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
+# wheel macos-cp312-arm64 packaging-26.3-py3-none-any.whl d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
+packaging==26.3 --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
+# wheel linux-cp312-x86_64 pip-25.0-py3-none-any.whl b6eb97a803356a52b2dd4bb73ba9e65b2ba16caa6bcb25a7497350a4e5859b65
+# wheel macos-cp312-arm64 pip-25.0-py3-none-any.whl b6eb97a803356a52b2dd4bb73ba9e65b2ba16caa6bcb25a7497350a4e5859b65
+pip==25.0 --hash=sha256:b6eb97a803356a52b2dd4bb73ba9e65b2ba16caa6bcb25a7497350a4e5859b65
+# wheel linux-cp312-x86_64 polars_runtime_32-2.0.0-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl 0d6ac584ea2b38913784db943879412380d92e28ab9cb88e20a77ba71ba3f911
+# wheel macos-cp312-arm64 polars_runtime_32-2.0.0-cp310-abi3-macosx_11_0_arm64.whl 7012d8a0201bd95638545ce8f256c0efe2c5cab0f806eb043021dddde5a9498b
+polars-runtime-32==2.0.0 --hash=sha256:0d6ac584ea2b38913784db943879412380d92e28ab9cb88e20a77ba71ba3f911 --hash=sha256:7012d8a0201bd95638545ce8f256c0efe2c5cab0f806eb043021dddde5a9498b
+# wheel linux-cp312-x86_64 polars-2.0.0-py3-none-any.whl 35d62f3541b7a6d4c360a2e2f07fccc0c2bcbd33b0ea51c83a25417a47a3f3ad
+# wheel macos-cp312-arm64 polars-2.0.0-py3-none-any.whl 35d62f3541b7a6d4c360a2e2f07fccc0c2bcbd33b0ea51c83a25417a47a3f3ad
+polars==2.0.0 --hash=sha256:35d62f3541b7a6d4c360a2e2f07fccc0c2bcbd33b0ea51c83a25417a47a3f3ad
+# wheel linux-cp312-x86_64 referencing-0.37.0-py3-none-any.whl 381329a9f99628c9069361716891d34ad94af76e461dcb0335825aecc7692231
+# wheel macos-cp312-arm64 referencing-0.37.0-py3-none-any.whl 381329a9f99628c9069361716891d34ad94af76e461dcb0335825aecc7692231
+referencing==0.37.0 --hash=sha256:381329a9f99628c9069361716891d34ad94af76e461dcb0335825aecc7692231
+# wheel linux-cp312-x86_64 rpds_py-2026.9.1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl addeda51556dac7c1a2f14cda62db8b621cd12afba3091d03a96c72932387eab
+# wheel macos-cp312-arm64 rpds_py-2026.9.1-cp312-cp312-macosx_11_0_arm64.whl e21c1429e205828ea886a2293a4a2c8e01f4c25d9893ca330e97a6cf73f52e7b
+rpds-py==2026.9.1 --hash=sha256:addeda51556dac7c1a2f14cda62db8b621cd12afba3091d03a96c72932387eab --hash=sha256:e21c1429e205828ea886a2293a4a2c8e01f4c25d9893ca330e97a6cf73f52e7b
+# wheel linux-cp312-x86_64 setuptools-80.9.0-py3-none-any.whl 062d34222ad13e0cc312a4c02d73f059e86a4acbfbdea8f8f76b28c99f306922
+# wheel macos-cp312-arm64 setuptools-80.9.0-py3-none-any.whl 062d34222ad13e0cc312a4c02d73f059e86a4acbfbdea8f8f76b28c99f306922
+setuptools==80.9.0 --hash=sha256:062d34222ad13e0cc312a4c02d73f059e86a4acbfbdea8f8f76b28c99f306922
+# wheel linux-cp312-x86_64 typing_extensions-4.16.0-py3-none-any.whl 481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8
+# wheel macos-cp312-arm64 typing_extensions-4.16.0-py3-none-any.whl 481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8
+typing-extensions==4.16.0 --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8
+# wheel linux-cp312-x86_64 wheel-0.45.1-py3-none-any.whl 708e7481cc80179af0e556bbf0cc00b8444c7321e2700b8d8580231d13017248
+# wheel macos-cp312-arm64 wheel-0.45.1-py3-none-any.whl 708e7481cc80179af0e556bbf0cc00b8444c7321e2700b8d8580231d13017248
+wheel==0.45.1 --hash=sha256:708e7481cc80179af0e556bbf0cc00b8444c7321e2700b8d8580231d13017248
