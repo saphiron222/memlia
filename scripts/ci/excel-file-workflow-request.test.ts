@@ -37,7 +37,8 @@ const storage: RateLimitStorageAdapter = {
 }
 const { setStorageAdapter } = await import('../../apps/sim/lib/core/rate-limiter/storage/factory')
 setStorageAdapter(storage)
-const { dispatchInProcessV2Request } = await import('../../apps/sim/lib/api/server/routes/in-process-transport')
+const { dispatchInProcessV2Request, matchV2Route } = await import('../../apps/sim/lib/api/server/routes/in-process-transport')
+const { v2GetFileContract } = await import('../../apps/sim/lib/api/contracts/v2/files')
 const { NextRequest: NativeRequest } = await import('next/server')
 
 // Evaluate the existing fixture function verbatim, rather than a second request builder.
@@ -73,6 +74,52 @@ for (const ip of [null, 'not-an-ip']) {
     expect(calls).toEqual([])
   })
 }
+
+
+test('the fixture source readback selects the native scoped JSON metadata contract', () => {
+  // Evaluate the URL expression actually consumed by data(), not a second route builder.
+  const readback = source.match(/^    const original = await data\((.+)\)$/m)
+  if (!readback) throw Error('fixture_metadata_readback_not_found')
+  const uploaded = { id: '00000000-0000-4000-8000-000000000001' }
+  const own = { id: '00000000-0000-4000-8000-000000000002' }
+  const path = new Function('uploaded', 'own', 'return ' + readback[1])(uploaded, own)
+  const url = new URL(path, 'http://localhost:3000')
+  const route = matchV2Route(url.pathname)
+  expect(route?.pattern).toBe('/api/v2/files/{fileId}/metadata')
+  expect(route?.params).toEqual({ fileId: uploaded.id })
+  expect(v2GetFileContract.method).toBe('GET')
+  expect(v2GetFileContract.response.mode).toBe('json')
+  expect(v2GetFileContract.query.parse(Object.fromEntries(url.searchParams))).toEqual({
+    workspaceId: own.id, scope: 'active',
+  })
+  expect(v2GetFileContract.query.safeParse({}).success).toBe(false)
+})
+
+
+test('recipe cleanup disposes the native MCP channels loaded by workspace lifecycle', async () => {
+  // REDIS_URL is absent: the native channel uses its synchronous EventEmitter fallback.
+  // This verifies disposal, not Redis transport or the historical process exit deadline.
+  const { mcpPubSub } = await import('../../apps/sim/lib/mcp/pubsub')
+  const { closeApplicationConnections } = await import('./excel-file-workflow')
+  if (!mcpPubSub) throw Error('native_mcp_channel_missing')
+  let toolsReceived = 0, workflowsReceived = 0
+  const unsubscribeTools = mcpPubSub.onToolsChanged(() => { toolsReceived += 1 })
+  const unsubscribeWorkflows = mcpPubSub.onWorkflowToolsChanged(() => { workflowsReceived += 1 })
+  const toolsEvent = { serverId: 'synthetic-excel-ci', serverName: 'Fixture',
+    workspaceId: 'synthetic-excel-ci', timestamp: 0 }
+  const workflowsEvent = { serverId: 'synthetic-excel-ci', workspaceId: 'synthetic-excel-ci' }
+  try {
+    mcpPubSub.publishToolsChanged(toolsEvent)
+    mcpPubSub.publishWorkflowToolsChanged(workflowsEvent)
+    expect(toolsReceived).toBe(1)
+    expect(workflowsReceived).toBe(1)
+    await closeApplicationConnections()
+    mcpPubSub.publishToolsChanged(toolsEvent)
+    mcpPubSub.publishWorkflowToolsChanged(workflowsEvent)
+    expect(toolsReceived).toBe(1)
+    expect(workflowsReceived).toBe(1)
+  } finally { unsubscribeTools(); unsubscribeWorkflows() }
+})
 
 afterAll(async () => {
   const { db } = await import('../../packages/db/index')

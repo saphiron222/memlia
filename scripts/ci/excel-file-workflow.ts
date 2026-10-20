@@ -169,7 +169,7 @@ async function main() {
     assertRecipe(content.length === file.size && content.toString('base64') === file.base64)
     checks.sameRecordedOutput = true
     stage = 'source_readback'
-    const original = await data('/api/v2/files/' + uploaded.id)
+    const original = await data('/api/v2/files/' + uploaded.id + '/metadata?workspaceId=' + own.id)
     assertRecipe(original.id === uploaded.id && original.name === 'input.xlsx')
     // Real authenticated native file read, not a local pathname or a second transformation.
     const { readWorkspaceFileContent } = await import('../../apps/sim/lib/workspace-files/application/read-workspace-file-content')
@@ -225,12 +225,22 @@ async function main() {
         contentLength: Number(download.headers.get('content-length')), contentBase64: content.toString('base64') },
     }) + '\n', { mode: 0o600, flag: 'wx' })
   } finally {
-    try {
-      const { closeRedisConnection } = await import('../../apps/sim/lib/core/config/redis')
-      const { chatPubSub } = await import('../../apps/sim/lib/mothership/chat-status')
-      chatPubSub?.dispose()
-      await closeRedisConnection()
-    } finally { await db.$client.end({ timeout: 2 }) }
+    await closeApplicationConnections()
+  }
+}
+
+/** The isolated recipe process owns these imported channels and its database pool. */
+export async function closeApplicationConnections() {
+  try {
+    const { closeRedisConnection } = await import('../../apps/sim/lib/core/config/redis')
+    const { chatPubSub } = await import('../../apps/sim/lib/mothership/chat-status')
+    const { mcpPubSub } = await import('../../apps/sim/lib/mcp/pubsub')
+    chatPubSub?.dispose()
+    mcpPubSub?.dispose()
+    await closeRedisConnection()
+  } finally {
+    const { db } = await import('../../packages/db/index')
+    await db.$client.end({ timeout: 2 })
   }
 }
 
