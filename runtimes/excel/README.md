@@ -64,6 +64,12 @@ par défaut. Ces petites bornes sont celles du noyau, pas une capacité commerci
 qualifiée. Liens externes, macros, parties inconnues, formules, noms définis (y compris internes), objets workbook et feuille
 non qualifiés sont refusés ; aucun cache de formule n’est pris comme résultat.
 
+L'archive doit contenir ses quatre parties structurelles du profil : types de
+contenu, relations racine, workbook et relations du workbook. Une partie absente
+est refusée avant openpyxl. Les exceptions ZIP/XML prises en charge deviennent
+`invalid_archive` sans cause ni contexte natif conservé ; un identifiant privé
+de DTD ne doit pas apparaître dans la chaîne d'erreur.
+
 `write_table(frame, sheet=...)` crée un nouveau classeur en mémoire et le relit
 avant retour. Les Decimal sont **des cellules texte exactes**, les chaînes `=...`
 restent littérales, et les textes trop longs sont refusés. Ce choix préserve les

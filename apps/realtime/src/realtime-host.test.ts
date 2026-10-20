@@ -8,6 +8,16 @@ const observed = vi.hoisted(() => ({
   hosts: [] as unknown[],
 }))
 
+const teardown = vi.hoisted(() => ({
+  revalidation: vi.fn(() => {}),
+  flush: vi.fn(async () => {}),
+  transport: vi.fn(async () => {}),
+  connections: vi.fn(async () => {}),
+  rooms: vi.fn(async () => {}),
+  adapter: vi.fn(async () => {}),
+  store: vi.fn(async () => {}),
+}))
+
 // Keep the HTTP listener real. Refuse non-loopback binds in the test itself,
 // including the historical hard-coded 0.0.0.0 path exercised by the RED.
 vi.mock('http', async (importOriginal) => {
@@ -36,28 +46,35 @@ vi.mock('@sim/logger', () => ({
   createLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn() }),
 }))
 vi.mock('@/config/socket', () => ({
-  createSocketIOServer: async () => ({ use: vi.fn(), on: vi.fn(), engine: { on: vi.fn() } }),
-  shutdownSocketIOAdapter: vi.fn(),
+  createSocketIOServer: async () => ({
+    use: vi.fn(),
+    on: vi.fn(),
+    engine: { on: vi.fn() },
+    close: teardown.transport,
+  }),
+  shutdownSocketIOAdapter: teardown.adapter,
 }))
 vi.mock('@/database/preflight', () => ({ assertSchemaCompatibility: vi.fn() }))
 vi.mock('@/access-revalidation', () => ({
-  startAccessRevalidationSweep: () => ({ stop: vi.fn() }),
+  startAccessRevalidationSweep: () => ({ stop: teardown.revalidation }),
 }))
 vi.mock('@/handlers', () => ({ setupAllHandlers: vi.fn() }))
-vi.mock('@/handlers/connection', () => ({ waitForConnectionCleanup: vi.fn() }))
+vi.mock('@/handlers/connection', () => ({ waitForConnectionCleanup: teardown.connections }))
 vi.mock('@/handlers/file-doc', () => ({
-  flushAllFileDocRooms: vi.fn(),
+  flushAllFileDocRooms: teardown.flush,
   registerFileDocPresenceRelay: vi.fn(),
 }))
 vi.mock('@/handlers/file-doc-store', () => ({
   initFileDocStore: vi.fn(),
-  getFileDocStore: () => ({ shutdown: vi.fn() }),
+  getFileDocStore: () => ({ shutdown: teardown.store }),
 }))
 vi.mock('@/middleware/auth', () => ({ authenticateSocket: vi.fn() }))
 vi.mock('@/rooms', () => {
   class RoomManager {
     async initialize() {}
-    async shutdown() {}
+    async shutdown() {
+      await teardown.rooms()
+    }
   }
   return { MemoryRoomManager: RoomManager, RedisRoomManager: RoomManager }
 })
@@ -84,6 +101,7 @@ beforeEach(() => {
   vi.resetModules()
   observed.servers.length = 0
   observed.hosts.length = 0
+  for (const port of Object.values(teardown)) port.mockReset()
   vi.stubEnv('REALTIME_HOST', undefined)
   vi.stubEnv('REDIS_URL', undefined)
   vi.stubEnv('DISABLE_AUTH', undefined)
@@ -105,6 +123,131 @@ beforeEach(() => {
       (listener) => process.removeListener('SIGTERM', listener)
     ),
   ]
+})
+
+async function ownShutdownListener() {
+  const before = new Set(process.listeners('SIGTERM'))
+  await import('./index')
+  await vi.waitFor(() =>
+    expect(process.listeners('SIGTERM').filter((listener) => !before.has(listener))).toHaveLength(1)
+  )
+  return process.listeners('SIGTERM').find((listener) => !before.has(listener))!
+}
+
+describe('realtime shutdown result', () => {
+  it('exits successfully only after every owned cleanup step completes', async () => {
+    const shutdown = await ownShutdownListener()
+    const exit = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+    vi.useFakeTimers()
+    try {
+      await shutdown('SIGTERM')
+      expect(exit).toHaveBeenCalledExactlyOnceWith(0)
+      expect(teardown.flush).toHaveBeenCalledTimes(2)
+      expect(teardown.connections).toHaveBeenCalledOnce()
+      expect(teardown.rooms).toHaveBeenCalledOnce()
+      expect(teardown.adapter).toHaveBeenCalledOnce()
+      expect(teardown.store).toHaveBeenCalledOnce()
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.clearAllTimers()
+      vi.useRealTimers()
+    }
+  })
+
+  it.each(['flush', 'transport', 'connections', 'rooms', 'adapter', 'store'] as const)(
+    'retains failure of %s while attempting the remaining owned cleanup',
+    async (stage) => {
+      const shutdown = await ownShutdownListener()
+      teardown[stage].mockRejectedValueOnce(new Error('synthetic cleanup refusal'))
+      const exit = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+      vi.useFakeTimers()
+      try {
+        await shutdown('SIGTERM')
+        expect(exit).toHaveBeenCalledExactlyOnceWith(1)
+        expect(teardown.connections).toHaveBeenCalledOnce()
+        expect(teardown.flush).toHaveBeenCalledTimes(2)
+        expect(teardown.rooms).toHaveBeenCalledOnce()
+        expect(teardown.adapter).toHaveBeenCalledOnce()
+        expect(teardown.store).toHaveBeenCalledOnce()
+        expect(teardown.connections.mock.invocationCallOrder[0]).toBeLessThan(
+          teardown.store.mock.invocationCallOrder[0]
+        )
+        expect(vi.getTimerCount()).toBe(0)
+      } finally {
+        vi.clearAllTimers()
+        vi.useRealTimers()
+      }
+    }
+  )
+
+  it('still attempts transport, drain and stores when stopping the sweep throws', async () => {
+    const shutdown = await ownShutdownListener()
+    teardown.revalidation.mockImplementationOnce(() => {
+      throw new Error('synthetic sweep stop refusal')
+    })
+    const exit = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+    vi.useFakeTimers()
+    try {
+      await shutdown('SIGTERM')
+      expect(exit).toHaveBeenCalledExactlyOnceWith(1)
+      expect(teardown.transport).toHaveBeenCalledOnce()
+      expect(teardown.connections).toHaveBeenCalledOnce()
+      expect(teardown.store).toHaveBeenCalledOnce()
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.clearAllTimers()
+      vi.useRealTimers()
+    }
+  })
+
+  it('retains a final document flush failure after a successful initial flush', async () => {
+    const shutdown = await ownShutdownListener()
+    teardown.flush
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('synthetic final flush refusal'))
+    const exit = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+    vi.useFakeTimers()
+    try {
+      await shutdown('SIGTERM')
+      expect(exit).toHaveBeenCalledExactlyOnceWith(1)
+      expect(teardown.flush).toHaveBeenCalledTimes(2)
+      expect(teardown.rooms).toHaveBeenCalledOnce()
+      expect(teardown.adapter).toHaveBeenCalledOnce()
+      expect(teardown.store).toHaveBeenCalledOnce()
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.clearAllTimers()
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps a second signal from starting another cleanup while the first flush is pending', async () => {
+    const shutdown = await ownShutdownListener()
+    let release!: () => void
+    const flushing = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    teardown.flush.mockReturnValueOnce(flushing)
+    const exit = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never)
+    vi.useFakeTimers()
+    try {
+      const pending = shutdown('SIGTERM')
+      await shutdown('SIGINT')
+      expect(teardown.revalidation).toHaveBeenCalledOnce()
+      expect(teardown.flush).toHaveBeenCalledOnce()
+      expect(exit).not.toHaveBeenCalled()
+      release()
+      await pending
+      expect(exit).toHaveBeenCalledExactlyOnceWith(0)
+      expect(teardown.transport).toHaveBeenCalledOnce()
+      expect(teardown.flush).toHaveBeenCalledTimes(2)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      release()
+      vi.clearAllTimers()
+      vi.useRealTimers()
+    }
+  })
 })
 
 afterEach(async () => {

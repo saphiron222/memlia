@@ -1192,6 +1192,16 @@
         255
       ],
       "reason": "Fixture CI Memlia native, source exacte uniquement : createRequire('/work/packages/db/package.json') résout le littéral postgres ; createRequire('/work/apps/sim/package.json') résout le littéral better-auth/crypto ; le second chargeur DB résout encore postgres. Packages existants verrouillés postgres3.4.9 (Unlicense) et better-auth1.6.27 (MIT), aucune cible issue d’une entrée utilisateur ni EE. Les imports des fonctions produit restent littéraux et contrôlés normalement. Cette revue de trois expressions exactes n’admet ni code généré, artefact, nouvelle cible ou modification future du fichier ; qualification réelle PostgreSQL/Chromium distincte."
+    },
+    {
+      "path": "scripts/ci/linux-chat-fixture.ts",
+      "sha256": "7a1a3edc4048240ffab1dd86c096a784e4c7560d935d3ba60dfd6c7bfd8687d7",
+      "lines": [
+        50,
+        253,
+        255
+      ],
+      "reason": "Fixture CI Memlia native, source exacte uniquement : createRequire('/work/packages/db/package.json') résout le littéral postgres ; createRequire('/work/apps/sim/package.json') résout le littéral better-auth/crypto ; le second chargeur DB résout encore postgres. Packages existants verrouillés postgres3.4.9 (Unlicense) et better-auth1.6.27 (MIT), aucune cible issue d’une entrée utilisateur ni EE. Les imports des fonctions produit restent littéraux et contrôlés normalement. Cette revue de trois expressions exactes n’admet ni code généré, artefact, nouvelle cible ou modification future du fichier ; qualification réelle PostgreSQL/Chromium distincte."
     }
   ]
 }

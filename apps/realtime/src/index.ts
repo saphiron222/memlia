@@ -123,6 +123,7 @@ async function main() {
     // Redis quit (which throws "The client is closed").
     if (shuttingDown) return
     shuttingDown = true
+    let shutdownFailed = false
     logger.info('Shutting down Socket.IO server...')
 
     const shutdownTimer = setTimeout(() => {
@@ -130,7 +131,12 @@ async function main() {
       process.exit(1)
     }, SHUTDOWN_TIMEOUT_MS)
 
-    accessRevalidation.stop()
+    try {
+      accessRevalidation.stop()
+    } catch (error) {
+      shutdownFailed = true
+      logger.error('Error stopping access revalidation on shutdown:', error)
+    }
 
     // Flush open collaborative docs to durable markdown BEFORE tearing down Redis/the store — the
     // per-socket disconnect flush is fire-and-forget and would race process exit.
@@ -138,40 +144,63 @@ async function main() {
       await flushAllFileDocRooms()
       logger.info('Flushed open collaborative documents')
     } catch (error) {
+      shutdownFailed = true
       logger.error('Error flushing collaborative documents on shutdown:', error)
     }
 
     /** Transport closure permits reconnection; a namespace DISCONNECT intentionally does not. */
     try {
       await io.close()
+    } catch (error) {
+      shutdownFailed = true
+      logger.error('Error closing Socket.IO transport on shutdown:', error)
+    }
+
+    // A transport-close refusal must not skip pending handler drain or the final
+    // document flush. Attempt each before closing their backing store.
+    try {
       await waitForConnectionCleanup()
+    } catch (error) {
+      shutdownFailed = true
+      logger.error('Error draining socket connections on shutdown:', error)
+    }
+
+    try {
       await flushAllFileDocRooms()
     } catch (error) {
-      logger.error('Error draining socket connections on shutdown:', error)
+      shutdownFailed = true
+      logger.error('Error flushing collaborative documents after drain:', error)
     }
 
     try {
       await roomManager.shutdown()
       logger.info('RoomManager shutdown complete')
     } catch (error) {
+      shutdownFailed = true
       logger.error('Error during RoomManager shutdown:', error)
     }
 
     try {
       await shutdownSocketIOAdapter()
     } catch (error) {
+      shutdownFailed = true
       logger.error('Error during Socket.IO adapter shutdown:', error)
     }
 
     try {
       await getFileDocStore().shutdown()
     } catch (error) {
+      shutdownFailed = true
       logger.error('Error during FileDocStore shutdown:', error)
     }
 
     clearTimeout(shutdownTimer)
-    logger.info('Socket.IO server closed')
-    process.exit(0)
+    if (shutdownFailed) {
+      logger.error('Socket.IO server shutdown incomplete')
+    } else {
+      logger.info('Socket.IO server closed')
+    }
+    process.exit(shutdownFailed ? 1 : 0)
   }
 
   process.on('SIGINT', shutdown)

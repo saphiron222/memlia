@@ -110,7 +110,7 @@ jobs:
           import json,os,stat
           from pathlib import Path
           root=Path(os.environ['RUNNER_TEMP'])/'memlia-metrics'
-          names=['chat-ui','ui-readiness','ui-service-web','ui-service-realtime','ui-service-cache']
+          names=['chat-ui','ui-readiness','ui-service-web','ui-service-realtime','ui-service-cache','ui-realtime-startup']
           for phase in ('bootstrap','migrate','grants','metadata','baseline','seed','stage','cleanup','readback'):
               names.extend(['ui-'+phase,'ui-'+phase+'-container'])
           for name in names:
@@ -119,7 +119,7 @@ jobs:
               try:
                   if root.is_symlink() or path.is_symlink(): raise ValueError()
                   fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
-                  bound=4096 if name in ('chat-ui','ui-readiness','ui-service-web','ui-service-realtime','ui-service-cache') else 131072
+                  bound=4096 if name in ('chat-ui','ui-readiness','ui-service-web','ui-service-realtime','ui-service-cache','ui-realtime-startup') else 131072
                   with os.fdopen(fd,'rb') as f:
                       if not stat.S_ISREG(os.fstat(f.fileno()).st_mode): raise ValueError()
                       data=f.read(bound+1)
@@ -137,6 +137,12 @@ jobs:
                       if receipt['httpStatus'] is not None and (type(receipt['httpStatus'])is not int or not 100<=receipt['httpStatus']<=599):raise ValueError()
                       if receipt['errorClass'] not in (None,'timeout','connection','http','os','unexpected'):raise ValueError()
                       if receipt['status']=='passed' and (receipt['service']!='web' or receipt['httpStatus']!=200 or receipt['errorClass']is not None):raise ValueError()
+                  elif name=='ui-realtime-startup':
+                      if type(receipt)is not dict or set(receipt)!={'phase','service','logStatus','lastMarker','errorCode'} or receipt['phase']!='ui-realtime-startup' or receipt['service']!='realtime':raise ValueError()
+                      if receipt['logStatus'] not in ('observed','empty','unavailable','refused'):raise ValueError()
+                      if receipt['lastMarker'] not in (None,'main_entered','redis_adapter_connecting','redis_adapter_ready','room_manager_connecting','room_manager_ready','file_doc_store_ready','schema_ready','listening'):raise ValueError()
+                      if receipt['errorCode'] not in (None,'ECONNREFUSED','ENOTFOUND','EAI_AGAIN','ETIMEDOUT','EACCES','ENOSPC','ERR_DLOPEN_FAILED','MODULE_NOT_FOUND'):raise ValueError()
+                      if (receipt['logStatus']=='observed') != (receipt['lastMarker'] is not None or receipt['errorCode'] is not None):raise ValueError()
                   elif name.startswith('ui-service-'):
                       if type(receipt)is not dict or set(receipt)!={'phase','service','running','oomKilled','errorPresent'} or receipt['phase']!='ui-service-state':raise ValueError()
                       if receipt['service'] not in ('web','realtime','cache') or name!='ui-service-'+receipt['service']:raise ValueError()

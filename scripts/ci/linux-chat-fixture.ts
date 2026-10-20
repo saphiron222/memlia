@@ -351,6 +351,26 @@ async function main() {
           await sql`select count(*)::int as n from "user" where id=${fixture.userId}`
         if (remaining[0].n !== 0) throw new Error('fixture_cleanup_refused')
         cleanupStage = 'residue_capture'
+        // The file trigger outlives its owner. Reconcile only this fixture's
+        // already-erased personal scopes, never dispatch or drain another owner.
+        const searchQueue = await sql`SELECT t.entity_type AS "entityType",t.entity_id AS "entityId",
+      md5(row_to_json(t)::text) AS digest,t.xmin::text AS version,
+      t.last_dispatched_at IS NULL AS undispatched,
+      (t.enqueued_at>=${start}::timestamptz AT TIME ZONE 'UTC'
+        AND t.updated_at>=${start}::timestamptz AT TIME ZONE 'UTC'
+        AND t.enqueued_at<=t.updated_at AND t.updated_at<=clock_timestamp() AT TIME ZONE 'UTC') AS fresh,
+      (NOT EXISTS (SELECT 1 FROM workspace w WHERE t.entity_type='workspace' AND w.id=t.entity_id)
+        AND NOT EXISTS (SELECT 1 FROM project p WHERE t.entity_type='project' AND p.id=t.entity_id)) AS "ownerAbsent"
+      FROM file_search_dispatch_queue t
+      WHERE ((t.entity_type='workspace' AND t.entity_id=ANY(${workspaceIds}::text[]))
+        OR (t.entity_type='project' AND t.entity_id=ANY(${projectIds}::text[])))
+      ORDER BY t.entity_type,t.entity_id LIMIT 17`
+        assertRecipe(searchQueue.length <= 16 && searchQueue.length <= workspaceIds.length + projectIds.length)
+        assertRecipe(searchQueue.every(row => row.undispatched === true && row.fresh === true
+          && row.ownerAbsent === true && /^[a-f0-9]{32}$/.test(row.digest) && /^[0-9]+$/.test(row.version)
+          && ((row.entityType === 'workspace' && workspaceIds.includes(row.entityId))
+            || (row.entityType === 'project' && projectIds.includes(row.entityId)))))
+        assertRecipe(new Set(searchQueue.map(row => JSON.stringify([row.entityType, row.entityId]))).size === searchQueue.length)
         const audit =
           await sql`SELECT t.id,md5(row_to_json(t)::text) AS digest,t.xmin::text AS version FROM audit_log t
       WHERE t.actor_email=${fixture.email} AND t.created_at>=${start}::timestamptz AT TIME ZONE 'UTC' LIMIT 33`
@@ -385,7 +405,7 @@ async function main() {
         assertRecipe(Object.values(residue).every((rows) => rows.length <= 32))
         writeFileSync(
           join(directory, 'residue-proof.private.json'),
-          JSON.stringify(residue) + '\n',
+          JSON.stringify({ ...residue, file_search_dispatch_queue: searchQueue }) + '\n',
           { mode: 0o600 }
         )
         const baseline = JSON.parse(readFileSync(join(directory, 'baseline.json'), 'utf8'))
@@ -407,6 +427,19 @@ async function main() {
               } else assertRecipe(result.length === 1)
               deleted += result.length
             }
+          }
+          for (const row of searchQueue) {
+            const result = await tx`DELETE FROM file_search_dispatch_queue t
+      WHERE t.entity_type=${row.entityType} AND t.entity_id=${row.entityId}
+      AND md5(row_to_json(t)::text)=${row.digest} AND t.xmin::text=${row.version}
+      AND t.last_dispatched_at IS NULL
+      AND t.enqueued_at>=${start}::timestamptz AT TIME ZONE 'UTC'
+      AND t.updated_at>=${start}::timestamptz AT TIME ZONE 'UTC'
+      AND NOT EXISTS (SELECT 1 FROM workspace w WHERE t.entity_type='workspace' AND w.id=t.entity_id)
+      AND NOT EXISTS (SELECT 1 FROM project p WHERE t.entity_type='project' AND p.id=t.entity_id)
+      RETURNING t.entity_id`
+            assertRecipe(result.length === 1)
+            deleted += result.length
           }
           cleanupStage = 'baseline_compare'
           cleanupIndex = -1

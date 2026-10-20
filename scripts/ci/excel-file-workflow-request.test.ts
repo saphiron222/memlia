@@ -211,3 +211,85 @@ test('the real nested connection close preserves its first failure before the da
     }
   }
 })
+
+function ownedSearchQueueFragments() {
+  const text = readFileSync(new URL('./linux-chat-fixture.ts', import.meta.url), 'utf8')
+  const captureStart = text.indexOf('        const searchQueue =')
+  const captureEnd = text.indexOf('        const audit =', captureStart)
+  const purgeStart = text.indexOf('          for (const row of searchQueue) {')
+  const purgeEnd = text.indexOf("          cleanupStage = 'baseline_compare'", purgeStart)
+  if (captureStart < 0 || captureEnd < 0 || purgeStart < 0 || purgeEnd < 0)
+    throw Error('owned_search_queue_fragments_missing')
+  const transpiler = new Bun.Transpiler({ loader: 'ts' })
+  const capture = transpiler.transformSync('async function invoke() {\n' +
+    text.slice(captureStart, captureEnd) + '\nreturn searchQueue;\n}')
+  const purge = transpiler.transformSync('async function invoke() { let deleted = 0;\n' +
+    text.slice(purgeStart, purgeEnd) + '\nreturn deleted;\n}')
+  const assertRecipe = (value: unknown) => { if (!value) throw Error('owned_fixture_cleanup_refused') }
+  return { capture, purge, assertRecipe }
+}
+
+test('owned search queue capture accepts only fresh undispatched rows of the captured fixture scopes', async () => {
+  // Execute the fixture fragments verbatim. The SQL boundary is doubled here;
+  // these tests do not qualify PostgreSQL triggers, ownership or CAS execution.
+  const { capture, assertRecipe } = ownedSearchQueueFragments()
+  const workspaceIds = ['owned-workspace'], projectIds = ['owned-project']
+  const row = { entityType: 'workspace', entityId: workspaceIds[0], digest: 'a'.repeat(32),
+    version: '42', fresh: true, undispatched: true, ownerAbsent: true }
+  const execute = (rows: unknown[]) => new Function('sql', 'workspaceIds', 'projectIds', 'start',
+    'assertRecipe', capture + '\nreturn invoke();')(
+      async (strings: TemplateStringsArray, ...values: unknown[]) => {
+        const query = strings.join('?')
+        expect(query).toContain('FROM file_search_dispatch_queue t')
+        expect(query).toContain("t.entity_type='workspace' AND t.entity_id=ANY(")
+        expect(query).toContain("t.entity_type='project' AND t.entity_id=ANY(")
+        expect(query).toContain('t.last_dispatched_at IS NULL')
+        expect(query).toContain('t.enqueued_at>=')
+        expect(query).toContain('t.updated_at>=')
+        expect(query).toContain('clock_timestamp()')
+        expect(query).toContain('NOT EXISTS')
+        expect(query).toContain('LIMIT 17')
+        expect(values).toContain(workspaceIds)
+        expect(values).toContain(projectIds)
+        return rows
+      }, workspaceIds, projectIds, '2026-10-20T00:00:00Z', assertRecipe)
+  await expect(execute([])).resolves.toEqual([])
+  await expect(execute([row, { ...row, entityType: 'project', entityId: projectIds[0] }]))
+    .resolves.toHaveLength(2)
+  for (const change of [
+    { entityType: 'other' }, { entityType: 'project' }, { entityId: 'unowned-workspace' },
+    { fresh: false }, { undispatched: false }, { ownerAbsent: false },
+    { digest: 'not-a-digest' }, { version: '42 OR true' },
+  ]) await expect(execute([{ ...row, ...change }])).rejects.toThrow('owned_fixture_cleanup_refused')
+  await expect(execute([row, row])).rejects.toThrow('owned_fixture_cleanup_refused')
+  await expect(execute(Array(17).fill(row))).rejects.toThrow('owned_fixture_cleanup_refused')
+})
+
+test('owned search queue purge requires the exact composite identity and version before the unchanged baseline', async () => {
+  const { purge, assertRecipe } = ownedSearchQueueFragments()
+  const row = { entityType: 'workspace', entityId: 'owned-workspace', digest: 'a'.repeat(32), version: '42' }
+  const start = '2026-10-20T00:00:00Z'
+  const execute = (returned: unknown[]) => new Function('tx', 'searchQueue', 'start',
+    'assertRecipe', purge + '\nreturn invoke();')(
+      async (strings: TemplateStringsArray, ...values: unknown[]) => {
+        const query = strings.join('?')
+        expect(query).toContain('DELETE FROM file_search_dispatch_queue t')
+        expect(query).toContain('t.entity_type=')
+        expect(query).toContain('t.entity_id=')
+        expect(query).toContain('md5(row_to_json(t)::text)=')
+        expect(query).toContain('t.xmin::text=')
+        expect(query).toContain('t.last_dispatched_at IS NULL')
+        expect(query).toContain('t.enqueued_at>=')
+        expect(query).toContain('t.updated_at>=')
+        expect(query).toContain('NOT EXISTS')
+        expect(query).toContain('FROM workspace')
+        expect(query).toContain('FROM project')
+        expect(values).toEqual([row.entityType, row.entityId, row.digest, row.version, start, start])
+        return returned
+      }, [row], start, assertRecipe)
+  await expect(execute([{ entity_id: row.entityId }])).resolves.toBe(1)
+  // Changed/missing/consumed rows refuse the whole cleanup transaction; never skip.
+  await expect(execute([])).rejects.toThrow('owned_fixture_cleanup_refused')
+  await expect(execute([{ entity_id: row.entityId }, { entity_id: row.entityId }]))
+    .rejects.toThrow('owned_fixture_cleanup_refused')
+})

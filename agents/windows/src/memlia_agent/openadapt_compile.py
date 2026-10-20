@@ -259,6 +259,7 @@ def compile_raw_recording(files: dict[str, bytes], *, name: str,
     temporary = None
     old_mask = None
     old_logging = logging.root.manager.disable
+    quiet_handler = None
     try:
         captured = _snapshot(files)  # Exact dict/str/immutable bytes, before any IO.
         valid_deadline = False
@@ -276,6 +277,10 @@ def compile_raw_recording(files: dict[str, bytes], *, name: str,
         _claim_worker()
         old_mask = os.umask(0o077)  # Process-owned worker only; restored even on refusal.
         logging.disable(logging.CRITICAL)
+        # Module-level logging calls can invoke basicConfig even while disabled.
+        # Keep them from retaining a StreamHandler on the temporary quiet stream.
+        quiet_handler = logging.NullHandler()
+        logging.root.addHandler(quiet_handler)
         with open(os.devnull, 'w', encoding='utf-8') as quiet, redirect_stdout(quiet), redirect_stderr(quiet):
             _images(captured)
             compile_recording, workflow_type = _runtime()
@@ -328,6 +333,9 @@ def compile_raw_recording(files: dict[str, bytes], *, name: str,
                 failure = 'compile_cleanup_failed'
         if old_mask is not None:
             os.umask(old_mask)
+        if quiet_handler is not None:
+            logging.root.removeHandler(quiet_handler)
+            quiet_handler.close()
         logging.disable(old_logging)
     # Delivery only after all cleanup. Interruptions remain BaseExceptions.
     if failure is None:

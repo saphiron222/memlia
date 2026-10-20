@@ -76,6 +76,38 @@ manifeste d'une seule release. Le préfixe est le registre/espace Memlia choisi
 par l'exploitation. Aucun `latest`, serveur propriétaire Copilot, Trigger.dev,
 MinIO obligatoire ou nouveau scheduler n'est ajouté.
 
+Avant tout démarrage ou changement de configuration, contrôler aussi le modèle
+résolu avec le précontrôle fourni. `compose config --quiet` vérifie la résolution,
+mais accepte par exemple une origine HTTP, une fausse empreinte ou le même rôle
+de base pour le web et realtime. Le contrôle suivant ne démarre aucun service :
+
+```sh
+docker compose --env-file deploy/memlia/.env -p memlia-cabinet \
+  -f deploy/memlia/compose.yaml config --format json | \
+  python3 -I -B deploy/memlia/preflight.py
+```
+
+Pour le profil Excel optionnel, ajouter `-f deploy/memlia/compose.excel.yaml`
+à **cette même commande Compose**, après les gates propres à ce profil. Arrêter
+le déploiement si le résultat est `refused` ou si l'une des commandes échoue.
+Ne pas copier le JSON résolu dans un fichier, un journal ou un `tee` : il contient
+les secrets. Seul le petit verdict du précontrôle, composé de codes fixes, peut
+être conservé. L'entrée est limitée à1Mio ; un flux vide/invalide est refusé.
+
+Le contrôle vérifie les origines HTTPS canoniques et identiques des consommateurs,
+la forme des références d'images et leur préfixe applicatif commun, les URL
+PostgreSQL, les noms de rôles distincts et une même base métier. Le transport
+pg-boss peut avoir sa propre base, avec un rôle dédié et la même URL côté web et
+worker. Les URL de ce profil n'acceptent pas de paramètres de query : ceux-ci
+peuvent surcharger les identifiants ou la destination selon le driver. Une
+extension de ce profil nécessiterait une analyse des options réellement utilisées.
+
+`configuration_valid` **ne prouve ni la provenance/droits des images, ni leurs
+révisions communes, ni les privilèges PostgreSQL effectifs, ni le TLS réel**.
+Les mêmes contrôles de release, droits DB, montage de policy, sauvegarde,
+restauration, démarrage et parcours métier restent obligatoires. Le précontrôle
+ne crée aucune admission et n'autorise pas automatiquement `up`.
+
 Le service nommé `redis` conserve les URL natives `redis://redis:6379` mais
 exécute Valkey 8.1.10-alpine. Son manifeste est
 `sha256:081c2f5cb575efc901aa80ff9cdbd1ec6a301682fd35e1ebb4b0990a4a4a8507`.

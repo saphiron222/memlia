@@ -108,7 +108,7 @@ PY
 import json,sys
 from pathlib import Path
 for path in sorted(Path(sys.argv[1]).glob('*.json')):
-    if path.name in ('chat-ui.json','ui-readiness.json','ui-service-web.json','ui-service-realtime.json','ui-service-cache.json'):
+    if path.name in ('chat-ui.json','ui-readiness.json','ui-service-web.json','ui-service-realtime.json','ui-service-cache.json','ui-realtime-startup.json'):
         import os,stat
         if Path(sys.argv[1]).is_symlink() or path.is_symlink(): raise SystemExit('Invalid UI receipt')
         fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
@@ -130,6 +130,12 @@ for path in sorted(Path(sys.argv[1]).glob('*.json')):
             if receipt['httpStatus'] is not None and (type(receipt['httpStatus'])is not int or not 100<=receipt['httpStatus']<=599):raise SystemExit('Invalid UI receipt')
             if receipt['errorClass'] not in (None,'timeout','connection','http','os','unexpected'):raise SystemExit('Invalid UI receipt')
             if receipt['status']=='passed' and (receipt['service']!='web' or receipt['httpStatus']!=200 or receipt['errorClass']is not None):raise SystemExit('Invalid UI receipt')
+        elif path.name=='ui-realtime-startup.json':
+            if set(receipt)!={'phase','service','logStatus','lastMarker','errorCode'} or receipt['phase']!='ui-realtime-startup' or receipt['service']!='realtime':raise SystemExit('Invalid UI receipt')
+            if receipt['logStatus'] not in ('observed','empty','unavailable','refused'):raise SystemExit('Invalid UI receipt')
+            if receipt['lastMarker'] not in (None,'main_entered','redis_adapter_connecting','redis_adapter_ready','room_manager_connecting','room_manager_ready','file_doc_store_ready','schema_ready','listening'):raise SystemExit('Invalid UI receipt')
+            if receipt['errorCode'] not in (None,'ECONNREFUSED','ENOTFOUND','EAI_AGAIN','ETIMEDOUT','EACCES','ENOSPC','ERR_DLOPEN_FAILED','MODULE_NOT_FOUND'):raise SystemExit('Invalid UI receipt')
+            if (receipt['logStatus']=='observed') != (receipt['lastMarker'] is not None or receipt['errorCode'] is not None):raise SystemExit('Invalid UI receipt')
         else:
             if set(receipt)!={'phase','service','running','oomKilled','errorPresent'} or receipt['phase']!='ui-service-state':raise SystemExit('Invalid UI receipt')
             if receipt['service'] not in ('web','realtime','cache') or path.name!='ui-service-'+receipt['service']+'.json':raise SystemExit('Invalid UI receipt')
@@ -370,7 +376,7 @@ env('ui-grants',{**base,'RECIPE_ADMIN_URL':f'postgres://postgres:{admin}@databas
 env('ui-migrate',{**base,'DATABASE_URL':url('migrate'),'MIGRATION_DATABASE_URL':url('migrate')})
 env('ui-metadata',{**base,'MIGRATION_DATABASE_URL':url('migrate')})
 for name in ('ui-baseline','ui-readback','ui-seed','ui-cleanup','ui-web'):env(name,shared)
-env('ui-realtime',{**base,'DATABASE_URL':url('realtime'),'DATABASE_URL_REALTIME':url('realtime'),'SIM_DB_ROLE':'realtime','BETTER_AUTH_SECRET':shared['BETTER_AUTH_SECRET'],'INTERNAL_API_SECRET':shared['INTERNAL_API_SECRET'],'BETTER_AUTH_URL':shared['BETTER_AUTH_URL'],'NEXT_PUBLIC_APP_URL':'http://web:3000','ALLOWED_ORIGINS':'http://localhost:3000','DISABLE_AUTH':'false','REDIS_URL':shared['REDIS_URL'],'PORT':'3002','REALTIME_HOST':'0.0.0.0'})
+env('ui-realtime',{**base,'DATABASE_URL':url('realtime'),'DATABASE_URL_REALTIME':url('realtime'),'SIM_DB_ROLE':'realtime','BETTER_AUTH_SECRET':shared['BETTER_AUTH_SECRET'],'INTERNAL_API_SECRET':shared['INTERNAL_API_SECRET'],'BETTER_AUTH_URL':shared['BETTER_AUTH_URL'],'NEXT_PUBLIC_APP_URL':'http://web:3000','ALLOWED_ORIGINS':'http://localhost:3000','DISABLE_AUTH':'false','REDIS_URL':shared['REDIS_URL'],'PORT':'3002','REALTIME_HOST':'0.0.0.0','LOG_LEVEL':'INFO'})
 fixture={'userId':str(uuid.uuid4()),'accountId':str(uuid.uuid4()),'statsId':str(uuid.uuid4()),'email':'ci-'+uuid.uuid4().hex+'@example.invalid','password':secrets.token_urlsafe(24),'origin':'http://localhost:3000','realtimeOrigin':'http://localhost:3002','socketBucketKeys':[]}
 (d/'credentials.private.json').write_text(json.dumps(fixture)+'\n')
 (p/'ui-policy.json').write_text('{}\n')
@@ -528,8 +534,47 @@ ui_stop_owned() {
   local name="$1" ok=1
   ui_owns "$name" || return 1
   # An owned service that already died/OOMed cannot become a successful journey.
-  ui_docker inspect --format '{{json .State}}' "$name" > "$private/ui-state.json" || ok=0
   local mode="${name#"$prefix-ui-"}"
+  if [[ "$mode" == realtime ]]; then
+    local collected=0
+    # One bounded, non-following read of this owned service; never publish its raw logs.
+    if (set -C; ui_docker logs --tail 200 "$name" > "$private/ui-realtime-startup.private.log" 2>&1) 2>/dev/null; then collected=1; fi
+    python3 - "$private/ui-realtime-startup.private.log" "$metrics/ui-realtime-startup.json" "$collected" <<'PYSTARTUP' || ok=0
+import json,os,stat,sys
+from pathlib import Path
+receipt={'phase':'ui-realtime-startup','service':'realtime','logStatus':'unavailable','lastMarker':None,'errorCode':None}
+markers={
+    ('CollaborativeSocketServer','Starting Socket.IO server...'):'main_entered',
+    ('SocketIOConfig','Configuring Socket.IO Redis adapter...'):'redis_adapter_connecting',
+    ('SocketIOConfig','Socket.IO Redis adapter connected - cross-pod broadcasting enabled'):'redis_adapter_ready',
+    ('CollaborativeSocketServer','Initializing Redis-backed RoomManager for multi-pod support'):'room_manager_connecting',
+    ('RedisRoomManager','RedisRoomManager connected to Redis and scripts loaded'):'room_manager_ready',
+    ('FileDocStore','FileDocStore ready — shared Yjs backend over Redis Streams enabled'):'file_doc_store_ready',
+    ('SocketPreflight','Schema-compatibility check passed'):'schema_ready',
+    ('CollaborativeSocketServer','Socket.IO server running on port 3002'):'listening',
+}
+codes=('ECONNREFUSED','ENOTFOUND','EAI_AGAIN','ETIMEDOUT','EACCES','ENOSPC','ERR_DLOPEN_FAILED','MODULE_NOT_FOUND')
+if sys.argv[3]=='1':
+    try:
+        fd=os.open(sys.argv[1],os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+        with os.fdopen(fd,'rb') as f:
+            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):raise ValueError()
+            data=f.read(65537)
+        if len(data)>65536:raise ValueError()
+        for line in data.decode('utf-8').splitlines():
+            try:entry=json.loads(line)
+            except Exception:continue
+            if type(entry)is not dict or type(entry.get('module'))is not str or type(entry.get('message'))is not str:continue
+            marker=markers.get((entry['module'],entry['message']))
+            if entry.get('level')=='INFO' and marker is not None:receipt['lastMarker']=marker
+            if entry.get('level')=='ERROR' and entry['module'] in {key[0] for key in markers} and entry.get('errorCode') in codes:receipt['errorCode']=entry['errorCode']
+        receipt['logStatus']='observed' if receipt['lastMarker'] is not None or receipt['errorCode'] is not None else 'empty'
+    except Exception:receipt.update(logStatus='refused',lastMarker=None,errorCode=None)
+Path(sys.argv[2]).write_text(json.dumps(receipt,sort_keys=True)+'\n')
+PYSTARTUP
+    ui_owns "$name" || return 1
+  fi
+  ui_docker inspect --format '{{json .State}}' "$name" > "$private/ui-state.json" || ok=0
   python3 - "$private/ui-state.json" "$mode" "$metrics/ui-service-$mode.json" <<'PYUI' || ok=0
 import json,sys
 from pathlib import Path

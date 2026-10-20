@@ -310,4 +310,90 @@ class ClosedReadinessPublication(unittest.TestCase):
                 self.assertNotEqual(self.emit(name,raw=' '*4097).returncode,0)
                 self.assertNotEqual(self.emit(name,value,link=True).returncode,0)
 
+class RealtimeStartupDiagnostics(unittest.TestCase):
+    def stop(self, logs='', owned=True, failed=False, link=False, stderr_logs=''):
+        source=(HERE/'run-linux-build.sh').read_text()
+        function=source[source.index('ui_stop_owned() {'):source.index('run_product_phases() {')]
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);(root/'metrics').mkdir();(root/'logs-input').write_text(logs)
+            (root/'stderr-input').write_text(stderr_logs)
+            if link:
+                (root/'foreign').write_text('PRIVATE_CANARY_unchanged')
+                (root/'ui-realtime-startup.private.log').symlink_to(root/'foreign')
+            setup=r'''prefix=owned; private="$1"; metrics="$1/metrics"; owned="$2"; failed="$3"
+ui_owns() { printf 'owner\n' >> "$private/events"; [[ "$owned" == 1 ]]; }
+ui_docker() {
+  printf '%s\n' "$1" >> "$private/events"
+  case "$1" in
+    inspect) printf '{"Running":true,"OOMKilled":false,"Error":""}';;
+    logs) [[ "$failed" != 1 ]] || return 17; cat "$private/logs-input"; cat "$private/stderr-input" >&2;;
+    stop) :;;
+    *) return 91;;
+  esac
+}
+'''
+            run=subprocess.run(['bash','-c',setup+function+'\nui_stop_owned owned-ui-realtime',
+                'startup-test',temporary,'1' if owned else '0','1' if failed else '0'],
+                capture_output=True,text=True,timeout=5)
+            target=root/'metrics/ui-realtime-startup.json'
+            return run,json.loads(target.read_text()) if target.exists() else None,\
+                (root/'events').read_text().splitlines(),\
+                (root/'foreign').read_text() if link else None
+
+    def test_native_markers_only_are_projected_after_ownership_before_stop(self):
+        logs='\n'.join(json.dumps(value) for value in [
+            dict(level='INFO',module='CollaborativeSocketServer',message='Starting Socket.IO server...',secret='PRIVATE_CANARY'),
+            dict(level='INFO',module='SocketIOConfig',message='Socket.IO Redis adapter connected - cross-pod broadcasting enabled'),
+            dict(level='INFO',module='foreign',message='Schema-compatibility check passed'),
+        ])+'\n'
+        error=json.dumps(dict(level='ERROR',module='SocketIOConfig',message='PRIVATE_CANARY',errorCode='ECONNREFUSED'))+'\n'
+        run,receipt,events,_=self.stop(logs,stderr_logs=error)
+        self.assertEqual(run.returncode,0)
+        self.assertEqual(receipt,dict(phase='ui-realtime-startup',service='realtime',logStatus='observed',
+            lastMarker='redis_adapter_ready',errorCode='ECONNREFUSED'))
+        self.assertEqual(events[0],'owner');self.assertLess(events.index('logs'),events.index('stop'))
+        self.assertNotIn('PRIVATE_CANARY',run.stdout+run.stderr+json.dumps(receipt))
+
+    def test_missing_unknown_oversized_and_symlink_logs_never_claim_a_startup_marker(self):
+        examples=[('',False,False,'empty'),('PRIVATE_CANARY',False,False,'empty'),
+                  ('x'*65537,False,False,'refused'),('',True,False,'unavailable'),('',False,True,'unavailable')]
+        for logs,failed,link,status in examples:
+            with self.subTest(status=status,link=link):
+                run,receipt,events,foreign=self.stop(logs,failed=failed,link=link)
+                self.assertEqual(run.returncode,0)
+                self.assertEqual(receipt,dict(phase='ui-realtime-startup',service='realtime',logStatus=status,lastMarker=None,errorCode=None))
+                self.assertIn('stop',events)
+                if link:self.assertEqual(foreign,'PRIVATE_CANARY_unchanged')
+                self.assertNotIn('PRIVATE_CANARY',run.stdout+run.stderr+json.dumps(receipt))
+        run,receipt,events,_=self.stop('PRIVATE_CANARY',owned=False)
+        self.assertNotEqual(run.returncode,0);self.assertIsNone(receipt)
+        self.assertEqual(events,['owner'])
+
+    def test_real_environment_preparation_enables_info_for_realtime_only(self):
+        source=(HERE/'run-linux-build.sh').read_text()
+        block=source.split('  current_stage=ui_prepare\n',1)[1].split("<<'PYUI'\n",1)[1].split('\nPYUI',1)[0]
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);(root/'postgres.env').write_text('POSTGRES_PASSWORD='+'a'*64+'\n')
+            run=subprocess.run([__import__('sys').executable,'-c',block,temporary,'owned'],capture_output=True,text=True,timeout=5)
+            self.assertEqual(run.returncode,0)
+            def env(name):return dict(line.split('=',1) for line in (root/(name+'.env')).read_text().splitlines())
+            self.assertEqual(env('ui-realtime').get('LOG_LEVEL'),'INFO')
+            self.assertNotIn('LOG_LEVEL',env('ui-web'))
+            self.assertNotIn('LOG_LEVEL',env('ui-seed'))
+
+    def test_both_real_readers_keep_the_new_receipt_closed_and_observational(self):
+        valid=dict(phase='ui-realtime-startup',service='realtime',logStatus='observed',lastMarker='schema_ready',errorCode=None)
+        readers=[lambda value,**kwargs:ClosedPublication().emit(value,name='ui-realtime-startup',**kwargs),
+                 lambda value,**kwargs:ClosedReadinessPublication().emit('ui-realtime-startup.json',value,**kwargs)]
+        for reader in readers:
+            run=reader(valid);self.assertEqual(run.returncode,0);self.assertEqual(json.loads(run.stdout),valid)
+            for bad in [{**valid,'message':'PRIVATE_CANARY'},{**valid,'logStatus':'passed'},
+                        {**valid,'lastMarker':'PRIVATE_CANARY'},{**valid,'errorCode':'PRIVATE_CANARY'},
+                        {**valid,'service':'web'},{**valid,'logStatus':'empty'},{**valid,'lastMarker':True},
+                        {**valid,'lastMarker':None,'errorCode':None}]:
+                rejected=reader(bad);self.assertNotEqual(rejected.returncode,0)
+                self.assertNotIn('PRIVATE_CANARY',rejected.stdout+rejected.stderr)
+            self.assertNotEqual(reader(valid,link=True).returncode,0)
+            self.assertNotEqual(reader(valid,raw=' '*4097).returncode,0)
+
 if __name__=='__main__':unittest.main()

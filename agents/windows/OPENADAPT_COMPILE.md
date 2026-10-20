@@ -77,7 +77,11 @@ OS. Les caps ne constituent ni un plafond RAM ni un sandbox. ONNX peut créer de
 threads natifs ; un seul job n'est pas une preuve d'inférence monothread.
 
 Les logs Python du moteur et ses stdout/stderr Python sont désactivés/écartés
-pendant la compilation. Les exceptions publiques contiennent seulement un code
+pendant la compilation. Un `NullHandler` temporaire possédé empêche les appels
+standards `logging.error(...)` d'installer implicitement un handler lié au flux
+temporaire. Il est retiré à la fin, sans fermer ni remplacer les handlers du
+caller. Les diagnostics après compilation ne restent donc pas liés à ce flux
+fermé, y compris après un refus. Les exceptions publiques contiennent seulement un code
 fixe, sans cause/contexte natif. Aucun dump de données, d'environnement ou de
 version de clé. Les sorties C natives ne sont pas interceptées par cette fonction :
 le futur lanceur doit conserver ses propres FD/logs privés bornés, sans publication.

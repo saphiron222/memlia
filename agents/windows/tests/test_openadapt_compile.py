@@ -243,6 +243,39 @@ class CompileTests(unittest.TestCase):
         self.assertEqual(stdout.getvalue() + stderr.getvalue(), '')
         self.assertEqual(list(Path(self.root.name).iterdir()), [])
 
+    def check_logging_after_compile(self, fails):
+        import logging
+
+        def noisy_engine(*args, **kwargs):
+            logging.error('PRIVATE_CANARY')
+            if fails:
+                raise OSError('PRIVATE_CANARY')
+            return self.compile_engine(*args, **kwargs)
+
+        self.engine = noisy_engine
+        output = io.StringIO()
+        # Isolate this test's root configuration, including implicit basicConfig.
+        # Existing caller handlers must neither be closed nor changed by the test.
+        with patch.object(logging.root, 'handlers', []):
+            try:
+                if fails:
+                    self.refused(code='compile_failed')
+                else:
+                    self.run_compile()
+                logging.basicConfig(stream=output)
+                logging.warning('after_compile')
+                self.assertEqual(output.getvalue(), 'WARNING:root:after_compile\n')
+            finally:
+                for handler in list(logging.root.handlers):
+                    logging.root.removeHandler(handler)
+                    handler.close()
+
+    def test_successful_compile_does_not_leave_diagnostics_on_closed_stream(self):
+        self.check_logging_after_compile(False)
+
+    def test_failed_compile_does_not_leave_diagnostics_on_closed_stream(self):
+        self.check_logging_after_compile(True)
+
     def test_cancellation_before_compile_and_after_engine_refuses_delivery(self):
         event = threading.Event()
         event.set()

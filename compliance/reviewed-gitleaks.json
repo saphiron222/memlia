@@ -577,6 +577,13 @@
       "rule": "generic-api-key",
       "line": 979,
       "reason": "Même chaîne déterministe fictive du test natif de masquage Anthropic, contexte local relu à la ligne979. Nouveau blob exact après adaptations distinctes des lignes1/675 et ajout de tests natifs de fin de réponse ; le préfixe entier n’est pas annoncé identique. Admission limitée à ce couple path/SHA/règle/ligne, sans désactivation du scanner ni exemption future."
+    },
+    {
+      "path": "apps/sim/lib/workflows/editing/validation.test.ts",
+      "sha256": "49ffb89dd3b61ba7ec40b68167cce28563967d73e569f1385e09dd501c2bd2c7",
+      "rule": "generic-api-key",
+      "line": 770,
+      "reason": "Constante de fixture de test inspectée ; valeur descriptive ou synthétique injectée dans mocks/assertions de non-divulgation, sans appel fournisseur réel. Revue du 20 octobre : unique constante et contexte inchangés après ajout des tests de compteurs ; déplacement704→770, ancien blob conservé pour l’histoire."
     }
   ]
 }

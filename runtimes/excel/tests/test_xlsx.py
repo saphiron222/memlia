@@ -1,3 +1,4 @@
+import asyncio
 from hashlib import sha256
 from io import BytesIO
 from decimal import Decimal
@@ -148,6 +149,35 @@ def test_expanded_archive_limit():
         read(data, max_expanded_bytes=10000)
 
 
+def test_rejected_xml_does_not_disclose_private_identifiers_in_exception_chain():
+    import traceback
+
+    data = altered_archive(
+        "docProps/core.xml",
+        b'<!DOCTYPE private_document SYSTEM "https://private-fixture.invalid/document"><x/>',
+    )
+    with pytest.raises(KernelError, match="^invalid_archive$") as error:
+        read(data)
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+    assert "private-fixture.invalid" not in "".join(traceback.format_exception(error.value))
+
+
+@pytest.mark.parametrize("missing", ["[Content_Types].xml", "xl/workbook.xml", "_rels/.rels",
+                                     "xl/_rels/workbook.xml.rels"])
+def test_incomplete_xlsx_is_refused_before_the_workbook_reader(missing):
+    original = workbook([["id", "amount"], ["a", "1"]])
+    output = BytesIO()
+    with ZipFile(BytesIO(original)) as archive, ZipFile(output, "w", ZIP_DEFLATED) as target:
+        for item in archive.infolist():
+            if item.filename != missing:
+                target.writestr(item.filename, archive.read(item))
+    with pytest.raises(KernelError, match="^invalid_archive$") as error:
+        read(output.getvalue())
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+
+
 def test_false_declared_dimension_cannot_hide_real_rows():
     data = workbook([["id", "amount"], ["a", "1"], ["b", "2"]])
     with ZipFile(BytesIO(data)) as archive:
@@ -264,3 +294,53 @@ def test_invalid_output_characters_refuse_without_disclosing_cell_content(header
     assert "synthetic" not in "".join(traceback.format_exception(error.value))
     assert error.value.__cause__ is None
     assert error.value.__context__ is None
+
+
+@pytest.mark.parametrize("part,old,new", [
+    ("xl/workbook.xml", b'r:id="rId1"', b'r:id="PRIVATE-CLIENT-SYNTHETIC-ABC"'),
+    ("xl/workbook.xml", b'sheetId="1"', b'sheetId="PRIVATE-CLIENT-SYNTHETIC-ABC"'),
+    ("xl/worksheets/sheet1.xml", b't="inlineStr"><is><t>a</t></is>', b't="s"><v>99999</v>'),
+])
+def test_openpyxl_metadata_failures_are_opaque_and_close_input(part, old, new, monkeypatch):
+    import traceback
+
+    original = workbook([["id", "amount"], ["a", "1"]])
+    output = BytesIO()
+    with ZipFile(BytesIO(original)) as archive, ZipFile(output, "w", ZIP_DEFLATED) as target:
+        for item in archive.infolist():
+            content = archive.read(item)
+            if item.filename == part:
+                assert old in content
+                content = content.replace(old, new, 1)
+            target.writestr(item.filename, content)
+    streams = []
+    real_load = openpyxl.load_workbook
+
+    def observed_load(stream, **kwargs):
+        streams.append(stream)
+        return real_load(stream, **kwargs)
+
+    monkeypatch.setattr(openpyxl, "load_workbook", observed_load)
+    with pytest.raises(KernelError, match="^invalid_archive$") as error:
+        read(output.getvalue())
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+    assert "PRIVATE-CLIENT-SYNTHETIC-ABC" not in "".join(traceback.format_exception(error.value))
+    assert len(streams) == 1 and streams[0].closed
+
+
+@pytest.mark.parametrize("failure", [KeyboardInterrupt(), SystemExit(), asyncio.CancelledError(), InterruptedError(),
+                                     KernelError("sheet_missing")])
+def test_workbook_boundary_preserves_interruptions_and_business_errors(failure, monkeypatch):
+    original = workbook([["id", "amount"], ["a", "1"]])
+    streams = []
+
+    def interrupted_load(stream, **kwargs):
+        streams.append(stream)
+        raise failure
+
+    monkeypatch.setattr(openpyxl, "load_workbook", interrupted_load)
+    with pytest.raises(type(failure)) as error:
+        read(original)
+    assert error.value is failure
+    assert len(streams) == 1 and streams[0].closed

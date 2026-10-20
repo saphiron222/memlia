@@ -437,6 +437,52 @@ class PreparationTransportTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(error.exception.code,'channel_closed')
         await original()  # Real test-owned pool cleanup after the injected failure.
 
+    async def test_context_pool_close_failure_preserves_task_cancellation(self):
+        channel = self.channel('https://example.invalid')
+        original = channel._client.aclose
+        entered = asyncio.Event()
+
+        async def broken_close():
+            raise OSError('FICTIONAL_PRIVATE_POOL_CLOSE_DETAIL')
+
+        async def operation():
+            async with channel:
+                entered.set()
+                await asyncio.Event().wait()
+
+        try:
+            with patch.object(channel._client, 'aclose', side_effect=broken_close):
+                task = asyncio.create_task(operation())
+                await asyncio.wait_for(entered.wait(), 1)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError) as cancelled:
+                    await task
+                self.assertTrue(task.cancelled())
+                self.assertIn('channel_cleanup_unverified: close_failed', cancelled.exception.__notes__)
+            with self.assertRaises(transport.TransportError) as error:
+                await channel.get_json('/fixture')
+            self.assertEqual(error.exception.code, 'channel_closed')
+        finally:
+            await original()
+
+    async def test_context_without_cancellation_still_reports_pool_close_failure(self):
+        channel = self.channel('https://example.invalid')
+        original = channel._client.aclose
+
+        async def broken_close():
+            raise OSError('FICTIONAL_PRIVATE_POOL_CLOSE_DETAIL')
+
+        try:
+            with patch.object(channel._client, 'aclose', side_effect=broken_close):
+                with self.assertRaises(transport.TransportError) as error:
+                    async with channel:
+                        pass
+                self.assertEqual(error.exception.code, 'close_failed')
+                self.assertIsNone(error.exception.__cause__)
+                self.assertIsNone(error.exception.__context__)
+        finally:
+            await original()
+
     async def test_response_close_after_deadline(self):
         original=transport.httpx.Response.aclose
         counts={}
