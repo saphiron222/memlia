@@ -4,6 +4,24 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
 
+const CLEANUP_STAGES = ['preflight', 'owner_readback', 'scope_readback', 'native_account_deletion',
+  'deleted_user_readback', 'residue_capture', 'residue_delete', 'baseline_compare', 'proof_write',
+  'application_connections_close', 'database_connection_close', 'unknown'] as const
+let cleanupStage = 'preflight'
+let cleanupIndex: number | null = null
+let cleanupFailure: ReturnType<typeof cleanupFailureReceipt> | undefined
+
+/** Diagnostics only: never serialize native errors, SQL, credentials or row identities. */
+export function cleanupFailureReceipt(stage: unknown, index: unknown, error: unknown) {
+  const code = error !== null && (typeof error === 'object' || typeof error === 'function')
+    ? Object.getOwnPropertyDescriptor(error, 'code')?.value : undefined
+  return { status: 'failed', code: 'fixture_cleanup_refused',
+    stage: CLEANUP_STAGES.find(value => value === stage) ?? 'unknown',
+    index: stage === 'baseline_compare' && typeof index === 'number' && Number.isInteger(index)
+      && index >= 0 && index < 183 ? index : null,
+    sqlstate: typeof code === 'string' && code.length === 5 && /^[A-Z0-9]{5}$/.test(code) ? code : null }
+}
+
 export function validateTarget(raw: string, nonce: string, mode: string) {
   if (
     !/^[a-f0-9]{32}$/.test(nonce) ||
@@ -296,12 +314,14 @@ async function main() {
           await tx`insert into account (id,account_id,provider_id,user_id,password,created_at,updated_at) values (${fixture.accountId},${fixture.userId},'credential',${fixture.userId},${password},now(),now())`
         })
       } else if (process.argv[2] === 'cleanup') {
+        cleanupStage = 'owner_readback'
         const rows = await sql`select id,email from "user" where id=${fixture.userId}`
         if (rows.length !== 1 || rows[0].email !== fixture.email)
           throw new Error('fixture_ownership_refused')
         const start = JSON.parse(
           readFileSync(join(directory, 'fixture-clock.private.json'), 'utf8')
         ).started
+        cleanupStage = 'scope_readback'
         const workspaces =
           await sql`SELECT id FROM workspace WHERE owner_id=${fixture.userId} AND organization_id IS NULL LIMIT 9`
         const projects =
@@ -323,11 +343,14 @@ async function main() {
           { mode: 0o600 }
         )
         importedDeletion = true
+        cleanupStage = 'native_account_deletion'
         const { deleteUserAccount } = await import('/work/apps/sim/lib/users/account-deletion.ts')
         await deleteUserAccount(fixture.userId, { recordIdentity: false })
+        cleanupStage = 'deleted_user_readback'
         const remaining =
           await sql`select count(*)::int as n from "user" where id=${fixture.userId}`
         if (remaining[0].n !== 0) throw new Error('fixture_cleanup_refused')
+        cleanupStage = 'residue_capture'
         const audit =
           await sql`SELECT t.id,md5(row_to_json(t)::text) AS digest,t.xmin::text AS version FROM audit_log t
       WHERE t.actor_email=${fixture.email} AND t.created_at>=${start}::timestamptz AT TIME ZONE 'UTC' LIMIT 33`
@@ -369,6 +392,7 @@ async function main() {
         assertRecipe(baseline.length === 183)
         let deleted = 0
         await sql.begin(async (tx) => {
+          cleanupStage = 'residue_delete'
           for (const [table, rows] of Object.entries(residue)) {
             const key = table === 'rate_limit_bucket' ? 'key' : 'id'
             for (const row of rows) {
@@ -384,7 +408,10 @@ async function main() {
               deleted += result.length
             }
           }
+          cleanupStage = 'baseline_compare'
+          cleanupIndex = -1
           for (const item of baseline) {
+            cleanupIndex += 1
             assertRecipe(
               /^[a-z_0-9]+$/.test(item.table) &&
                 Number.isInteger(item.count) &&
@@ -396,6 +423,8 @@ async function main() {
             assertRecipe(rows[0].n === item.count && rows[0].digest === item.digest)
           }
         })
+        cleanupStage = 'proof_write'
+        cleanupIndex = null
         writeFileSync(
           join(directory, 'residue-cleanup.json'),
           JSON.stringify({
@@ -412,17 +441,34 @@ async function main() {
         JSON.stringify({ mode: process.argv[2], passed: true }) + '\n',
         { mode: 0o600 }
       )
+    } catch (error) {
+      if (process.argv[2] === 'cleanup')
+        cleanupFailure = cleanupFailureReceipt(cleanupStage, cleanupIndex, error)
+      throw error
     } finally {
       try {
+        cleanupStage = 'application_connections_close'
         if (importedDeletion) await closeImportedClients()
+      } catch (error) {
+        if (process.argv[2] === 'cleanup')
+          cleanupFailure ??= cleanupFailureReceipt(cleanupStage, cleanupIndex, error)
+        throw error
       } finally {
+        cleanupStage = 'database_connection_close'
         await sql.end({ timeout: 2 })
       }
     }
   }
 }
 if (import.meta.main)
-  await main().catch(() => {
+  await main().catch((error) => {
+    if (process.argv[2] === 'cleanup') {
+      try {
+        writeFileSync('/scratch/ui/cleanup-failure.private.json',
+          JSON.stringify(cleanupFailure ?? cleanupFailureReceipt(cleanupStage, cleanupIndex, error)) + '\n',
+          { mode: 0o600, flag: 'wx' })
+      } catch { /* Preserve an existing or unknown receipt; the native refusal remains. */ }
+    }
     console.error('fixture_refused')
     process.exitCode = 1
   })

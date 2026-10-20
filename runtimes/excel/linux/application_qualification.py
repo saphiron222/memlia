@@ -26,10 +26,27 @@ CHECKS=('noKeyDenied','wrongKeyDenied','authenticated','webHasNoDdl','uploaded',
 STAGES=('preflight','database_identity','native_credential','workspace_preparation',
         'authentication_negatives','file_upload','workflow_graph','native_execution',
         'native_recorded_file','download_authorization','same_output_download','source_readback','owned_run_cleanup')
+CLEANUP_STAGES=('preflight','owner_readback','scope_readback','native_account_deletion',
+                'deleted_user_readback','residue_capture','residue_delete','baseline_compare','proof_write',
+                'application_connections_close','database_connection_close','unknown')
 
 
 def require(value):
     if not value:raise ValueError('application_recipe_refused')
+
+
+def project_cleanup_failure(raw):
+    from memlia_excel.process import pairs,non_json
+    require(0<len(raw)<=1024)
+    value=json.loads(raw,object_pairs_hook=pairs,parse_constant=non_json)
+    require(type(value)is dict and set(value)=={'status','code','stage','index','sqlstate'})
+    require(value['status']=='failed' and value['code']=='fixture_cleanup_refused'
+            and value['stage'] in CLEANUP_STAGES)
+    index,state=value['index'],value['sqlstate']
+    require(index is None or (value['stage']=='baseline_compare' and type(index)is int and 0<=index<183))
+    require(state is None or (type(state)is str and len(state)==5
+            and all(char in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789' for char in state)))
+    return value
 
 
 def verify_result(raw):
@@ -215,6 +232,7 @@ def consume(socket,wire,deadline,cancel,work,record):
         inspect(item,running=False);return item
     def phase(name):
         record['phase']=name
+        if name=='cleanup':record['cleanupExecution']=dict(boundary='create',exitCode=None)
         argv=['bun','--no-env-file','--tsconfig-override','/work/apps/sim/tsconfig.json',
               '/work/scripts/ci/linux-chat-fixture.ts',name]
         if name=='migrate':argv=['bun','--no-env-file','/work/packages/db/scripts/migrate.ts']
@@ -229,8 +247,17 @@ def consume(socket,wire,deadline,cancel,work,record):
                '--tmpfs','/tmp:rw,noexec,nosuid,nodev,size=128m']
         item=create(name,NODE,'1001:1001',4*1024**3,2_000_000_000,256,extra,argv)
         from qualification import build_command
+        if name=='cleanup':record['cleanupExecution']['boundary']='execution'
         try:build_command(['container','start','--attach',item[0]],work,deadline,cancel)
         except Exception:
+            if name=='cleanup':
+                try:
+                    record['cleanupFailure']=project_cleanup_failure(read_closed(scratch/'ui/cleanup-failure.private.json',1024))
+                except Exception:pass
+                try:
+                    state=inspect(item,running=False)['State']['ExitCode']
+                    if type(state)is int and 0<=state<=255:record['cleanupExecution']['exitCode']=state
+                except Exception:pass
             if name=='business':
                 try:
                     failure=json.loads(read_closed(scratch/'application-failure.private.json',1024))
@@ -239,11 +266,20 @@ def consume(socket,wire,deadline,cancel,work,record):
                     record['failureStage']=failure['stage']
                 except Exception:pass
             raise
-        row=inspect(item,running=False);require(row['State']['ExitCode']==0)
+        if name=='cleanup':record['cleanupExecution']['boundary']='owned_inspection'
+        row=inspect(item,running=False)
+        if name=='cleanup':
+            state=row['State']['ExitCode']
+            record['cleanupExecution']=dict(boundary='exit_code',
+                exitCode=state if type(state)is int and 0<=state<=255 else None)
+        require(row['State']['ExitCode']==0)
+        if name=='cleanup':record['cleanupExecution']['boundary']='owned_removal'
         command(['container','rm',item[0]],cleanup=True)
+        if name=='cleanup':record['cleanupExecution']['boundary']='owned_absence'
         require(not command(['container','ls','--all','--no-trunc','--quiet','--filter','id='+item[0]],cleanup=True).strip())
         next(row for row in record['containers'] if row['id']==item[0])['closed']=True
         owned.remove(item);record.setdefault('phases',[]).append(name)
+        if name=='cleanup':record.pop('cleanupExecution',None)
     try:
         from qualification import build_command
         for image in (NODE,POSTGRES,CACHE):

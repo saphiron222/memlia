@@ -1,6 +1,7 @@
 # Copyright (c) 2026 Memlia. All rights reserved.
 """Portable preparation tests; no Docker, PostgreSQL or authenticated API claim."""
 import base64
+import ast
 from copy import deepcopy
 from hashlib import sha256
 import json
@@ -132,6 +133,80 @@ class ApplicationBoundaryTests(unittest.TestCase):
             path.write_bytes(b'before');snapshot=a.tree_snapshot(root);path.write_bytes(b'changed')
             with self.assertRaises(ValueError):a.remove_closed_tree(root,snapshot)
             self.assertEqual(path.read_bytes(),b'changed')
+
+
+class CleanupDiagnosticTests(unittest.TestCase):
+    def test_closed_cleanup_failure_projection_refuses_extra_or_unbounded_fields(self):
+        value=dict(status='failed',code='fixture_cleanup_refused',stage='baseline_compare',
+                   index=182,sqlstate='23503')
+        self.assertEqual(a.project_cleanup_failure(json.dumps(value).encode()),value)
+        for delta in ({'message':'PRIVATE_CANARY'},{'stage':'PRIVATE_CANARY'},
+                      {'sqlstate':'23503\n'},{'sqlstate':'private'},{'sqlstate':True},
+                      {'index':True},{'index':183},{'index':-1},
+                      {'stage':'native_account_deletion','index':0}):
+            with self.subTest(delta=delta),self.assertRaises(ValueError):
+                a.project_cleanup_failure(json.dumps(value|delta).encode())
+        raw=json.dumps(value).encode()
+        for raw in (raw.replace(b'"status": "failed"',b'"status":"passed","status":"failed"'),
+                    b' '*1025):
+            with self.assertRaises(ValueError):a.project_cleanup_failure(raw)
+
+    def run_phase(self, *, failure=None, exit_code=0, inspection_failure=False, raw=None):
+        # Execute the real nested phase, with the Docker command/inspection boundary doubled.
+        tree=ast.parse(Path(a.__file__).read_text())
+        node=next(n for n in ast.walk(tree) if isinstance(n,ast.FunctionDef) and n.name=='phase')
+        code=compile(ast.fix_missing_locations(ast.Module(body=[node],type_ignores=[])),a.__file__,'exec')
+        record={'containers':[{'id':'a'*64,'closed':False}]};owned=[('a'*64,)]
+        def inspect(*args,**kwargs):
+            if inspection_failure:raise ValueError('PRIVATE_CANARY inspection')
+            return {'State':{'ExitCode':exit_code}}
+        calls=[]
+        scope=dict(record=record,create=lambda *args:owned[0],NODE='fixture-image',
+                   work=Path('/owned/work'),ROOT=Path('/owned/source'),tools=Path('/owned/tools'),
+                   scratch=Path('/owned/scratch'),socket=Path('/owned/socket/host.sock'),
+                   inspect=inspect,command=lambda args,**kwargs:calls.append(args) or b'',
+                   owned=owned,require=a.require,read_closed=lambda *args:raw,
+                   project_cleanup_failure=getattr(a,'project_cleanup_failure',None),
+                   json=json,STAGES=a.STAGES,deadline=time.monotonic()+5,cancel=threading.Event())
+        exec(code,scope)
+        with mock.patch.object(q,'build_command',side_effect=failure):
+            try:scope['phase']('cleanup')
+            except Exception:pass
+        return record,calls
+
+    def test_execution_failure_is_classified_without_turning_it_into_success(self):
+        raw=json.dumps(dict(status='failed',code='fixture_cleanup_refused',
+                            stage='baseline_compare',index=3,sqlstate=None)).encode()
+        record,calls=self.run_phase(failure=RuntimeError('PRIVATE_CANARY'),exit_code=1,raw=raw)
+        self.assertEqual(record['cleanupExecution'],dict(boundary='execution',exitCode=1))
+        self.assertEqual(record['cleanupFailure']['stage'],'baseline_compare')
+        self.assertNotIn('phases',record)
+        self.assertEqual(calls,[])
+        self.assertNotIn('PRIVATE_CANARY',json.dumps(record))
+
+    def test_invalid_private_receipt_and_unknown_exit_never_leak_or_pass(self):
+        raw=b'{"status":"failed","message":"PRIVATE_CANARY"}'
+        for exit_code in (-1,256,True,'PRIVATE_CANARY'):
+            record,calls=self.run_phase(failure=RuntimeError('PRIVATE_CANARY'),exit_code=exit_code,raw=raw)
+            self.assertEqual(record['cleanupExecution'],dict(boundary='execution',exitCode=None))
+            self.assertNotIn('cleanupFailure',record)
+            self.assertNotIn('phases',record);self.assertEqual(calls,[])
+            self.assertNotIn('PRIVATE_CANARY',json.dumps(record))
+
+    def test_owned_inspection_refusal_and_nonzero_exit_remain_refusals(self):
+        record,calls=self.run_phase(inspection_failure=True)
+        self.assertEqual(record['cleanupExecution'],dict(boundary='owned_inspection',exitCode=None))
+        self.assertNotIn('phases',record);self.assertEqual(calls,[])
+        record,calls=self.run_phase(exit_code=3)
+        self.assertEqual(record['cleanupExecution'],dict(boundary='exit_code',exitCode=3))
+        self.assertNotIn('phases',record);self.assertEqual(calls,[])
+
+    def test_successful_ephemeral_cleanup_still_requires_closed_inspection_and_owned_removal(self):
+        record,calls=self.run_phase()
+        self.assertEqual(record['phases'],['cleanup'])
+        self.assertTrue(record['containers'][0]['closed'])
+        self.assertNotIn('cleanupExecution',record)
+        self.assertEqual([args[:2] for args in calls],[['container','rm'],['container','ls']])
 
 
 if __name__=='__main__':unittest.main()

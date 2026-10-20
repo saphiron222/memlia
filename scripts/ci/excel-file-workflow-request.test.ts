@@ -125,3 +125,89 @@ afterAll(async () => {
   const { db } = await import('../../packages/db/index')
   await db.$client.end({ timeout: 2 })
 })
+
+test('cleanup diagnostics project only a fixed stage, bounded index and SQLSTATE', async () => {
+  const { cleanupFailureReceipt } = await import('./linux-chat-fixture')
+  const error = Object.assign(Error('PRIVATE_CANARY message'), {
+    code: '23503', query: 'PRIVATE_CANARY SQL', detail: 'PRIVATE_CANARY DSN',
+  })
+  expect(cleanupFailureReceipt('baseline_compare', 182, error)).toEqual({
+    status: 'failed', code: 'fixture_cleanup_refused', stage: 'baseline_compare',
+    index: 182, sqlstate: '23503',
+  })
+  for (const code of ['private_canary', '23503\n', '2350', 23503, true, null]) {
+    const receipt = cleanupFailureReceipt('PRIVATE_CANARY', true, { code })
+    expect(receipt).toEqual({ status: 'failed', code: 'fixture_cleanup_refused',
+      stage: 'unknown', index: null, sqlstate: null })
+    expect(JSON.stringify(receipt)).not.toContain('PRIVATE_CANARY')
+  }
+  let read = false
+  const accessor = Object.defineProperty({}, 'code', { get() { read = true; return '23503' } })
+  expect(cleanupFailureReceipt('native_account_deletion', 0, accessor).sqlstate).toBeNull()
+  expect(read).toBe(false)
+  for (const index of [-1, 183, 1.5, true, null]) {
+    expect(cleanupFailureReceipt('baseline_compare', index, error).index).toBeNull()
+  }
+  expect(cleanupFailureReceipt('native_account_deletion', 1, error).index).toBeNull()
+})
+
+test('the real final catch persists the first closed cleanup failure without raw errors', async () => {
+  // Execute the actual catch callback; file/process/console effects alone are doubles.
+  const { cleanupFailureReceipt } = await import('./linux-chat-fixture')
+  const fixtureSource = readFileSync(new URL('./linux-chat-fixture.ts', import.meta.url), 'utf8')
+  const finalCatch = fixtureSource.match(/await main\(\)\.catch\(([\s\S]*)\)\s*$/)
+  if (!finalCatch) throw Error('fixture_catch_not_found')
+  const callback = new Bun.Transpiler({ loader: 'ts' }).transformSync('const callback = ' + finalCatch[1])
+  const writes: unknown[][] = [], messages: unknown[] = []
+  const processDouble = { argv: ['bun', 'fixture', 'cleanup'], exitCode: 0 }
+  const first = cleanupFailureReceipt('baseline_compare', 12, { code: '23503' })
+  const invoke = new Function('process', 'console', 'writeFileSync', 'cleanupFailureReceipt',
+    'cleanupStage', 'cleanupIndex', 'cleanupFailure', callback + '\nreturn callback;')(
+      processDouble, { error(value: unknown) { messages.push(value) } },
+      (...args: unknown[]) => writes.push(args), cleanupFailureReceipt,
+      'database_connection_close', null, first)
+  invoke(Object.assign(Error('PRIVATE_CANARY'), { code: '08006' }))
+  expect(processDouble.exitCode).toBe(1)
+  expect(writes).toHaveLength(1)
+  expect(writes[0][0]).toBe('/scratch/ui/cleanup-failure.private.json')
+  expect(JSON.parse(String(writes[0][1]))).toEqual(first)
+  expect(writes[0][2]).toEqual({ mode: 0o600, flag: 'wx' })
+  expect(messages).toEqual(['fixture_refused'])
+  expect(JSON.stringify([writes, messages])).not.toContain('PRIVATE_CANARY')
+  // A pre-existing or unwritable receipt never changes the original refusal to success.
+  const blocked = new Function('process', 'console', 'writeFileSync', 'cleanupFailureReceipt',
+    'cleanupStage', 'cleanupIndex', 'cleanupFailure', callback + '\nreturn callback;')(
+      processDouble, { error() {} }, () => { throw Error('PRIVATE_CANARY') },
+      cleanupFailureReceipt, 'preflight', null, undefined)
+  expect(() => blocked(Error('PRIVATE_CANARY'))).not.toThrow()
+  expect(processDouble.exitCode).toBe(1)
+  processDouble.argv[2] = 'seed'
+  writes.length = 0
+  invoke(Error('PRIVATE_CANARY'))
+  expect(writes).toHaveLength(0)
+})
+
+test('the real nested connection close preserves its first failure before the database finally', async () => {
+  const { cleanupFailureReceipt } = await import('./linux-chat-fixture')
+  const fixtureSource = readFileSync(new URL('./linux-chat-fixture.ts', import.meta.url), 'utf8')
+  const blocks = [...fixtureSource.matchAll(/^    } finally \{[\s\S]*?^    }$/gm)]
+  const closing = blocks.at(-1)?.[0]
+  if (!closing?.includes('closeImportedClients')) throw Error('fixture_closing_not_found')
+  const code = new Bun.Transpiler({ loader: 'ts' }).transformSync(
+    'async function invoke() { try {} ' + closing.replace(/^\s*}/, '') + '\n}')
+  for (const secondaryFailure of [false, true]) {
+    for (const first of [undefined, cleanupFailureReceipt('baseline_compare', 2, { code: '23514' })]) {
+    const expected = Object.assign(Error('PRIVATE_CANARY first'), { code: '08006' })
+    const secondary = Object.assign(Error('PRIVATE_CANARY secondary'), { code: '08003' })
+    const scope = new Function('process', 'cleanupFailureReceipt', 'closeImportedClients', 'sql',
+      'importedDeletion', 'cleanupStage', 'cleanupIndex', 'cleanupFailure',
+      code + '\nreturn { invoke, failure: () => cleanupFailure };')(
+        { argv: ['bun', 'fixture', 'cleanup'] }, cleanupFailureReceipt,
+        async () => { throw expected }, { async end() { if (secondaryFailure) throw secondary } },
+        true, 'proof_write', null, first)
+    await expect(scope.invoke()).rejects.toBe(secondaryFailure ? secondary : expected)
+    expect(scope.failure()).toEqual(first ?? { status: 'failed', code: 'fixture_cleanup_refused',
+      stage: 'application_connections_close', index: null, sqlstate: '08006' })
+    }
+  }
+})
