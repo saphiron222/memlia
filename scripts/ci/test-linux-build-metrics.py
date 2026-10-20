@@ -212,7 +212,8 @@ class MetricsTests(unittest.TestCase):
                                (['--anything'], None), (['--validation-only','extra'], None)]:
             with self.subTest(args=args):
                 result = subprocess.run(['bash','-c','set -euo pipefail\n'+block+'printf "%s" "$scope"',
-                                         'mode-test',*args],capture_output=True,text=True,timeout=10)
+                                         'mode-test',*args],capture_output=True,text=True,timeout=10,
+                                        env={**os.environ, 'MEMLIA_CI_CHAT_UI': '0'})
                 if expected is None:
                     self.assertEqual(result.returncode, 2)
                     self.assertEqual(result.stdout, '')
