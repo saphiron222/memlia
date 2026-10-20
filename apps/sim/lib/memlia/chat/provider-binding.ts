@@ -18,6 +18,7 @@ import { catalogToolInputs, createCatalogTools } from './catalog-tools'
 import { createExcelPreviewTools, excelPreviewInputs } from './excel-preview-tools'
 import { type ModelRunLimits, runModelAdapter } from './model-adapter'
 import { createWorkflowPreviewTools, workflowPreviewInputs } from './workflow-preview-tools'
+import type { WorkflowPreparation } from './workflow-completion'
 import { workflowProposalInputSchema } from './workflow-proposals.server'
 import { createWorkflowReadTools, workflowReadInputs } from './workflow-read-tools'
 
@@ -282,12 +283,25 @@ export function runCatalogProvider(options: CatalogProviderOptions) {
     }
   }
 
+  let evaluatedPreviews = 0
+  let refusedPreviews = 0
   async function previewWorkflow(params: unknown, signal: AbortSignal) {
     const parsed = workflowPreviewInput.safeParse(params)
-    if (!parsed.success || !Object.hasOwn(parsed.data, 'request'))
+    if (!parsed.success || !Object.hasOwn(parsed.data, 'request')) {
+      refusedPreviews++
       return workflowFailure('invalid_input')
+    }
     if (!workflowPreview) return workflowFailure('forbidden')
-    return workflowPreview.dispatch('preview_workflow_operations', parsed.data.request, signal)
+    const result = await workflowPreview.dispatch(
+      'preview_workflow_operations',
+      parsed.data.request,
+      signal
+    )
+    signal.throwIfAborted()
+    // ok attests evaluation only. Diagnostics may still report an invalid batch.
+    if (result.ok) evaluatedPreviews++
+    else refusedPreviews++
+    return result
   }
 
   async function readWorkflow(toolId: string, params: unknown, signal: AbortSignal) {
@@ -305,7 +319,7 @@ export function runCatalogProvider(options: CatalogProviderOptions) {
     return workflowReads.dispatch(toolId, parsed.data.request, signal)
   }
 
-  return runModelAdapter<AgentStreamEvent, ProviderToolExecutionResult>({
+  const run = runModelAdapter<AgentStreamEvent, ProviderToolExecutionResult>({
     limits: options.limits,
     signal: options.signal,
     allowedTools: tools.map((tool) => tool.id),
@@ -408,6 +422,14 @@ export function runCatalogProvider(options: CatalogProviderOptions) {
       )
     },
   })
+  return {
+    ...run,
+    workflowPreparation: (): WorkflowPreparation =>
+      Object.freeze({
+        evaluated: evaluatedPreviews,
+        refused: refusedPreviews,
+      }),
+  }
 }
 
 function jsonInput(schema: z.ZodType) {

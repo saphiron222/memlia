@@ -139,3 +139,65 @@ test('rejects invalid limits before starting provider', () => {
     })).toThrow(RangeError)
   }
 })
+
+test('tool activity snapshots distinguish overlapping invocations and settle without data', async () => {
+  let controls!: Parameters<Parameters<typeof runModelAdapter>[0]['start']>[0]
+  const releases: Array<(value: string) => void> = []
+  const run = runModelAdapter({
+    allowedTools: ['apply'],
+    dispatch: async () => new Promise<string>((resolve) => releases.push(resolve)),
+    start(value) { controls = value; return new ReadableStream() },
+  })
+  const first = controls.executeTool('apply', { secret: 'PRIVATE_ARGUMENT' })
+  const one = run.toolActivity()
+  const second = controls.executeTool('apply', {})
+  const two = run.toolActivity()
+  expect(Object.isFrozen(one)).toBe(true)
+  expect(Object.isFrozen(one.lastDispatch)).toBe(true)
+  expect(one).toEqual({ active: 1, lastDispatch: { id: 1, toolId: 'apply' }, lastSettlement: undefined })
+  expect(two.active).toBe(2)
+  expect(two.lastDispatch?.id).toBe(2)
+  releases[1]('PRIVATE_RESULT')
+  await second
+  expect(run.toolActivity().lastSettlement).toEqual({ id: 2, toolId: 'apply', status: 'fulfilled' })
+  releases[0]('PRIVATE_RESULT')
+  await first
+  expect(run.toolActivity()).toEqual({ active: 0, lastDispatch: { id: 2, toolId: 'apply' },
+    lastSettlement: { id: 1, toolId: 'apply', status: 'fulfilled' } })
+  expect(one.active).toBe(1)
+  expect(JSON.stringify(run.toolActivity())).not.toContain('PRIVATE')
+  await run.stream.cancel()
+})
+
+test('cancelled caller does not falsely settle an outstanding dispatch', async () => {
+  let controls!: Parameters<Parameters<typeof runModelAdapter>[0]['start']>[0]
+  let release!: () => void
+  const run = runModelAdapter({ allowedTools: ['apply'],
+    dispatch: async () => new Promise<void>((resolve) => { release = resolve }),
+    start(value) { controls = value; return new ReadableStream() },
+  })
+  const pending = controls.executeTool('apply', {})
+  void pending.catch(() => {})
+  await run.stream.cancel()
+  await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+  expect(run.toolActivity().active).toBe(1)
+  expect(run.toolActivity().lastSettlement).toBeUndefined()
+  release()
+  await new Promise<void>((resolve) => queueMicrotask(resolve))
+  expect(run.toolActivity().active).toBe(0)
+  expect(run.toolActivity().lastSettlement?.status).toBe('fulfilled')
+})
+
+test('sync and async dispatch failures record a rejected invocation only once', async () => {
+  for (const sync of [true, false]) {
+    let controls!: Parameters<Parameters<typeof runModelAdapter>[0]['start']>[0]
+    const run = runModelAdapter({ allowedTools: ['apply'],
+      dispatch: () => { if (sync) throw new Error('PRIVATE'); return Promise.reject(new Error('PRIVATE')) },
+      start(value) { controls = value; return new ReadableStream() },
+    })
+    await expect(controls.executeTool('apply', {})).rejects.toThrow('PRIVATE')
+    expect(run.toolActivity()).toEqual({ active: 0, lastDispatch: { id: 1, toolId: 'apply' },
+      lastSettlement: { id: 1, toolId: 'apply', status: 'rejected' } })
+    await run.stream.cancel()
+  }
+})

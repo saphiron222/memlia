@@ -1,5 +1,5 @@
 # Copyright (c) 2026 Memlia. All rights reserved.
-"""Explicit CI recipe only. No image admission, service, job or model command."""
+"""Explicit CI recipe; optional owned host consumer, never business or model authority."""
 import argparse
 import ast
 import base64
@@ -18,6 +18,7 @@ import tempfile
 import threading
 import time
 import uuid
+import struct
 
 import prepare_context
 import supervisor as s
@@ -260,8 +261,117 @@ def run_case(docker, image, wire, probe, cancel, cases):
         record['missingInspectFields'] = adapter.missing_fields
 
 
-def run(wheelhouse, output):
+def qualification_proof(receipt):
+    """Container cleanup is proven; image cleanup is still pending during consumption."""
+    proof = {'schemaVersion': 'memlia.excel-isolation-proof/v1',
+             **{key: receipt[key] for key in ('imageId', 'sourceCommit', 'lockSha256', 'contextSha256')},
+             'supervisorSha256': s.SOURCE_SHA256, 'imageHeld': True,
+             'cases': {name: {key: result[key] for key in ('passed', 'cleanupComplete')}
+                       for name, result in receipt['cases'].items()}}
+    return s.admission.validate_proof(proof)
+
+
+def consume_through_host(proof, wire, deadline, cancel, record, *, application_work=None):
+    """Explicit root-owned CI consumer; real Unix peer + public execute, no Sim authority."""
+    require(os.getuid() == 0 and time.monotonic() < deadline and not cancel.is_set())
+    s.admission.validate_proof(proof)
+    nonce = uuid.uuid4().hex
+    root = Path('/run') / ('memlia-excel-host-'+nonce)
+    record.update(passed=False, cleanupComplete=False, expectedPeerUid=1001, expectedRefusedUid=1002,
+                  hostNonce=nonce,
+                  resourcesRetained=True, simWorkflowQualified=False, stage='operator_files')
+    root.mkdir(mode=0o755)  # Exclusive; peers may traverse, never write operator configuration.
+    root.chmod(0o755)  # The recipe's umask 077 must not prevent socket traversal.
+    require(root.stat().st_uid==0 and root.stat().st_mode & 0o777 == 0o755)
+    identity = (root.stat().st_dev, root.stat().st_ino)
+    process = None
+    code = root / 'code'
+    code.mkdir(mode=0o755)
+    names = ('admission.py', 'supervisor.py', 'host.py')
+    try:
+        for name in names:
+            raw = Path(__file__).with_name(name).read_bytes()
+            with os.fdopen(os.open(code/name, os.O_CREAT|os.O_EXCL|os.O_WRONLY, 0o400), 'wb') as out:
+                out.write(raw)
+        raw = json.dumps(proof, separators=(',', ':')).encode()
+        operator = s.admission.describe(raw)  # Only this explicit operator mode installs it.
+        for name, data in (('proof.json', raw), ('admission.json', json.dumps(operator).encode())):
+            with os.fdopen(os.open(root/name, os.O_CREAT|os.O_EXCL|os.O_WRONLY, 0o400), 'wb') as out:
+                out.write(data)
+        socket_path = root/'host.sock'
+        record['stage']='host_start'
+        process = subprocess.Popen([sys.executable, '-I', '-B', str(code/'host.py'),
+            str(socket_path), proof['imageId'], '1001', '1001', '--admission-file', str(root/'admission.json')],
+            cwd=root, env={'PATH':'/usr/bin:/bin','HOME':str(root),'LANG':'C.UTF-8',
+                           'PYTHONDONTWRITEBYTECODE':'1'}, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        ready = min(deadline, time.monotonic()+5)
+        while not socket_path.exists():
+            require(process.poll() is None and time.monotonic()<ready and not cancel.is_set())
+            time.sleep(.025)
+        # Fixed stdlib peer fixture: drop groups/GID/UID before reading any frame.
+        client = ("import socket,sys,struct,os\n"
+                  "uid=int(sys.argv[2]);assert uid in (1001,1002);os.setgroups([]);os.setgid(1001);os.setuid(uid);assert os.getuid()==os.geteuid()==uid\n"
+                  "wire=sys.stdin.buffer.read(14*1024**2+1);assert 0<len(wire)<=14*1024**2\n"
+                  "with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as c:\n"
+                  " c.settimeout(125);c.connect(sys.argv[1]);out=bytearray()\n"
+                  " if sys.argv[3]=='allow':c.sendall(struct.pack('!I',len(wire))+wire)\n"
+                  " else:assert sys.argv[3]=='deny'\n"
+                  " while True:\n"
+                  "  part=c.recv(65536)\n"
+                  "  if not part:break\n"
+                  "  out.extend(part);assert len(out)<=14*1024**2+5\n"
+                  " sys.stdout.buffer.write(out)\n")
+        def peer(uid):
+            return s._command(['/usr/bin/python3', '-I', '-S', '-B', '-c', client, str(socket_path), str(uid),
+                'allow' if uid==1001 else 'deny'],
+                wire, min(deadline,time.monotonic()+120), cancel, root, s.MAX_WIRE+5)
+        record['stage']='refused_peer'
+        require(peer(1002) == b'\x01\0\0\0\0', 'host_peer_refusal_missing')
+        record['otherUidRefused']=True
+        record['stage']='accepted_peer'
+        answer = peer(1001)
+        require(len(answer)>5 and answer[0]==0 and struct.unpack('!I',answer[1:5])[0]==len(answer)-5)
+        record['stage']='native_readback'
+        verify_answer(answer[5:])
+        record.update(peerAccepted=True, otherUidRefused=True, sameQualifiedImage=True)
+        if application_work is not None:
+            import application_qualification
+            record['stage']='native_application'
+            record['application']={}
+            application_qualification.consume(socket_path,wire,deadline,cancel,
+                                              application_work,record['application'])
+    finally:
+        closed = process is None
+        if process is not None:
+            if process.poll() is None: process.terminate()  # Known Popen only; host drains its owned work.
+            try:
+                closed = process.wait(timeout=max(.01,min(140,deadline+20-time.monotonic()))) == 0
+            except subprocess.TimeoutExpired:
+                closed = False  # No blind SIGKILL or removal while native cleanup is unknown.
+        record['hostStopped']=closed
+        record['hostExitCode']=None if process is None else process.returncode
+        if closed:
+            try:
+                info=root.lstat()
+                require((info.st_dev,info.st_ino)==identity and not root.is_symlink())
+                require({p.name for p in root.iterdir()}=={'code','proof.json','admission.json'})
+                require({p.name for p in code.iterdir()}==set(names))
+                for path in [*(code/name for name in names), root/'proof.json',root/'admission.json']:
+                    info=path.lstat()
+                    require(info.st_uid==0 and info.st_nlink==1 and path.is_file() and not path.is_symlink())
+                for path in [*(code/name for name in names), root/'proof.json',root/'admission.json']: path.unlink()
+                code.rmdir();root.rmdir()
+                record.update(cleanupComplete=True, resourcesRetained=False)
+            except (OSError,ValueError): closed=False
+        require(closed and record['cleanupComplete'], 'host_cleanup_refused')
+    record.update(passed=True,stage='complete')
+
+
+def run(wheelhouse, output, *, exercise_host=False, exercise_application=False):
     require_linux()
+    require(not exercise_application or exercise_host, 'application_host_required')
+    require(not exercise_host or os.getuid()==0, 'host_operator_required')
     require(not output.exists() and not output.is_symlink())
     output.mkdir(mode=0o700)
     cancel = threading.Event()
@@ -280,7 +390,9 @@ def run(wheelhouse, output):
         end = min(deadline, global_deadline + (20 if cleanup else 0))
         return s._command([*DOCKER, *args], payload, end, cancel, output, limit)
     def git(*args):
-        return subprocess.check_output(['/usr/bin/git', *args], cwd=ROOT, timeout=5, stderr=subprocess.DEVNULL).decode().strip()
+        # Per-command trust for the admitted checkout under the explicit root CI mode.
+        trust = ['-c','safe.directory='+str(ROOT)] if exercise_host else []
+        return subprocess.check_output(['/usr/bin/git', *trust, *args], cwd=ROOT, timeout=5, stderr=subprocess.DEVNULL).decode().strip()
     try:
         check_disk(output, receipt, 'context')
         require(s.QUALIFIED_IMAGES == frozenset())
@@ -313,6 +425,17 @@ def run(wheelhouse, output):
         require(not git('status', '--porcelain', '--untracked-files=no') and git('rev-parse', 'HEAD') == receipt['sourceCommit'])
         require(sha256((ROOT/'runtimes/excel/requirements.lock').read_bytes()).hexdigest() == receipt['lockSha256'])
         require(set(receipt['cases']) == {'worker', *PROBES, 'timeout', 'cancel'})
+        if exercise_host:
+            receipt['phase']='host_consumer'
+            receipt['hostConsumer']={}
+            check_disk(output, receipt, receipt['phase'])
+            held=s._one(docker(['image','inspect',image],deadline=deadline))
+            require(held['Id']==image and held['Config']['Labels']['org.memlia.excel.recipe']==nonce)
+            if exercise_application:
+                consume_through_host(qualification_proof(receipt),wire,deadline,cancel,
+                                     receipt['hostConsumer'],application_work=output/'application')
+            else:
+                consume_through_host(qualification_proof(receipt),wire,deadline,cancel,receipt['hostConsumer'])
         receipt['status'] = 'passed'
         receipt['linuxRecipeCompleted'] = True
     except Exception:
@@ -338,7 +461,11 @@ def run(wheelhouse, output):
         check_disk(output, receipt, 'cleanup_after', enforce=False)
         if not all(row['sufficient'] for row in receipt['diskObservations']):
             receipt.update(status='failed', linuxRecipeCompleted=False, code='recipe_disk_refused')
-        receipt['cleanupComplete'] = image_clean and all(c['cleanupComplete'] for c in receipt['cases'].values())
+        host_clean = 'hostConsumer' not in receipt or receipt['hostConsumer'].get('cleanupComplete') is True
+        application = receipt.get('hostConsumer',{}).get('application')
+        if application is not None:
+            host_clean = host_clean and application.get('cleanupComplete') is True
+        receipt['cleanupComplete'] = image_clean and host_clean and all(c['cleanupComplete'] for c in receipt['cases'].values())
         if not receipt['cleanupComplete']:
             receipt.update(status='failed', linuxRecipeCompleted=False, code='recipe_cleanup_refused')
         for n, handler in old.items():
@@ -356,7 +483,12 @@ if __name__ == '__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--wheelhouse',type=Path,required=True)
     parser.add_argument('--output',type=Path,required=True)
+    parser.add_argument('--exercise-host',action='store_true',
+                        help='Explicit operator CI mode: same-image host/UID qualification before cleanup')
+    parser.add_argument('--exercise-application',action='store_true',
+                        help='Manual native API/file composition using that same host; requires --exercise-host')
     options=parser.parse_args()
-    try: result=run(options.wheelhouse,options.output)
+    try: result=run(options.wheelhouse,options.output,exercise_host=options.exercise_host,
+                   exercise_application=options.exercise_application)
     except Exception: print('{"status":"failed","code":"linux_recipe_unavailable"}');result=1
     raise SystemExit(result)

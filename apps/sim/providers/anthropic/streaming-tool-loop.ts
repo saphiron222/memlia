@@ -1,4 +1,4 @@
-// Modified by Memlia: reserve and bound each controlled streaming SDK turn.
+// Modified by Memlia: reserve and bound each controlled SDK turn; preserve its closed finish reason.
 import { prepareConversationGeneration } from '@/providers/conversation-generation'
 /**
  * Live Anthropic streaming tool loop.
@@ -37,7 +37,11 @@ import {
   executeProviderTool,
   getProviderRuntimeContext,
 } from '@/providers/runtime-context'
-import type { AgentStreamEvent, ToolCallEndStatus } from '@/providers/stream-events'
+import {
+  type AgentStreamEvent,
+  type ToolCallEndStatus,
+  isAgentTurnFinishReason,
+} from '@/providers/stream-events'
 import {
   isAbortError,
   type StreamingToolLoopComplete,
@@ -344,7 +348,14 @@ export function createAnthropicStreamingToolLoopStream(
             if (textChunks.length === 0 && textContent) {
               controller.enqueue({ type: 'text_delta', text: textContent, turn: 'pending' })
             }
-            controller.enqueue({ type: 'turn_end', turn: turnTag })
+            if (!isAgentTurnFinishReason(finalMessage.stop_reason)) {
+              throw new Error('Anthropic stream ended without a supported finish reason')
+            }
+            controller.enqueue({
+              type: 'turn_end',
+              turn: turnTag,
+              finishReason: finalMessage.stop_reason,
+            })
             content = textChunks.length > 0 ? textChunks.join('') : textContent
 
             enrichModelSegment(timeSegments, finalMessage, textContent, request.model, providerId)

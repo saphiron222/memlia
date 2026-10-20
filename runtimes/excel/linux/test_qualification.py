@@ -337,5 +337,116 @@ class DiskBudgetTests(unittest.TestCase):
             requiredFreeBytes=6*1024**3, sufficient=False)])
 
 
+class OperatorConsumptionTests(unittest.TestCase):
+    def test_application_mode_never_creates_resources_without_explicit_host(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder, mock.patch.object(q,'require_linux'):
+            output=Path(folder)/'absent'
+            with self.assertRaisesRegex(ValueError,'^application_host_required$'):
+                q.run(Path(folder),output,exercise_application=True)
+            self.assertFalse(output.exists())
+    def receipt(self):
+        return {'imageId':IMAGE,'sourceCommit':'c'*40,'lockSha256':'d'*64,'contextSha256':'e'*64,
+                'cases':{name:{'passed':True,'cleanupComplete':True} for name in q.s.admission.CASES}}
+
+    def test_proof_requires_all_eight_cases_and_each_owned_cleanup(self):
+        import copy
+        original=self.receipt()
+        value=q.qualification_proof(original)
+        self.assertEqual(value['supervisorSha256'],q.s.SOURCE_SHA256)
+        self.assertTrue(value['imageHeld'])
+        for case in original['cases']:
+            for key in ('passed','cleanupComplete'):
+                changed=copy.deepcopy(original);changed['cases'][case][key]=False
+                with self.subTest(case=case,key=key),self.assertRaises(ValueError):q.qualification_proof(changed)
+        changed=copy.deepcopy(original);del changed['cases']['worker']
+        with self.assertRaises(ValueError):q.qualification_proof(changed)
+
+    def test_explicit_host_mode_requires_root_before_creating_output(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder, mock.patch.object(q,'require_linux'), mock.patch.object(q.os,'getuid',return_value=1001):
+            output=Path(folder)/'absent'
+            with self.assertRaises(ValueError):q.run(Path(folder),output,exercise_host=True)
+            self.assertFalse(output.exists())
+
+    def lifecycle(self, exercise, fail=False, application=False, application_clean=True):
+        import tempfile,hashlib
+        from types import SimpleNamespace
+        observed=[];label=None
+        def context(source,wheels,output,base):
+            output.mkdir();(output/'context.json').write_bytes(b'{}')
+            return {'lockSha256':hashlib.sha256((q.ROOT/'runtimes/excel/requirements.lock').read_bytes()).hexdigest()}
+        def build(args,work,deadline,cancel):
+            nonlocal label
+            if args[0]=='build':
+                label=args[args.index('--label')+1].split('=',1)[1]
+                (work/'image.id').write_text(IMAGE)
+        def docker(argv,payload,deadline,cancel,cwd,limit):
+            args=argv[len(q.DOCKER):]
+            if args[:2]==['image','inspect']:
+                return json.dumps([{'Id':q.PYTHON_CONFIG if args[2]==q.PYTHON_BASE else IMAGE,
+                   'Os':'linux','Architecture':'amd64','Config':{'Labels':{'org.memlia.excel.recipe':label}}}]).encode()
+            if args[:2]==['image','rm']:observed.append('image_removed');return b''
+            if args[:2]==['image','ls']:return b''
+            raise AssertionError('unexpected fixture transport')
+        def run_case(docker,image,wire,probe,cancel,cases):
+            cases[probe or 'worker']={'passed':True,'cleanupComplete':True}
+        def consume(proof,wire,deadline,cancel,record,**options):
+            self.assertNotIn('image_removed',observed)
+            self.assertEqual(set(proof['cases']),set(q.s.admission.CASES))
+            self.assertEqual(proof['imageId'],IMAGE);observed.append('host_consumed')
+            if application:
+                self.assertEqual(options,{'application_work':output/'application'})
+                record['application']={'passed':True,'cleanupComplete':application_clean}
+                observed.append('application_consumed')
+            else:self.assertEqual(options,{})
+            if fail:
+                record.update(cleanupComplete=fail!='unknown',resourcesRetained=fail=='unknown')
+                raise ValueError('fixture_consumer_refused')
+            record.update(passed=True,cleanupComplete=True)
+        with tempfile.TemporaryDirectory() as folder:
+            output=Path(folder)/'owned'
+            with mock.patch.object(q,'require_linux'), mock.patch.object(q.os,'getuid',return_value=0), mock.patch.object(q.shutil,'disk_usage',return_value=SimpleNamespace(free=10*1024**3)), mock.patch.object(q.subprocess,'check_output',side_effect=lambda argv,**kw: b'c'*40 if argv[-2:]==['rev-parse','HEAD'] else b''), mock.patch.object(q.prepare_context,'prepare',side_effect=context), mock.patch.object(q,'build_command',side_effect=build), mock.patch.object(q.s,'_command',side_effect=docker), mock.patch.object(q,'fixture_wire',return_value=b'fixture'), mock.patch.object(q,'run_case',side_effect=run_case), mock.patch.object(q,'consume_through_host',side_effect=consume), mock.patch('builtins.print'):
+                result=q.run(Path(folder)/'wheels',output,exercise_host=exercise,
+                             exercise_application=application)
+            receipt=json.loads((output/'receipt.json').read_bytes())
+        return result,receipt,observed
+
+    def test_default_does_not_admit_or_consume_an_image(self):
+        result,receipt,observed=self.lifecycle(False)
+        self.assertEqual(result,0);self.assertNotIn('hostConsumer',receipt)
+        self.assertEqual(observed,['image_removed']);self.assertFalse(receipt['runtimeActivated'])
+
+    def test_consumer_uses_same_image_after_eight_cases_before_exact_removal(self):
+        result,receipt,observed=self.lifecycle(True)
+        self.assertEqual(result,0);self.assertTrue(receipt['hostConsumer']['passed'])
+        self.assertEqual(observed,['host_consumed','image_removed']);self.assertTrue(receipt['cleanupComplete'])
+        self.assertFalse(receipt['runtimeActivated'])
+
+    def test_manual_application_is_composed_before_same_image_cleanup(self):
+        result,receipt,observed=self.lifecycle(True,application=True)
+        self.assertEqual(result,0)
+        self.assertEqual(observed,['host_consumed','application_consumed','image_removed'])
+        self.assertTrue(receipt['hostConsumer']['application']['passed'])
+        self.assertTrue(receipt['cleanupComplete'])
+
+    def test_unknown_application_cleanup_never_qualifies_the_recipe(self):
+        result,receipt,_=self.lifecycle(True,application=True,application_clean=False)
+        self.assertEqual(result,1)
+        self.assertFalse(receipt['cleanupComplete'])
+        self.assertEqual(receipt['code'],'recipe_cleanup_refused')
+
+    def test_consumer_refusal_remains_failed_and_keeps_original_image_cleanup(self):
+        result,receipt,observed=self.lifecycle(True,fail=True)
+        self.assertEqual(result,1);self.assertEqual(receipt['status'],'failed')
+        self.assertEqual(observed,['host_consumed','image_removed']);self.assertTrue(receipt['cleanupComplete'])
+
+    def test_unknown_host_cleanup_cannot_claim_global_cleanup_complete(self):
+        result,receipt,observed=self.lifecycle(True,fail='unknown')
+        self.assertEqual(result,1);self.assertFalse(receipt['cleanupComplete'])
+        self.assertTrue(receipt['hostConsumer']['resourcesRetained'])
+        self.assertEqual(receipt['code'],'recipe_cleanup_refused')
+
+
 if __name__ == '__main__':
     unittest.main()

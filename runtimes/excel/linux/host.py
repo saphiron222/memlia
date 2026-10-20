@@ -62,7 +62,7 @@ def _send_refusal(connection):
         pass
 
 
-def handle(connection, image, allowed_uid, stop):
+def handle(connection, image, allowed_uid, stop, image_admission=None):
     """Return False on unknown cleanup; the host must then stop accepting work."""
     cancel = threading.Event()
     finished = threading.Event()
@@ -101,7 +101,11 @@ def handle(connection, image, allowed_uid, stop):
         if cancel.is_set():
             refuse()
         clean = False
-        result, receipt = supervisor.execute(image, wire, cancel=cancel)
+        if image_admission is None:
+            result, receipt = supervisor.execute(image, wire, cancel=cancel)
+        else:
+            result, receipt = supervisor.execute(image, wire, cancel=cancel,
+                                                  image_admission=image_admission)
         clean = receipt.get("cleanupComplete") is True
         if not clean or cancel.is_set() or stop.is_set():
             refuse()
@@ -154,7 +158,7 @@ def _socket_identity(path):
     return row.st_dev, row.st_ino, row.st_uid, row.st_gid, stat.S_IMODE(row.st_mode)
 
 
-def serve(path, image, allowed_uid, socket_gid, stop):
+def serve(path, image, allowed_uid, socket_gid, stop, *, admission_file=None):
     """Operator-only entry. The caller installs signals; no arbitrary paths from a request."""
     path = Path(path)
     operator_uid = os.getuid()
@@ -169,6 +173,9 @@ def serve(path, image, allowed_uid, socket_gid, stop):
     ):
         refuse()
     _parents(path, operator_uid, allowed_uid)
+    # Operator configuration is captured outside the frame before any listener exists.
+    image_admission = None if admission_file is None else supervisor.admission.capture(
+        admission_file, image, supervisor.SOURCE_SHA256)
     # Never unlink a stale/foreign socket. Operator reconciliation is required.
     if path.exists() or path.is_symlink():
         refuse()
@@ -192,7 +199,7 @@ def serve(path, image, allowed_uid, socket_gid, stop):
 
         def run(connection):
             try:
-                if not handle(connection, image, allowed_uid, stop):
+                if not handle(connection, image, allowed_uid, stop, image_admission):
                     poisoned.set()
                     stop.set()
             finally:
@@ -234,9 +241,14 @@ def main():
     stop = threading.Event()
     previous = {}
     try:
-        if len(sys.argv) != 5:
+        if len(sys.argv) not in (5, 7):
             refuse()
-        path, image, uid, gid = sys.argv[1:]
+        path, image, uid, gid = sys.argv[1:5]
+        admission_file = None
+        if len(sys.argv) == 7:
+            if sys.argv[5] != '--admission-file':
+                refuse()
+            admission_file = sys.argv[6]
         if (
             not uid.isascii()
             or not uid.isdecimal()
@@ -246,7 +258,7 @@ def main():
             refuse()
         for value in (signal.SIGTERM, signal.SIGINT):
             previous[value] = signal.signal(value, lambda *_: stop.set())
-        serve(path, image, int(uid), int(gid), stop)
+        serve(path, image, int(uid), int(gid), stop, admission_file=admission_file)
         return 0
     except Exception:
         print("excel_host_refused", file=sys.stderr)

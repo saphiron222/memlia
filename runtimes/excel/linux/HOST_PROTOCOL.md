@@ -3,13 +3,45 @@
 Le client `apps/sim/lib/execution/sandbox/excel-host.ts` et le processus hôte
 `host.py` raccordent le protocole `memlia.excel-process/v1` au superviseur natif.
 Ils ne constituent ni une file de jobs, ni une autorisation de fichier, ni une
-publication. `QUALIFIED_IMAGES` reste vide : tout appel réel à `execute` refuse.
-L'image éphémère de la recette CI a été supprimée et n'est pas réutilisée.
+publication. `QUALIFIED_IMAGES` reste vide : sans admission opérateur locale
+explicitement capturée, tout appel réel à `execute` refuse. L'ancienne image
+éphémère supprimée n'est pas réutilisée ; aucune preuve historique n'est réattribuée.
+
+## Admission opérateur hors requête
+
+L'option CLI `--admission-file` est réservée à l'opérateur. `serve` capture sa
+configuration avant de créer le listener ; ni le frame, ni un champ de procédure,
+ni le modèle ne choisit ce chemin, le digest ou la preuve. Sans option, le défaut
+reste fermé. Aucun fallback ni allowlist modifiée en mémoire.
+
+`admission.json` et son seul voisin fixe `proof.json` sont des fichiers réguliers
+0400, avec un lien unique, appartenant à l'UID du host. Leurs ancêtres réels sont
+possédés par root ou le host, sans écriture groupe/autres. Les métadonnées sont
+comparées entre lstat, fstat et après lecture, ainsi que l'identité des ancêtres.
+Deux JSON de 16 Kio maximum, sans clé dupliquée/extra ni valeur non finie, sont
+capturés : aucune lecture différée de configuration mutable pendant le travail.
+
+Le schéma opérateur `memlia.excel-local-admission/v1`, `purpose:local-host`, lie
+`imageId`, `sourceCommit`, `lockSha256`, `contextSha256`, `supervisorSha256` et
+`proofSha256`. La preuve `memlia.excel-isolation-proof/v1` porte les cinq mêmes
+identités, `imageHeld:true` et exactement les huit cas de qualification, chacun
+avec `passed:true` et `cleanupComplete:true`. Le hash du superviseur doit être
+celui réellement chargé ; `execute` exige l'objet immuable capturé pour cette
+image et ce code. Une chaîne `sha256`, un dict transmis par le demandeur ou le
+statut d'une ancienne campagne ne suffisent pas.
+
+Ce fichier est une décision locale de l'opérateur, pas une signature prouvant à
+lui seul l'exécution de tests. L'opérateur doit examiner la provenance et les vrais
+résultats avant de l'installer. La recette CI manuelle installe cette configuration
+uniquement après ses huit oracles réels, puis la retire avec son namespace. Aucun
+registre public ni admission métier/permission de fichier n'en découle. Un process
+host ou un administrateur compromis reste hors de cette frontière de confiance.
 
 ## Déploiement et identité
 
-`host.py` reçoit exactement quatre arguments opérateur : chemin absolu du socket,
-ID d'image `sha256`, UID du worker autorisé et GID du socket. Il charge le seul
+`host.py` reçoit quatre arguments opérateur : chemin absolu du socket,
+ID d'image `sha256`, UID du worker autorisé et GID du socket, ainsi que l'option
+explicite `--admission-file` décrite ci-dessus. Il charge le seul
 `supervisor.py` adjacent, sans module choisi par le demandeur. Le processus hôte
 est distinct de Next et du worker métier ; lui seul dispose du socket Docker.
 Son répertoire, son code et sa configuration sont installés par l'opérateur.
@@ -63,7 +95,7 @@ côté client ne prouve pas à elle seule que le nettoyage distant est terminé 
 elle refuse la sortie, tandis que le service conserve le travail actif jusqu'au
 retour du superviseur. L'écriture de réponse hôte est bornée à cinq secondes.
 
-## Réemploi et prochain appelant métier
+## Réemploi et parcours métier restant à qualifier
 
 `excel-process-protocol.ts` contient la capture JSON stricte et la revalidation
 extraites du caller historique : base64 canonique, tailles, digests, rôles,
@@ -72,14 +104,13 @@ son exécution locale historique pour ses callers explicites et tests ; ce n'est
 jamais le fallback du nouveau client. Le nouveau client restitue seulement
 `prepared_in_memory`, `published:false` après cette même revalidation.
 
-Le prochain appelant est un outil Excel générique interne du moteur Sim :
-`GenericBlockHandler` → `executeTool` avec `options.executionContext` → registre
-interne → résultat du bloc. Il devra résoudre chaque sélection par
-`readWorkspaceFileContent.execute`, recontrôler portée/version/provenance avant
-publication et conserver les classifications contributrices. Le mécanisme natif
-`storeInternalToolFileResult` appelle déjà `uploadExecutionFile` ; sa frontière
-de provenance devra être raccordée explicitement avant usage Excel. Le vrai run
-enregistrera le `UserFile` dans son output puis finalisera normalement.
+L'outil générique `executeExcelFile` existe déjà dans le moteur Sim : il résout
+les sélections avec `readWorkspaceFileContent.execute`, vérifie l'autorité native,
+appelle `prepareExcelThroughHost` et lie la publication à une nouvelle lecture
+de portée/version/provenance avec `bindInternalToolFilePublication`. Le mécanisme
+natif `storeInternalToolFileResult` appelle `uploadExecutionFile`. Le futur run
+composé devra attester ces ports réels, enregistrer le `UserFile` dans son output
+et finaliser normalement.
 `downloadWorkflowRunFileStream` revalidera ensuite le run terminal et l'accès au
 contenu. Aucun faux run, appel manuel à `LoggingSession.complete`, registre
 d'outil ou stockage n'est ajouté par cette tranche.
@@ -98,7 +129,8 @@ mais le refus de l'image inconnue utilise la vraie gate vide. Le cas natif
 `SO_PEERCRED` est explicitement sauté sur Mac, sans en faire une réussite.
 Ils couvrent aussi le refus busy, le cleanup inconnu, les cadres incomplets et
 le refus de supprimer un socket remplacé. Les trente tests historiques du
-caller sont conservés ; le superviseur et ses tests restent inchangés.
+caller, les cinq fonctions de transport/cleanup du superviseur et ses tests
+sont conservés ; seule sa gate publique reçoit l'admission opérateur.
 
 Cette tranche ne qualifie ni image distribuable, ni peer Linux réel, ni
 publication/téléchargement métier, ni DB, ni exécution depuis l'UI. Ces portes

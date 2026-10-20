@@ -1,3 +1,5 @@
+// Modified by Memlia (2026): preserve protected notes during targeted layout.
+import { isWorkflowBlockProtected } from '@sim/workflow-types/workflow'
 import {
   BLOCK_DIMENSIONS,
   CONTAINER_DIMENSIONS,
@@ -592,6 +594,8 @@ export function resolveNoteOverlaps(
 
     for (const id of noteIds) {
       const note = blocks[id]
+      // Targeted edits must not move annotations protected directly or by a container.
+      if (previousBlocks && isWorkflowBlockProtected(id, blocks)) continue
       const dimensions = getNoteDimensions(note)
       const noteBox = createBoundingBox(note.position, dimensions)
 

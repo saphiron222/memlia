@@ -106,7 +106,7 @@ import { StreamWriter } from '@/lib/mothership/request/session/writer'
 import type { StreamEvent } from '@/lib/mothership/request/types'
 import type { AgentStreamEvent } from '@/providers/stream-events'
 import { runLocalChat } from './local-driver.server'
-import { runModelAdapter } from './model-adapter'
+import { ModelAdapterStop, runModelAdapter } from './model-adapter'
 
 const tool = 'memlia_apply_workflow_proposal'
 const proposal = () => ({
@@ -155,7 +155,7 @@ function nativeRun(
   options: any,
   work: (o: any, signal: AbortSignal) => Promise<AgentStreamEvent[]>
 ) {
-  return runModelAdapter<AgentStreamEvent, unknown>({
+  const run = runModelAdapter<AgentStreamEvent, unknown>({
     signal: options.signal,
     limits: options.limits,
     allowedTools: [],
@@ -173,6 +173,7 @@ function nativeRun(
         },
       }),
   })
+  return { ...run, workflowPreparation: () => Object.freeze({ evaluated: 0, refused: 0 }) }
 }
 beforeEach(() => {
   setEnvFlags({ isHosted: false, isCopilotToolPermissionsEnabled: true })
@@ -961,4 +962,377 @@ it('P11 composes Excel analysis through native budget/provider, lifecycle SSE an
     dataflow: { declaredDataflowValid: true },
     capabilities: { primitiveOptionsCompatible: true },
   })
+})
+
+function exhaustedProposalProvider(
+  after: 'none' | 'later_tool' | 'parallel_tool' | 'rejected_tool' | 'active_tool' | 'second_proposal' = 'none',
+  hooks: { before?: () => void; after?: () => void; skipProposal?: boolean } = {}
+) {
+  return async (o: any) => {
+    let releaseOther!: () => void
+    const other = new Promise<void>((resolve) => { releaseOther = resolve })
+    const run = runModelAdapter<AgentStreamEvent, unknown>({
+      limits: { maxModelCalls: 1 }, signal: o.signal,
+      allowedTools: ['propose_workflow_operations', 'read_workflow'],
+      dispatch: async (name, _params, signal) => {
+        if (name === 'propose_workflow_operations') return o.proposal.onProposal(proposal(), signal)
+        if (after === 'rejected_tool') throw new Error('PRIVATE_TOOL_ERROR')
+        if (after === 'parallel_tool' || after === 'active_tool') await other
+        return { ok: true }
+      },
+      start: (controls) => new ReadableStream({
+        async start(controller) {
+          try {
+            controls.beforeModelCall()
+            // Model transport is asynchronous; dispatch occurs after the run is returned.
+            await new Promise<void>((resolve) => setImmediate(resolve))
+            const parallel = after === 'parallel_tool'
+              ? controls.executeTool('read_workflow', {}) : undefined
+            hooks.before?.()
+            if (!hooks.skipProposal) await controls.executeTool('propose_workflow_operations', {})
+            hooks.after?.()
+            if (after === 'later_tool' || after === 'rejected_tool') await controls.executeTool('read_workflow', {})
+            if (after === 'second_proposal') await controls.executeTool('propose_workflow_operations', {})
+            if (after === 'active_tool') void controls.executeTool('read_workflow', {}).catch(() => {})
+            if (after !== 'active_tool') releaseOther()
+            await parallel
+            controls.beforeModelCall()
+            controller.enqueue({ type: 'turn_end', turn: 'final' })
+            controller.close()
+          } catch (error) { controller.error(error) } finally { releaseOther() }
+        },
+      }),
+    })
+    return { ...run, workflowPreparation: () => Object.freeze({ evaluated: 0, refused: 0 }) }
+  }
+}
+
+it('v6 diagnosis — exact applied receipt at exhaustion reports only the certain edit', async () => {
+  const f = fixture()
+  infra.provider.mockImplementation(exhaustedProposalProvider())
+  await runLocalChat(input(), f.context, f.exec, f.options)
+  expect(infra.execute).toHaveBeenCalledOnce()
+  expect(f.context.toolCalls.get('proposal-a')?.result?.output).toEqual({
+    status: 'applied', baseRevision: 7, draftRevision: 8,
+  })
+  expect(f.context.completionStatus).toBe('complete')
+  expect(f.context.accumulatedContent).toBe(
+    'Modification appliquée, révision 8. Limite d’appels atteinte ; test non effectué.'
+  )
+})
+
+it.each(['later_tool', 'parallel_tool', 'rejected_tool', 'active_tool', 'second_proposal'] as const)(
+  'v6 diagnosis — an unconsumed %s cannot turn an older applied effect into final success',
+  async (after) => {
+    const f = fixture()
+    infra.provider.mockImplementation(exhaustedProposalProvider(after))
+    await expect(runLocalChat(input(), f.context, f.exec, f.options)).rejects.toThrow(
+      'Local Chat is unavailable.'
+    )
+    expect(infra.execute).toHaveBeenCalledOnce()
+    expect(f.context.completionStatus).not.toBe('complete')
+  }
+)
+
+
+it.each(['skip', 'unknown', 'scope', 'abort', 'duration', 'pending', 'fake_stop', 'before_proposal', 'revision'] as const)(
+  'v6 diagnosis — %s never receives the deterministic applied terminal',
+  async (scenario) => {
+    const f = fixture()
+    const abort = new AbortController()
+    if (scenario === 'skip') infra.wait.mockResolvedValue({ decision: 'skip' })
+    if (scenario === 'unknown') infra.execute.mockResolvedValue({ status: 'unknown' })
+    if (scenario === 'revision') infra.execute.mockResolvedValue({ status: 'applied', baseRevision: 7, draftRevision: 7 })
+    infra.provider.mockImplementation(exhaustedProposalProvider('none', {
+      skipProposal: scenario === 'before_proposal',
+      after() {
+        if (scenario === 'scope') f.exec.workflowId = 'foreign'
+        if (scenario === 'abort') abort.abort()
+        if (scenario === 'duration') throw new ModelAdapterStop('duration')
+        if (scenario === 'fake_stop') throw Object.assign(new Error('PRIVATE'), { code: 'model_calls' })
+        if (scenario === 'pending') f.context.pendingToolPromises.set('other', new Promise(() => {}))
+      },
+    }))
+    await expect(runLocalChat(input(), f.context, f.exec, { ...f.options, abortSignal: abort.signal }))
+      .rejects.toThrow('Local Chat is unavailable.')
+    expect(f.context.completionStatus).not.toBe('complete')
+    expect(f.context.accumulatedContent).not.toContain('Limite d’appels atteinte')
+    expect(JSON.stringify(f.events)).not.toMatch(/PRIVATE|model_calls/)
+  }
+)
+
+it.each(['Aperçu terminé. Confirmez-vous ?', 'Quel taux souhaitez-vous utiliser ?'])(
+  'completion protocol — preview followed by text remains preparation only: %s',
+  async (text) => {
+    const f = fixture()
+    infra.provider.mockImplementation(async (o) => ({
+      ...nativeRun(o, async () => [
+        { type: 'text_delta', text, turn: 'final' },
+        { type: 'turn_end', turn: 'final' },
+      ]),
+      workflowPreparation: () => Object.freeze({ evaluated: 1, refused: 0 }),
+    }))
+    await runLocalChat(input(), f.context, f.exec, f.options)
+    expect(f.events.at(-1)).toMatchObject({
+      type: 'complete',
+      payload: {
+        status: 'complete',
+        response: {
+          workflow: {
+            stage: 'preparation_only',
+            previews: { evaluated: 1, refused: 0 },
+            proposals: { created: 0, applied: 0, skipped: 0 },
+            workflowExecutionByThisChatBackend: 'not_performed',
+          },
+        },
+      },
+    })
+    expect(f.context.accumulatedContent).toBe(text)
+    expect(infra.execute).not.toHaveBeenCalled()
+    expect(infra.wait).not.toHaveBeenCalled()
+  }
+)
+
+it.each(['Comment souhaitez-vous nommer le bloc ?', 'Ce bloc transforme une liste.'])(
+  'completion protocol — descriptive or clarification text is not a workflow effect: %s',
+  async (text) => {
+    const f = fixture()
+    infra.provider.mockImplementation(async (o) => ({
+      ...nativeRun(o, async () => [
+        { type: 'text_delta', text, turn: 'final' },
+        { type: 'turn_end', turn: 'final' },
+      ]),
+      workflowPreparation: () => Object.freeze({ evaluated: 0, refused: 0 }),
+    }))
+    await runLocalChat(input(), f.context, f.exec, f.options)
+    expect(f.events.at(-1)).toMatchObject({
+      payload: {
+        status: 'complete',
+        response: {
+          workflow: { stage: 'no_preparation', proposals: { created: 0, applied: 0, skipped: 0 } },
+        },
+      },
+    })
+    expect(f.context.accumulatedContent).toBe(text)
+    expect(infra.execute).not.toHaveBeenCalled()
+  }
+)
+
+it.each(['allow', 'skip'] as const)(
+  'completion protocol — only native %s receipts determine the effect',
+  async (decision) => {
+    const f = fixture()
+    infra.wait.mockResolvedValue({ decision })
+    await runLocalChat(input(), f.context, f.exec, f.options)
+    expect(f.events.at(-1)).toMatchObject({
+      payload: {
+        response: {
+          workflow: {
+            stage: decision === 'allow' ? 'applied' : 'proposal_not_applied',
+            proposals: {
+              created: 1,
+              applied: decision === 'allow' ? 1 : 0,
+              skipped: decision === 'skip' ? 1 : 0,
+            },
+            ...(decision === 'allow'
+              ? { latestAppliedRevision: { baseRevision: 7, draftRevision: 8 } }
+              : {}),
+            workflowExecutionByThisChatBackend: 'not_performed',
+          },
+        },
+      },
+    })
+  }
+)
+
+it('completion protocol — publisher mutation cannot modify the native receipt or grant effects', async () => {
+  const f = fixture()
+  infra.wait.mockResolvedValue({ decision: 'skip' })
+  await runLocalChat(input(), f.context, f.exec, {
+    ...f.options,
+    onEvent: async (e) => {
+      await f.options.onEvent(e)
+      if (e.type === 'complete')
+        e.payload.response = { workflow: { stage: 'applied', private: 'CANARY' } }
+    },
+  })
+  expect(f.events.at(-1)).toMatchObject({
+    payload: { response: { workflow: { stage: 'proposal_not_applied' } } },
+  })
+  expect(infra.execute).not.toHaveBeenCalled()
+  expect(JSON.stringify(f.events)).not.toContain('CANARY')
+})
+
+it('completion protocol — leased native SSE persists preparation metadata without creating approval', async () => {
+  const f = fixture()
+  infra.provider.mockImplementation(async (o) => ({
+    ...nativeRun(o, async () => [
+      { type: 'text_delta', text: 'Confirmez-vous ?', turn: 'final' },
+      { type: 'turn_end', turn: 'final' },
+    ]),
+    workflowPreparation: () => Object.freeze({ evaluated: 1, refused: 0 }),
+  }))
+  const writer = new StreamWriter({
+    streamId: 'stream-a',
+    requestId: 'request-a',
+    lease: { key: 'lease-a', value: 'owner-a' },
+  })
+  const stream = new ReadableStream({
+    start(c) {
+      writer.attach(c)
+    },
+  })
+  const body = new Response(stream).text()
+  await runLocalChat(input(), f.context, f.exec, {
+    ...f.options,
+    onEvent: (e) => writer.publish(e),
+  })
+  await writer.close()
+  const text = await body
+  const frames = text
+    .split('\n')
+    .filter((line) => line.startsWith('data: '))
+    .map((line) => JSON.parse(line.slice(6)))
+  expect(frames.filter((e) => e.type === 'complete')).toHaveLength(1)
+  expect(frames.find((e) => e.type === 'complete')).toMatchObject({
+    payload: {
+      status: 'complete',
+      response: {
+        workflow: { stage: 'preparation_only', proposals: { created: 0, applied: 0, skipped: 0 } },
+      },
+    },
+  })
+  expect(JSON.stringify(infra.append.mock.calls)).toContain('preparation_only')
+  expect(text).not.toMatch(/PRIVATE_|operations|approval/)
+  expect(infra.execute).not.toHaveBeenCalled()
+  expect(infra.wait).not.toHaveBeenCalled()
+})
+
+it('completion protocol — a late native dispatch cannot be attested as no preparation', async () => {
+  const f = fixture()
+  let release!: () => void
+  const hold = new Promise<void>(resolve => { release = resolve })
+  let pending: Promise<unknown> | undefined
+  let settled = false
+  infra.provider.mockImplementation(async options => {
+    const run = runModelAdapter<AgentStreamEvent, unknown>({
+      signal: options.signal,
+      allowedTools: ['preview_workflow_operations'],
+      dispatch: async () => { await hold; settled = true; return {} },
+      start: controls => new ReadableStream({ start(controller) {
+        controls.beforeModelCall()
+        pending = controls.executeTool('preview_workflow_operations', {})
+        void pending.catch(() => {})
+        controller.enqueue({ type: 'turn_end', turn: 'final' })
+        controller.close()
+      } }),
+    })
+    return { ...run, workflowPreparation: () => Object.freeze({ evaluated: settled ? 1 : 0, refused: 0 }) }
+  })
+  try {
+    await expect(runLocalChat(input(), f.context, f.exec, f.options)).rejects.toThrow('Local Chat is unavailable.')
+    expect(settled).toBe(false)
+    expect(f.events.some(e => e.type === 'complete')).toBe(false)
+    expect(infra.execute).not.toHaveBeenCalled()
+  } finally {
+    release()
+    await pending?.catch(() => {})
+  }
+})
+
+it('completion protocol — missing native activity observation cannot attest a terminal outcome', async () => {
+  const f = fixture()
+  infra.provider.mockImplementation(async o => ({
+    ...nativeRun(o, async () => [{ type: 'turn_end', turn: 'final' }]),
+    toolActivity: undefined,
+  }))
+  await expect(runLocalChat(input(), f.context, f.exec, f.options)).rejects.toThrow('Local Chat is unavailable.')
+  expect(f.events.some(e => e.type === 'complete')).toBe(false)
+})
+
+it.each(['end_turn', 'stop_sequence', 'max_tokens', undefined] as const)(
+  'finish reason — empty final %s is observable without inventing preparation',
+  async (finishReason) => {
+    const f = fixture()
+    infra.provider.mockImplementation(async (o) =>
+      nativeRun(o, async () => [
+        { type: 'turn_end', turn: 'intermediate', finishReason: 'tool_use' },
+        { type: 'turn_end', turn: 'final', ...(finishReason ? { finishReason } : {}) },
+      ])
+    )
+    await runLocalChat(input(), f.context, f.exec, f.options)
+    expect(f.events.at(-1)).toMatchObject({
+      type: 'complete',
+      payload: {
+        status: 'complete',
+        response: {
+          modelTurn: { finishReason: finishReason ?? 'not_observed' },
+          workflow: {
+            stage: 'no_preparation',
+            workflowExecutionByThisChatBackend: 'not_performed',
+          },
+        },
+      },
+    })
+    expect(f.context.accumulatedContent).toBe('')
+    expect(infra.execute).not.toHaveBeenCalled()
+  }
+)
+
+it('finish reason — output limit after a certain application preserves it exactly once', async () => {
+  const f = fixture()
+  infra.provider.mockImplementation(async (o) =>
+    nativeRun(o, async (o, signal) => {
+      await o.proposal.onProposal(proposal(), signal)
+      return [
+        { type: 'text_delta', text: 'Partial', turn: 'pending' },
+        { type: 'turn_end', turn: 'final', finishReason: 'max_tokens' },
+      ]
+    })
+  )
+  await runLocalChat(input(), f.context, f.exec, f.options)
+  expect(infra.execute).toHaveBeenCalledOnce()
+  expect(f.events.at(-1)).toMatchObject({
+    payload: {
+      response: {
+        modelTurn: { finishReason: 'max_tokens' },
+        workflow: {
+          stage: 'applied',
+          latestAppliedRevision: { baseRevision: 7, draftRevision: 8 },
+          workflowExecutionByThisChatBackend: 'not_performed',
+        },
+      },
+    },
+  })
+  expect(f.context.accumulatedContent).toBe('Partial')
+})
+
+it.each(['PRIVATE_RAW_REASON', 'tool_use'])(
+  'finish reason — invalid final reason refuses without leaking %s',
+  async (finishReason) => {
+    const f = fixture()
+    infra.provider.mockImplementation(async (o) =>
+      nativeRun(o, async () => [
+        { type: 'turn_end', turn: 'final', finishReason } as unknown as AgentStreamEvent,
+      ])
+    )
+    await expect(runLocalChat(input(), f.context, f.exec, f.options)).rejects.toThrow()
+    expect(f.events.some((e) => e.type === 'complete')).toBe(false)
+    expect(JSON.stringify(f.events)).not.toContain('PRIVATE_RAW_REASON')
+  }
+)
+
+it('finish reason — the certain model-call-limit terminal has no provider final reason', async () => {
+  const f = fixture()
+  infra.provider.mockImplementation(exhaustedProposalProvider())
+  await runLocalChat(input(), f.context, f.exec, f.options)
+  expect(f.events.at(-1)).toMatchObject({
+    payload: {
+      response: {
+        modelTurn: { finishReason: 'not_observed' },
+        workflow: { stage: 'applied' },
+      },
+    },
+  })
+  expect(infra.execute).toHaveBeenCalledOnce()
 })

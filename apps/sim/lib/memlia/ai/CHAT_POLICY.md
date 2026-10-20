@@ -71,6 +71,32 @@ alphanumérique/underscore/tiret de1à128caractères et une version entière1à2
 Les objets et sous-objets sont copiés et figés ; les getters, symboles, champs
 cachés et clés supplémentaires restent interdits.
 
+`localBackend.thinkingLevel` est un réglage administrateur facultatif, réservé à
+Anthropic où le provider natif le consomme. Son absence conserve le comportement
+précédent : aucun niveau n'est ajouté à la requête. Une valeur présente doit être
+une chaîne exacte du catalogue `getThinkingCapability(model).levels`, ou `none`
+si ce modèle déclare explicitement `noneMode`. Aucun alias, normalisation ou
+substitution ; OpenAI, les niveaux inconnus, NULL et undefined présents refusent
+avant attente d'autorisation et lecture de clé. Le navigateur, le prompt et les
+résultats d'outils ne peuvent choisir ce réglage.
+
+`none` ne signifie pas uniformément « raisonnement désactivé » : le mode natif
+déclaré peut être `disabled` (Haiku5.5) ou `between_tools` (Sonnet5.5, raisonnement
+entre les appels d'outils). Si aucun `noneMode` explicite n'existe, cette option
+administrateur refuse `none` au lieu de promettre une désactivation lorsque le
+provider omettrait simplement le champ. Les noms ici illustrent le catalogue de
+cette version ; aucune liste parallèle ni qualification des modèles n'est créée.
+
+Le niveau est copié comme primitive avant le premier await puis détaché avec les
+options locales. Il ne rejoint ni l'intent utilisateur persistant ni une clé.
+`maxTokens` reste exactement `pricingProfile.bounds.outputTokens` de la fenêtre
+versionnée ; prix, réserves et plafonds12appels/40outils/180s ne changent pas. Un
+niveau déclaré avec un budget manuel peut pousser le provider à relever sa sortie :
+le garde Anthropic observé refuse toujours cet ajustement avant transport, sans
+repli ni réévaluation implicite du budget. Niveau déclaré compatible et requête
+réellement admissible sont donc distincts. Des tests SDK/API doublée vérifient les
+payloads ; ils ne garantissent ni acceptation réelle, ni qualité, ni économie IA.
+
 Cette sélection admet `openai` ou `anthropic`, avec un profil budgétaire canonique
 portant exactement le même provider et modèle. Le chemin Anthropic observé exige
 la boucle streaming d'outils native, un usage complet et `service_tier: standard` ;

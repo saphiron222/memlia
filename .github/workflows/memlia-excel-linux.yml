@@ -2,6 +2,17 @@
 name: Packaging Excel Linux — installation et procédure natives
 on:
   workflow_dispatch:
+    inputs:
+      exercise_host:
+        description: Qualifier le host et les UID sur la même image après les huit cas (opérateur seulement)
+        required: false
+        default: false
+        type: boolean
+      exercise_application:
+        description: Composer les API natives fichier/workflow/téléchargement sur le même host (sans HTTP/Next)
+        required: false
+        default: false
+        type: boolean
   pull_request:
     paths:
       - .github/workflows/memlia-excel-linux.yml
@@ -23,7 +34,7 @@ jobs:
     # Private-runner quotas must be approved before enabling metered minutes.
     if: github.event.repository.private == false && github.repository == 'saphiron222/memlia'
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 40
     env:
       PIP_CONFIG_FILE: /dev/null
       PIP_DISABLE_PIP_VERSION_CHECK: '1'
@@ -74,16 +85,88 @@ jobs:
           timeout --signal=TERM --kill-after=10s 2m \
             "$RUNNER_TEMP/memlia-excel-test-tools/bin/python" -B -m unittest discover \
             -s runtimes/excel/linux -p 'test_*.py' -v
-      - name: Qualifier réellement le worker isolé Linux AMD64
+      - name: Préparer les outils applicatifs verrouillés, seulement sur demande manuelle
+        if: github.event_name == 'workflow_dispatch' && inputs.exercise_application
         shell: bash
         run: |
           set -euo pipefail
           umask 077
+          private="$RUNNER_TEMP/memlia-excel-application"
+          mkdir "$private" "$private/tools" "$private/install"
+          chmod 755 "$private" "$private/tools"
+          image='node:24.22.0-bookworm@sha256:14078204b6bb268c107ceff6d3c43f45a888105e5c2b18b14c32b3409d93a1b0'
+          name="memlia-excel-tools-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          cleanup() {
+            [[ -f "$private/install.cid" ]] || return 0
+            local id found observed
+            id="$(cat "$private/install.cid")"; [[ "$id" =~ ^[a-f0-9]{64}$ ]] || return 1
+            found="$(timeout 10 docker container ls --all --no-trunc --quiet --filter "id=$id")" || return 1
+            [[ -n "$found" ]] || return 0
+            [[ "$found" == "$id" ]] || return 1
+            observed="$(timeout 10 docker inspect --format '{{.Id}} {{index .Config.Labels "org.memlia.excel.tools"}}' "$id")" || return 1
+            [[ "$observed" == "$id $name" ]] || return 1
+            timeout 15 docker stop --time 5 "$id" > /dev/null || return 1
+            timeout 10 docker rm "$id" > /dev/null || return 1
+            [[ -z "$(timeout 10 docker container ls --all --no-trunc --quiet --filter "id=$id")" ]]
+          }
+          trap 'code=$?; cleanup || code=1; exit "$code"' EXIT
+          python3 -c 'import os,shutil; assert shutil.disk_usage(os.environ["RUNNER_TEMP"]).free >= 6*1024**3'
+          timeout --kill-after=10s 180s docker pull --platform linux/amd64 "$image" > "$private/node-pull.private.log" 2>&1
+          curl --fail --location --silent --show-error --max-time 120 \
+            https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64.zip --output "$private/bun.zip"
+          printf '%s  %s\n' '36368faef7527875d5ffa52e53cd48021741f2a83eb6208a8dd64068d422a913' "$private/bun.zip" | sha256sum --check
+          unzip -q "$private/bun.zip" -d "$private/tools"
+          timeout --signal=TERM --kill-after=15s 960s docker run --name "$name" --cidfile "$private/install.cid" \
+            --platform linux/amd64 --label "org.memlia.excel.tools=$name" --user "$(id -u):$(id -g)" \
+            --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+            --cpus 2 --memory 4g --memory-swap 4g --pids-limit 256 \
+            --tmpfs /tmp:rw,nosuid,nodev,size=512m --workdir /work \
+            --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/work" \
+            --mount "type=bind,src=$private/tools,dst=/tools,readonly" \
+            --mount "type=bind,src=$private/install,dst=/scratch" \
+            --env PATH=/tools/bun-linux-x64:/usr/local/bin:/usr/bin:/bin --env HOME=/scratch --env CI=true \
+            "$image" python3 -B scripts/ci/linux-build-metrics.py --phase install --timeout 900 --report /scratch/result.json -- \
+            bash -ec '
+              test "$(node --version)" = v24.22.0; test "$(bun --version)" = 1.4.2
+              test "$(cat /sys/fs/cgroup/memory.max)" = 4294967296
+              test "$(cat /sys/fs/cgroup/memory.swap.max)" = 0
+              test "$(cat /sys/fs/cgroup/cpu.max)" = "200000 100000"
+              test "$(cat /sys/fs/cgroup/pids.max)" = 256
+              sha256sum bun.lock > /scratch/lock.sha256
+              bun install --filter @sim/app --frozen-lockfile --ignore-scripts --linker hoisted
+              sha256sum --check /scratch/lock.sha256
+              node apps/sim/scripts/verify-oracledb-patch.cjs
+              node apps/sim/scripts/oracledb-patch-self-test.cjs
+              (cd node_modules/isolated-vm; node /work/node_modules/node-gyp/bin/node-gyp.js rebuild --release --jobs=2 --nodedir=/usr/local)
+              cd apps/sim
+              bun --no-env-file run build:cli-runtime
+              bun --no-env-file run build:sandbox-bundles
+            ' > "$private/install.private.log" 2>&1
+          state="$(timeout 10 docker inspect --format '{{.State.Running}} {{.State.OOMKilled}} {{.State.ExitCode}}' "$(cat "$private/install.cid")")"
+          [[ "$state" == 'false false 0' ]]
+          [[ "$(wc -c < "$private/install.private.log")" -le 8388608 ]]
+          python3 -c 'import os,shutil; assert shutil.disk_usage(os.environ["RUNNER_TEMP"]).free >= 6*1024**3'
+          git diff --exit-code
+      - name: Qualifier réellement le worker isolé Linux AMD64
+        shell: bash
+        env:
+          MEMLIA_EXERCISE_HOST: ${{ github.event_name == 'workflow_dispatch' && (inputs.exercise_host || inputs.exercise_application) && '1' || '0' }}
+          MEMLIA_EXERCISE_APPLICATION: ${{ github.event_name == 'workflow_dispatch' && inputs.exercise_application && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          umask 077
+          runner=("$RUNNER_TEMP/memlia-excel-test-tools/bin/python" -B)
+          extra=()
+          if [[ "$MEMLIA_EXERCISE_HOST" == 1 ]]; then
+            runner=(sudo -n -- /usr/bin/env RUNNER_TEMP="$RUNNER_TEMP" POLARS_MAX_THREADS=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 PYTHONDONTWRITEBYTECODE=1 "$RUNNER_TEMP/memlia-excel-test-tools/bin/python" -B)
+            extra=(--exercise-host)
+          fi
+          if [[ "$MEMLIA_EXERCISE_APPLICATION" == 1 ]]; then extra+=(--exercise-application); fi
           # Standard ephemeral public runner only; no registry login or image push.
           # Native supervisor remains unregistered: this is its explicit CI recipe.
           timeout --signal=TERM --kill-after=20s 12m \
-            "$RUNNER_TEMP/memlia-excel-test-tools/bin/python" -B \
+            "${runner[@]}" \
             runtimes/excel/linux/qualification.py \
             --wheelhouse "$RUNNER_TEMP/memlia-excel-third-party" \
-            --output "$RUNNER_TEMP/memlia-excel-linux-recipe"
+            --output "$RUNNER_TEMP/memlia-excel-linux-recipe" "${extra[@]}"
       # No artifacts: wheels, logs and fictitious workbooks remain on this ephemeral VM.

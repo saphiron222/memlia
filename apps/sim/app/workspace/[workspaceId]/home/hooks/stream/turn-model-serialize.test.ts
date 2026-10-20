@@ -1,3 +1,4 @@
+// Modified by Memlia: display and preserve limited Chat response notices.
 import { describe, expect, it } from 'vitest'
 import type { PersistedStreamEventEnvelope } from '@/lib/mothership/request/session/contract'
 import {
@@ -11,6 +12,7 @@ import {
 import {
   contentBlocksToModel,
   modelToContentBlocks,
+  modelMainText,
 } from '@/app/workspace/[workspaceId]/home/hooks/stream/turn-model-serialize'
 
 interface Scope {
@@ -330,5 +332,36 @@ describe('contentBlocksToModel round-trip', () => {
     expect(agent(rebuilt, 'SB').triggerToolCallId).toBe('tc-b')
     expect(agent(rebuilt, 'SA').status).toBe('success')
     expect(agent(rebuilt, 'SB').status).toBe('success')
+  })
+})
+
+describe('limited completion text snapshot', () => {
+  it('retains the notice and original model prose across the existing block round-trip', () => {
+    const model = build([
+      env(1, 'text', { channel: 'assistant', text: 'Texte partiel.' }),
+      env(2, 'complete', {
+        status: 'complete',
+        response: {
+          modelTurn: { finishReason: 'max_tokens' },
+          workflow: {
+            version: 1,
+            provenance: 'native_port_results',
+            stage: 'preparation_only',
+            previews: { evaluated: 1, refused: 0 },
+            proposals: { created: 0, applied: 0, skipped: 0 },
+            workflowExecutionByThisChatBackend: 'not_performed',
+          },
+        },
+      }),
+    ])
+    const blocks = modelToContentBlocks(model)
+    const replay = contentBlocksToModel(JSON.parse(JSON.stringify(blocks)))
+    expect(modelMainText(replay)).toBe(modelMainText(model))
+    expect(modelMainText(replay).match(/Réponse limitée/g)).toHaveLength(1)
+    expect(modelMainText(replay)).toContain('Texte partiel.')
+    expect(modelMainText(replay)).toContain('sans modification appliquée')
+    expect(modelToContentBlocks(replay).every((b) => b.type === 'text')).toBe(true)
+    // Blocks are a content projection, not a terminal replay cursor. Fresh
+    // reconnects use seq 0 into a fresh model, as selectReconnectReplayState requires.
   })
 })

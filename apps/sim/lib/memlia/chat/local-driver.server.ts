@@ -1,5 +1,6 @@
 // Copyright (c) 2026 Memlia. All rights reserved.
 import { generateId } from '@sim/utils/id'
+import { type AgentTurnFinishReason, isAgentStreamEvent } from '@/providers/stream-events'
 import { WORKFLOW_PROPOSAL_TOOL_NAME } from '@/lib/api/contracts/copilot'
 import { stringifyBoundedJson } from '@/lib/core/utils/bounded-json'
 import { waitWithAbort } from '@/lib/core/utils/concurrency'
@@ -18,7 +19,10 @@ import type {
   StreamEvent,
   StreamingContext,
 } from '@/lib/mothership/request/types'
+import { isTerminalToolCallStatus } from '@/lib/mothership/request/types'
 import { catalogToolInputs } from './catalog-tools'
+import { ModelAdapterStop, type ToolActivity } from './model-adapter'
+import { workflowCompletion, type WorkflowPreparation } from './workflow-completion'
 
 export type LocalChatOptions = Omit<BudgetedCatalogProviderOptions, 'signal' | 'proposal'>
 const unavailable = () => new Error('Local Chat is unavailable.')
@@ -140,10 +144,35 @@ export async function runLocalChat(
   if (parentSignal?.aborted) abort()
   const seen = new Set<string>()
   const presented = new Map<string, { id: string; name: string }>()
+  const deadline = performance.now() + (input.limits?.maxDurationMs ?? 180000)
+  let toolActivity: (() => ToolActivity) | undefined
+  let appliedReceipt:
+    | { id: string; invocationId: number; baseRevision: number; draftRevision: number }
+    | undefined
   let reader:
     | ReadableStreamDefaultReader<import('@/providers/stream-events').AgentStreamEvent>
     | undefined
   let final = false
+  let finalFinishReason: AgentTurnFinishReason | 'not_observed' = 'not_observed'
+  let preparation: (() => WorkflowPreparation) | undefined
+  let appliedProposals = 0
+  let skippedProposals = 0
+  let latestAppliedRevision: { baseRevision: number; draftRevision: number } | undefined
+  const completionResponse = () => {
+    if (!preparation || toolActivity?.().active !== 0) throw unavailable()
+    return {
+      modelTurn: { finishReason: finalFinishReason },
+      workflow: workflowCompletion(
+        preparation(),
+        {
+          created: seen.size,
+          applied: appliedProposals,
+          skipped: skippedProposals,
+        },
+        latestAppliedRevision
+      ),
+    }
+  }
   async function publish(event: StreamEvent, signal = stop.signal) {
     signal.throwIfAborted()
     scopeIntact()
@@ -181,6 +210,8 @@ export async function runLocalChat(
         proposal: {
           runId,
           async onProposal(proposal, signal) {
+            appliedReceipt = undefined
+            const dispatch = toolActivity?.()
             try {
               signal.throwIfAborted()
               const id = proposal.proposalId
@@ -217,7 +248,10 @@ export async function runLocalChat(
               scopeIntact()
               const call = context.toolCalls.get(id)
               if (!call || call.name !== WORKFLOW_PROPOSAL_TOOL_NAME) throw unavailable()
-              if (call.status === 'skipped') return { status: 'skipped' }
+              if (call.status === 'skipped') {
+                skippedProposals++
+                return { status: 'skipped' }
+              }
               const result = getToolCallStateOutput(call)
               if (
                 call.status !== 'success' ||
@@ -233,6 +267,27 @@ export async function runLocalChat(
                 result.draftRevision < revision
               )
                 throw unavailable()
+              appliedProposals++
+              latestAppliedRevision = {
+                baseRevision: revision,
+                draftRevision: result.draftRevision,
+              }
+              // Only one certain, settled edit is eligible for a factual terminal receipt.
+              // This does not certify the generated graph or execute/test its code.
+              const current = toolActivity?.()
+              if (
+                seen.size === 1 && result.draftRevision === revision + 1 &&
+                dispatch?.active === 1 && current?.active === 1 &&
+                dispatch.lastDispatch?.toolId === 'propose_workflow_operations' &&
+                current.lastDispatch?.id === dispatch.lastDispatch.id
+              ) {
+                appliedReceipt = {
+                  id,
+                  invocationId: dispatch.lastDispatch.id,
+                  baseRevision: revision,
+                  draftRevision: result.draftRevision,
+                }
+              }
               return {
                 status: 'applied',
                 baseRevision: revision,
@@ -248,14 +303,27 @@ export async function runLocalChat(
       }),
       stop.signal
     )
+    toolActivity = run.toolActivity
+    preparation = run.workflowPreparation
     reader = run.stream.getReader()
     for (;;) {
       const next = await waitWithAbort(reader.read(), stop.signal)
       if (next.done) break
       if (final) throw unavailable()
       const event = next.value
+      if (
+        appliedReceipt &&
+        !(
+          event.type === 'tool_call_end' &&
+          event.name === 'propose_workflow_operations' &&
+          event.status === 'success'
+        )
+      )
+        appliedReceipt = undefined
       if (event.type === 'turn_end') {
+        if (!isAgentStreamEvent(event)) throw unavailable()
         final = event.turn === 'final'
+        if (final) finalFinishReason = event.finishReason ?? 'not_observed'
         continue
       }
       if (event.type === 'text_delta' || event.type === 'thinking_delta') {
@@ -303,8 +371,67 @@ export async function runLocalChat(
       } else throw unavailable()
     }
     if (!final || presented.size) throw unavailable()
-    await deliver({ type: 'complete', payload: { status: 'complete' } })
-  } catch {
+    await deliver({
+      type: 'complete',
+      payload: { status: 'complete', response: completionResponse() },
+    })
+  } catch (error) {
+    if (error instanceof ModelAdapterStop && error.code === 'model_calls' && appliedReceipt) {
+      const receipt = appliedReceipt
+      const assertCertainTerminal = () => {
+        scopeIntact()
+        const call = context.toolCalls.get(receipt.id)
+        const output = call && getToolCallStateOutput(call)
+        const activity = toolActivity?.()
+        if (
+          activity?.active !== 0 ||
+          activity.lastDispatch?.id !== receipt.invocationId ||
+          activity.lastSettlement?.id !== receipt.invocationId ||
+          activity.lastSettlement.status !== 'fulfilled' ||
+          stop.signal.aborted ||
+          parentSignal?.aborted ||
+          performance.now() >= deadline ||
+          final ||
+          presented.size ||
+          context.pendingToolPromises.size ||
+          seen.size !== 1 ||
+          [...context.toolCalls.values()].some((tool) => !isTerminalToolCallStatus(tool.status)) ||
+          call?.name !== WORKFLOW_PROPOSAL_TOOL_NAME ||
+          call.status !== 'success' ||
+          !call.result?.success ||
+          !output ||
+          typeof output !== 'object' ||
+          !('status' in output) ||
+          output.status !== 'applied' ||
+          !('baseRevision' in output) ||
+          output.baseRevision !== receipt.baseRevision ||
+          !('draftRevision' in output) ||
+          output.draftRevision !== receipt.draftRevision
+        )
+          throw unavailable()
+      }
+      try {
+        assertCertainTerminal()
+        await assertOwnership?.()
+        assertCertainTerminal()
+        await deliver({
+          type: 'text',
+          payload: {
+            channel: 'assistant',
+            text: `Modification appliquée, révision ${receipt.draftRevision}. Limite d’appels atteinte ; test non effectué.`,
+          },
+        })
+        assertCertainTerminal()
+        await deliver({
+          type: 'complete',
+          payload: { status: 'complete', response: completionResponse() },
+        })
+        return
+      } catch {
+        abort()
+        throw unavailable()
+      }
+    }
     abort()
     throw unavailable()
   } finally {

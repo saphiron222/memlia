@@ -1,4 +1,5 @@
-// Modified by Memlia: require the common draft revision for v2 graph writes and expose receipts.
+// Modified by Memlia: require the common draft revision for v2 graph writes, expose receipts,
+// and distinguish temporary operation labels from executable block references.
 import { WorkflowProposalSchema } from '@memlia/contracts'
 import {
   BLOCK_RETRY_MAX_TRIES,
@@ -3447,7 +3448,13 @@ const v2InsertIntoSubflowParamsSchema = z
 const v2WorkflowOperationBlockIdSchema = z
   .string()
   .min(1, 'block_id cannot be empty')
-  .describe('Block the operation targets. For `add`, the id the new block will be given.')
+  .describe(
+    'Block the operation targets. For `add` or `insert_into_subflow`, a UUID is preserved; ' +
+      'a non-UUID label is replaced with a minted UUID. Labels can wire connections within ' +
+      'this batch, but code strings are not rewritten. In code, use the normalized block name ' +
+      '(lowercase, whitespace and dots removed) with a declared output path, or a preserved ' +
+      'UUID. Never use a provisional dry-run UUID in a later request.'
+  )
 
 /**
  * One semantic edit. A discriminated union on `operation_type` so a client gets
@@ -3617,7 +3624,7 @@ export const v2ApplyWorkflowOperationsDataSchema = v2WorkflowGraphWriteResultSch
     mintedBlockIds: z
       .record(z.string(), z.string().describe('The id the block was actually given.'))
       .describe(
-        'Assigned IDs keyed by requested `block_id`, including only changed IDs. `add` and `insert_into_subflow` replace non-UUID labels with minted UUIDs. References within the batch are remapped automatically; later requests must use the minted IDs. Supply UUIDs to preserve your chosen IDs. Empty on dry runs, which return provisional IDs in `previewBlockIds` instead.'
+        'Assigned IDs keyed by requested `block_id`, including only changed IDs. `add` and `insert_into_subflow` replace non-UUID labels with minted UUIDs. Within the batch, operation IDs, connections, subflowId and nestedNodes keys are remapped; code strings are not rewritten. For code references use a normalized block name with a declared output path or a preserved UUID. Later ID-based requests must use minted IDs. Supply UUIDs to preserve your chosen IDs. Empty on dry runs, which return provisional IDs in `previewBlockIds` instead.'
       ),
     previewBlockIds: z
       .record(z.string(), z.string().describe('The provisional id the dry run assigned.'))

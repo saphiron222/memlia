@@ -1,3 +1,5 @@
+// Modified by Memlia: preserve native Function execution metadata.
+
 import { z } from 'zod'
 import {
   booleanQueryFlagSchema,
@@ -12,6 +14,7 @@ import {
   v2SearchSchema,
   v2SortFields,
 } from '@/lib/api/contracts/v2/shared'
+import { functionCodeContextSchema } from '@/lib/execution/function-context'
 
 /**
  * v2 catalog contracts: the code-defined blocks, tools, and connector types a
@@ -607,6 +610,7 @@ const v2BlockTriggerSchema = z.object({
 /** Detail view of a block: the summary plus everything needed to configure one. */
 export const v2BlockDetailSchema = v2BlockSummarySchema
   .extend({
+    codeExecution: functionCodeContextSchema.optional(),
     bestPractices: z
       .string()
       .optional()

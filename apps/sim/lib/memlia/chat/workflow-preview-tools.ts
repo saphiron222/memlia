@@ -7,12 +7,18 @@ import {
 import { OrchestrationError } from '@/lib/core/orchestration/types'
 import { stringifyBoundedJson } from '@/lib/core/utils/bounded-json'
 import { waitWithAbort } from '@/lib/core/utils/concurrency'
+import {
+  analyzeFunctionCode,
+  FUNCTION_ANALYSIS_LIMITS,
+} from '@/lib/execution/code-placeholders/analyze-function-code'
 import { applyWorkflowOperations } from '@/lib/workflows/application/apply-workflow-operations'
 import { WorkflowOperationsNotAppliedError } from '@/lib/workflows/application/operations-error'
 import type { WorkflowLintReport } from '@/lib/workflows/editing/lint'
 import type { SkippedItem, ValidationError } from '@/lib/workflows/editing/types'
 import { MAX_IMPORT_BODY_BYTES } from '@/lib/workflows/operations/import-workflow'
+import { normalizeName } from '@/executor/constants'
 import { createWorkflowProposal } from './workflow-proposals.server'
+import { workflowPreviewNextStep } from './workflow-completion'
 
 type PreviewContext = {
   principal: Parameters<typeof applyWorkflowOperations.execute>[0]['principal']
@@ -90,6 +96,9 @@ export function createWorkflowPreviewTools({
     return {
       ok: true as const,
       data: {
+        ...(proposalRunId && ownedPrincipal.kind === 'session'
+          ? { nextStep: workflowPreviewNextStep }
+          : {}),
         dryRun: true as const,
         persisted: false as const,
         baseRevision: result.baseRevision,
@@ -104,7 +113,11 @@ export function createWorkflowPreviewTools({
           input,
           result.previewBlockIds
         ),
+        functionCode: projectFunctionCode(result, input),
         lint: projectLint(result.lint, input, result.previewBlockIds),
+        ...(result.lint.unresolvedReferences.length > 0
+          ? { referenceCorrection: projectReferenceCorrection(result, input) }
+          : {}),
         warningCount: result.warnings.length,
         provisionalBlockIdCount: Object.keys(result.previewBlockIds ?? {}).length,
         needsRedeployment: result.needsRedeployment,
@@ -190,6 +203,55 @@ function indexesForBlock(blockId: string, input: PreviewInput, previewIds: Recor
     operation.block_id === blockId || previewIds[operation.block_id] === blockId ? [index] : []
   )
 }
+
+/**
+ * Corrective metadata only, after native reference lint. Not a graph view or
+ * authorization to apply: expose names of evaluated add/edit targets, never
+ * provisional IDs, code, values, credentials or arbitrary lint explanations.
+ * Output paths must still come from the authorized block catalogue. These
+ * hints do not prove a reference's validity or execution; omit empty/ambiguous
+ * normalized names, including collisions with untouched blocks.
+ * The existing bounded-result check refuses this entire result if too large.
+ */
+function projectReferenceCorrection(
+  result: Awaited<ReturnType<typeof applyWorkflowOperations.execute>>,
+  input: PreviewInput
+) {
+  const skippedIndexes = new Set(
+    projectSkipped(result.skipped, input, result.previewBlockIds).flatMap(
+      (item) => item.operationIndexes
+    )
+  )
+  const nameCounts = new Map<string, number>()
+  for (const block of Object.values(result.graph.blocks)) {
+    if (typeof block.name !== 'string') continue
+    const name = normalizeName(block.name)
+    nameCounts.set(name, (nameCounts.get(name) ?? 0) + 1)
+  }
+  let omittedTargetCount = 0
+  const targets = Object.entries(result.graph.blocks).flatMap(([blockId, block]) => {
+    const operationIndexes = indexesForBlock(blockId, input, result.previewBlockIds ?? {}).filter(
+      (index) =>
+        !skippedIndexes.has(index) &&
+        ['add', 'edit', 'insert_into_subflow'].includes(input.operations[index].operation_type)
+    )
+    if (!operationIndexes.length) return []
+    const referenceHead = typeof block.name === 'string' ? normalizeName(block.name) : ''
+    if (!referenceHead || nameCounts.get(referenceHead) !== 1) {
+      omittedTargetCount++
+      return []
+    }
+    return [{ operationIndexes, referenceHead }]
+  })
+  return {
+    scope: 'evaluated_operations' as const,
+    completeness: 'best_effort' as const,
+    syntax: '<referenceHead.declaredOutputPath>',
+    outputPathSource: 'get_block.outputs',
+    targets,
+    omittedTargetCount,
+  }
+}
 function projectInputErrors(
   items: ValidationError[],
   input: PreviewInput,
@@ -227,9 +289,53 @@ function projectLint(
   for (const item of lint.tableFieldIssues) add('unknown_table_field', item.blockId)
   return {
     completeness: 'best_effort' as const,
+    hasUnresolvedReferences: lint.unresolvedReferences.length > 0,
     diagnostics,
     sourceCount: lint.sources.length,
     sinkCount: lint.sinks.length,
     noteCount: lint.notes.length,
+  }
+}
+
+/** Scoped, non-authoritative diagnostics; untouched code never becomes a graph gate. */
+function projectFunctionCode(
+  result: Awaited<ReturnType<typeof applyWorkflowOperations.execute>>,
+  input: PreviewInput
+) {
+  const skipped = new Set(
+    projectSkipped(result.skipped, input, result.previewBlockIds).flatMap(
+      (item) => item.operationIndexes
+    )
+  )
+  const deadline = performance.now() + FUNCTION_ANALYSIS_LIMITS.milliseconds
+  const targets = []
+  let omittedTargetCount = 0
+  for (const [id, block] of Object.entries(result.graph.blocks)) {
+    if (block.type !== 'function') continue
+    const operationIndexes = indexesForBlock(id, input, result.previewBlockIds ?? {}).filter(
+      (index) =>
+        !skipped.has(index) &&
+        ['add', 'edit', 'insert_into_subflow'].includes(input.operations[index].operation_type)
+    )
+    if (!operationIndexes.length) continue
+    if (targets.length >= 16) {
+      omittedTargetCount++
+      continue
+    }
+    const analysis = block.subBlocks.sandboxId?.value
+      ? { status: 'unavailable' as const, reason: 'context' as const }
+      : analyzeFunctionCode(
+          block.subBlocks.code?.value,
+          block.subBlocks.language?.value ?? 'javascript',
+          deadline,
+          'workflow'
+        )
+    targets.push({ operationIndexes, ...analysis })
+  }
+  return {
+    scope: 'evaluated_operations' as const,
+    completeness: 'best_effort' as const,
+    targets,
+    omittedTargetCount,
   }
 }

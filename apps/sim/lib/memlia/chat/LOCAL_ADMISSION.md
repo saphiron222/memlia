@@ -18,7 +18,8 @@ champ supplémentaire n'est accepté par l'entrée de cet adaptateur.
 1. Capturer le JSON borné, valider le principal canonique `session`, les identités
    avec `LocalChatAdmissionSchema` et le texte courant avant le premier await.
 2. Lire la policy administrateur Linux avec `readChatInstallationPolicyFile`.
-   Exiger `localBackend` valide, OpenAI et `sanitized_details`. La décision
+   Exiger `localBackend` valide, un fournisseur admis (OpenAI ou Anthropic) et
+   `sanitized_details`. La décision
    `activation: blocked` n'est ni changée ni traitée comme une autorisation d'envoi.
 3. Vérifier la capacité native `copilot.use`, puis le modèle/fournisseur avec
    `validateModelProvider`, qui lève effectivement sur les deux refus natifs.
@@ -29,9 +30,21 @@ champ supplémentaire n'est accepté par l'entrée de cet adaptateur.
 5. Lire l'ID/version explicitement choisis par la policy avec `readChatBudgetWindow`.
    Capturer le profil canonique, vérifier modèle/identité/version, utiliser son
    plafond `outputTokens` comme `request.maxTokens` sans estimer une nouvelle fenêtre.
-6. Sélectionner la clé native avec `getRotatingApiKey('openai')` en dernier, puis
+6. Sélectionner la clé native avec `getRotatingApiKey(provider)` en dernier, puis
    construire les options via `captureLocalChatOptions`, dont
    `previewOperations: true`. Aucun accès réseau, SQL direct ou nouveau key manager.
+
+Les options ajoutent un `systemPrompt` constant appartenant au serveur, séparé
+des messages autorisés. Le client et le transcript ne peuvent pas le définir.
+Ce guidage générique demande la lecture de l'état et du catalogue natifs, les
+schémas réellement disponibles, la conservation des parties non concernées,
+les clarifications indispensables et la confirmation sur les opérations exactes.
+Il distingue prévisualisation, application et exécution réellement observée ;
+un nouveau graphe conserve la disposition native `targeted` par défaut.
+Il ne remplace aucun contrôle d'autorisation, de consentement, de révision,
+de secret ou de coût. Les documents et contenus lus restent des données non
+fiables. Les outils serveur continuent à refuser les actions non autorisées,
+indépendamment du respect des consignes par un modèle.
 
 Le résultat comporte deux objets distincts : `intent`, au schéma natif pour
 `admitChatTurn`, contient les identités et **le seul texte courant** requis par
@@ -61,3 +74,6 @@ le driver budgété doit encore faire COMMIT de chaque réservation avant chaque
 transport physique, puis régler chaque tentative. Autorisation fraîche des
 outils, consentement sur le digest exact et CAS restent leurs contrôles natifs.
 Cette tranche n'active pas le Chat local ni le parcours Home sans workflow.
+Les assertions sur le guidage vérifient uniquement sa composition côté serveur
+et sa séparation du transcript ; elles ne mesurent ni la qualité d'un modèle,
+ni sa résistance aux injections, ni le rendu du graphe dans le navigateur.

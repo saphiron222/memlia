@@ -599,7 +599,7 @@ describe('createAnthropicStreamingToolLoopStream', () => {
 
     await expect(collectStream(stream)).resolves.toEqual([
       { type: 'text_delta', text: 'Partial answer', turn: 'pending' },
-      { type: 'turn_end', turn: 'final' },
+      { type: 'turn_end', turn: 'final', finishReason: 'max_tokens' },
     ])
     expect(onComplete).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -767,7 +767,7 @@ describe('createAnthropicStreamingToolLoopStream', () => {
     ])
     expect(references).toHaveLength(1)
     expect(references[0]).toBeDefined()
-    expect(events).toContainEqual({ type: 'turn_end', turn: 'final' })
+    expect(events).toContainEqual({ type: 'turn_end', turn: 'final', finishReason: 'end_turn' })
     expect(sdk.messages.stream.mock.calls[0]?.[0]).toMatchObject({ service_tier: 'standard_only' })
   })
 

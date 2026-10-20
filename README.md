@@ -43,3 +43,11 @@ Un test natif du garde macOS a échoué pendant le nettoyage avec `PermissionErr
 ## Limites
 
 Les parcours multi-utilisateurs complets, les fournisseurs réels sous politique de cabinet, les autorisations et sauvegardes d’écriture Excel, Windows interactif, les images de production et la restauration restent à qualifier. Les anciens échecs restent conservés dans les preuves internes. Les secrets, rapports privés, données du laboratoire, artefacts bruts et historiques de travail privés ne sont pas publiés.
+
+## CI ciblée indépendante du build Next
+
+Cette révision prépare un job rapide séparé du build Next : contrats, catalogue, permissions, propositions, confirmations, streaming et UI avec fournisseurs et infrastructures doublés explicitement. La sélection fermée ne déclenche aucune inférence réelle ni lecture de secret. Les suites qui la composent restent des tests de leurs frontières ; elles ne qualifient pas les services simulés. Voir [le périmètre](scripts/ci/README.fast-tests.md).
+
+La recette [Excel Linux](runtimes/excel/linux/QUALIFICATION.md) conserve ses huit contrôles Docker indépendants. Son mode opérateur manuel peut ensuite exercer le host natif et, séparément, le trajet API en mémoire : clé synthétique émise et authentifiée nativement, fichier chargé, workflow exécuté par le moteur existant, sortie de ce même run téléchargée et vérifiée. Les refus sans clé et hors espace autorisé sont contrôlés. Cette composition n'est ni un serveur HTTP, ni un navigateur, ni une qualification de jobs pg-boss après redémarrage.
+
+**Ces deux jobs Linux sur ce candidat restent à exécuter.** Aucune image n'est admise par défaut, aucun service n'est activé et aucune réussite Docker ou Excel Desktop n'est annoncée. Les opérateurs gardent des rôles DB distincts et le nettoyage ne retire que les ressources synthétiques prouvées de la recette. Les dépendances existantes et leurs versions restent figées ; aucun framework, verrou, migration ou moteur de transformation nouveau n'est ajouté par cet export. Les développements Windows et les autres corrections de CI hors dépendances de ces parcours ne font pas partie de cette tranche.

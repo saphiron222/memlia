@@ -3,13 +3,14 @@
 import { isPlainRecord } from '@sim/utils/object'
 import { z } from 'zod'
 import { workflowIdParamsSchema } from '@/lib/api/contracts/workflows'
-import { getModelSunsetStatus, getProviderModels } from '@/providers/models'
+import { getModelSunsetStatus, getProviderModels, getThinkingCapability } from '@/providers/models'
 import type { runCatalogProvider } from '../chat/provider-binding'
 
 const localBackend = z
   .object({
     kind: z.literal('memlia_local_chat'),
     version: z.literal(1),
+    thinkingLevel: z.string().min(1).max(64).optional(),
     budgetWindow: z
       .object({
         id: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
@@ -58,6 +59,20 @@ export function parseChatInstallationPolicy(raw: unknown) {
       getModelSunsetStatus(parsed.data.model) === 'deprecated'
     )
       throw unavailable()
+    const backend = parsed.data.localBackend
+    if (backend && Object.hasOwn(backend, 'thinkingLevel')) {
+      const level = backend.thinkingLevel
+      const capability = getThinkingCapability(parsed.data.model)
+      if (
+        parsed.data.provider !== 'anthropic' ||
+        typeof level !== 'string' ||
+        !capability ||
+        (level === 'none'
+          ? !['disabled', 'between_tools'].includes(capability.noneMode ?? '')
+          : !capability.levels.includes(level))
+      )
+        throw unavailable()
+    }
     return Object.freeze({
       ...parsed.data,
       data: Object.freeze(parsed.data.data),

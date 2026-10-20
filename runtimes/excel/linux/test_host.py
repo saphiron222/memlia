@@ -2,6 +2,7 @@
 """Real Unix socket bytes; peer identity and container execution doubled on Mac."""
 
 import os
+import json
 from pathlib import Path
 import socket
 import tempfile
@@ -452,6 +453,43 @@ class HostTests(unittest.TestCase):
         finally:
             first.close()
             second.close()
+
+
+class OperatorAdmissionTests(unittest.TestCase):
+    def test_bad_operator_configuration_refuses_before_listening(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as folder:
+            root=Path(folder);config=root/'admission.json';config.write_bytes(b'{}');config.chmod(0o400)
+            with mock.patch.object(host.sys,'platform','linux'), mock.patch.object(host,'_parents'), mock.patch.object(host.socket,'socket') as listener:
+                with self.assertRaises(ValueError):
+                    host.serve(root/'host.sock',IMAGE,os.getuid()+1,os.getgid(),threading.Event(),admission_file=str(config))
+                listener.assert_not_called()
+
+    def test_real_operator_capture_reaches_public_execute_and_owned_cleanup(self):
+        from test_admission import proof, config
+        from test_supervisor import Engine
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent) as folder:
+            root=Path(folder);value=proof();value['supervisorSha256']=host.supervisor.SOURCE_SHA256
+            raw=json.dumps(value).encode()
+            for name,data in [('proof.json',raw),('admission.json',json.dumps(config(value,raw)).encode())]:
+                path=root/name;path.write_bytes(data);path.chmod(0o400)
+            captured=host.supervisor.admission.capture(str(root/'admission.json'),IMAGE,host.supervisor.SOURCE_SHA256)
+            engine=Engine();server,client=socket.socketpair();observed=[]
+            def docker(argv,payload,deadline,cancel,cwd,limit):
+                return engine(argv[3:],payload,deadline=deadline,cancel=cancel,limit=limit)
+            with mock.patch.object(host,'peer_uid',return_value=1001), mock.patch.object(host.supervisor.os,'uname',return_value=type('Linux',(),{'sysname':'Linux'})()), mock.patch.object(host.supervisor,'_command',side_effect=docker):
+                worker=threading.Thread(target=lambda:observed.append(host.handle(server,IMAGE,1001,threading.Event(),captured)))
+                worker.start();client.settimeout(2)
+                try:
+                    client.sendall(struct.pack('!I',7)+b'fixture');answer=b''
+                    while True:
+                        part=client.recv(65536)
+                        if not part:break
+                        answer+=part
+                finally:client.close();worker.join(2)
+            self.assertFalse(worker.is_alive());self.assertEqual(observed,[True])
+            self.assertEqual(answer,b'\0'+struct.pack('!I',len(engine.result))+engine.result)
+            self.assertIn('rm',engine.actions());self.assertIsNone(engine.row)
+            # Docker and SO_PEERCRED are explicit doubles here, not Linux evidence.
 
 
 if __name__ == "__main__":

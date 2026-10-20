@@ -1,10 +1,12 @@
 # Copyright (c) 2026 Memlia. All rights reserved.
-"""Host-only container transport, intentionally unregistered and inactive.
+"""Host-only container transport; unavailable without captured operator admission.
 
 The caller must still authorize inputs and revalidate the complete worker wire.
 No CLI, socket server, arbitrary command, job scheduler or publication authority.
 """
 import json
+from hashlib import sha256
+import importlib.util
 import os
 from pathlib import Path
 import re
@@ -14,9 +16,16 @@ import tempfile
 import time
 import uuid
 
+_admission_spec = importlib.util.spec_from_file_location(
+    'excel_operator_admission', Path(__file__).with_name('admission.py'))
+admission = importlib.util.module_from_spec(_admission_spec)
+_admission_spec.loader.exec_module(admission)
+
 MAX_WIRE = 14 * 1024**2
-# Only a separate, reviewed real-Linux isolation recipe may admit an image here.
+# Historical marker stays empty. Admission is an explicit protected operator file,
+# captured by the host outside the request; no mutable in-process allowlist.
 QUALIFIED_IMAGES = frozenset()
+SOURCE_SHA256 = sha256(Path(__file__).read_bytes()).hexdigest()
 IMAGE = re.compile(r"sha256:[a-f0-9]{64}\Z")
 ID = re.compile(r"[a-f0-9]{64}\Z")
 TMP = "rw,noexec,nosuid,nodev,size=134217728,mode=0700,uid=65532,gid=65532"
@@ -254,9 +263,10 @@ def _run_owned(docker, image, wire, cancel=None, *, _receipt=None):
     return result
 
 
-def execute(image, wire, *, cancel=None):
-    """Server-only entry; blocked until exact image has real Linux qualification."""
-    if type(image) is not str or image not in QUALIFIED_IMAGES or os.uname().sysname != "Linux":
+def execute(image, wire, *, cancel=None, image_admission=None):
+    """Server-only entry; requires the exact image's captured local operator approval."""
+    if (type(image) is not str or os.uname().sysname != "Linux"
+            or not admission.permits(image_admission, image, SOURCE_SHA256)):
         raise IsolationError("excel_isolation_unavailable")
     with tempfile.TemporaryDirectory(prefix="memlia-excel-host-") as temporary:
         os.chmod(temporary, 0o700)

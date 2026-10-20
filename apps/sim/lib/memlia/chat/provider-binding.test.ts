@@ -84,6 +84,7 @@ import {
   type ProviderModelObservation,
   runWithProviderRuntimeContext,
 } from '@/providers/runtime-context'
+import { ModelAdapterStop } from './model-adapter'
 import { runCatalogProvider } from './provider-binding'
 
 function transportGate() {
@@ -1770,6 +1771,39 @@ describe('optional preview — native providers and edit engine, HTTP/DB doubles
     })
     return { http, run }
   }
+  it.each(['openai', 'anthropic'] as const)(
+    'completion protocol — native %s preview then final text has no proposal authority',
+    async (provider) => {
+      const { run, http } = start(
+        provider,
+        { request: request() },
+        {
+          proposal: { runId: 'run-a', onProposal: vi.fn() },
+        }
+      )
+      await collect(run.stream)
+      expect(run.workflowPreparation()).toEqual({ evaluated: 1, refused: 0 })
+      expect(Object.isFrozen(run.workflowPreparation())).toBe(true)
+      expect(proposalInfra.propose).not.toHaveBeenCalled()
+      expect(http).toHaveBeenCalledTimes(2)
+      const second = JSON.stringify(JSON.parse(http.mock.calls[1][1].body))
+      expect(second).toContain('review_diagnostics_then_propose_or_clarify')
+      expect(second).not.toContain('PRIVATE_GRAPH_CANARY')
+    }
+  )
+
+  it('completion protocol — malformed model preview and forged observation fields never become an evaluated preview', async () => {
+    const { run } = start('openai', {
+      request: request(),
+      workflowPreparation: { evaluated: 1, refused: 0 },
+    })
+    const before = run.workflowPreparation()
+    await collect(run.stream)
+    expect(before).toEqual({ evaluated: 0, refused: 0 })
+    expect(run.workflowPreparation()).toEqual({ evaluated: 0, refused: 1 })
+    expect(proposalInfra.propose).not.toHaveBeenCalled()
+  })
+
   async function turn(provider: 'openai' | 'anthropic', input: Record<string, unknown>) {
     const { http, run } = start(provider, input)
     const events = await collect(run.stream)
@@ -2778,4 +2812,53 @@ it('refuses native thinking adjustment that would expand an observed output ceil
   )
   expect(guard).not.toHaveBeenCalled()
   expect(http).not.toHaveBeenCalled()
+})
+
+describe('v6 diagnosis — certain proposal effect at the final allowed transport', () => {
+  it.each([1, 2])('Anthropic synthesis consumes a distinct transport (cap %s)', async (cap) => {
+    proposalInfra.propose.mockReset().mockResolvedValue({
+      ok: true, proposal: { proposalId: 'server-proposal', expectedRevision: 7 }, persisted: true,
+    })
+    const applied = vi.fn(async () => ({
+      status: 'applied' as const,
+      baseRevision: 7,
+      draftRevision: 8,
+    }))
+    const http = vi
+      .fn()
+      .mockResolvedValueOnce(
+        anthropicSse(true, {
+          name: 'propose_workflow_operations',
+          input: {
+            request: {
+              expectedRevision: 7,
+              operations: [{ operation_type: 'remove', block_id: 'b1' }],
+              layout: { mode: 'preserve' },
+            },
+          },
+        })
+      )
+      .mockResolvedValueOnce(anthropicSse())
+    vi.stubGlobal('fetch', http)
+    const run = runCatalogProvider({
+      ...scope, provider: 'anthropic',
+      request: { ...modelRequest, model: 'claude-sonnet-4-5' },
+      workflow: {
+        workflowId: 'bound-workflow',
+        policy: 'sanitized_details',
+        previewOperations: true,
+      },
+      proposal: { runId: 'run-a', onProposal: applied },
+      limits: { maxModelCalls: cap },
+    })
+    const collected = collect(run.stream)
+    if (cap === 1) {
+      await expect(collected).rejects.toBeInstanceOf(ModelAdapterStop)
+      await expect(collected).rejects.toMatchObject({ code: 'model_calls' })
+    } else expect(await collected).toContainEqual({ type: 'turn_end', turn: 'final', finishReason: 'end_turn' })
+    expect(applied).toHaveBeenCalledOnce()
+    expect(http).toHaveBeenCalledTimes(cap)
+    expect(run.usage()).toEqual({ modelCalls: cap, toolCalls: 1 })
+    expect(toolsMockFns.mockExecuteTool).not.toHaveBeenCalled()
+  })
 })

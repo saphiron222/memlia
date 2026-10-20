@@ -373,3 +373,54 @@ it('refuses Anthropic workspace on OpenAI before any credentials or transport', 
     })
   ).toThrow('Chat installation policy is unavailable.')
 })
+
+function thinkingConfiguration(thinkingLevel: unknown, model = 'claude-haiku-5-5') {
+  const input = localConfiguration()
+  return {
+    ...input,
+    provider: 'anthropic',
+    model,
+    localBackend: { ...input.localBackend, thinkingLevel },
+  }
+}
+
+it.each([
+  ['claude-haiku-5-5', 'low'],
+  ['claude-haiku-5-5', 'none'],
+  ['claude-sonnet-5-5', 'none'],
+  ['claude-haiku-4-5', 'high'],
+])('accepts the declared server thinking choice %s/%s without activating it', (model, level) => {
+  const result = parseChatInstallationPolicy(thinkingConfiguration(level, model))
+  expect(result.localBackend).toMatchObject({ thinkingLevel: level })
+  expect(result.activation).toBe('blocked')
+})
+
+it.each([undefined, null, false, 2, {}, '', 'LOW', ' low', 'between_tools', 'automatic', 'x'.repeat(65)])(
+  'refuses an invalid explicitly supplied thinking level (%#)', (level) => {
+    expect(() => parseChatInstallationPolicy(thinkingConfiguration(level))).toThrow(
+      'Chat installation policy is unavailable.')
+  }
+)
+
+it('does not send an unsupported thinking parameter to another provider or silently ignore a level', () => {
+  expect(() => parseChatInstallationPolicy({ ...thinkingConfiguration('low'),
+    provider: 'openai', model: models.openai })).toThrow('Chat installation policy is unavailable.')
+  expect(() => parseChatInstallationPolicy(thinkingConfiguration('xhigh', 'claude-haiku-4-5')))
+    .toThrow('Chat installation policy is unavailable.')
+  // No explicit noneMode: native omission would not attest disabled thinking.
+  expect(() => parseChatInstallationPolicy(thinkingConfiguration('none', 'claude-haiku-4-5')))
+    .toThrow('Chat installation policy is unavailable.')
+})
+
+it('owns and freezes thinking configuration and never evaluates its getter', () => {
+  const input = thinkingConfiguration('low')
+  const result = parseChatInstallationPolicy(input)
+  input.localBackend.thinkingLevel = 'high'
+  expect(result.localBackend?.thinkingLevel).toBe('low')
+  expect(Reflect.set(result.localBackend!, 'thinkingLevel', 'high')).toBe(false)
+  let reads = 0
+  Object.defineProperty(input.localBackend, 'thinkingLevel', { enumerable: true,
+    get() { reads++; throw new Error('FICTITIOUS_PRIVATE_GETTER') } })
+  expect(() => parseChatInstallationPolicy(input)).toThrow('Chat installation policy is unavailable.')
+  expect(reads).toBe(0)
+})
