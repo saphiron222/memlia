@@ -1062,3 +1062,22 @@ it('completion protocol — next step never promotes unresolved diagnostics to v
   expect(JSON.stringify(result)).not.toMatch(/return inputs|PRIVATE_/)
   expect(infra.replace).not.toHaveBeenCalled()
 })
+
+it('refuses a string trigger mode before evaluating the native preview engine', async () => {
+  const rowsBefore = structuredClone([...infra.rows.entries()])
+  const result = await createWorkflowPreviewTools(scope).dispatch('preview_workflow_operations', {
+    expectedRevision: 7,
+    layout: 'targeted',
+    operations: [
+      {
+        operation_type: 'add',
+        block_id: 'start',
+        params: { type: 'start_trigger', name: 'Départ', triggerMode: 'manual' },
+      },
+    ],
+  })
+  expect(result).toMatchObject({ ok: false, error: { code: 'invalid_input' } })
+  expect(infra.snapshot).not.toHaveBeenCalled()
+  expect(infra.replace).not.toHaveBeenCalled()
+  expect([...infra.rows.entries()]).toStrictEqual(rowsBefore)
+})

@@ -1,5 +1,5 @@
 // Modified by Memlia: require the common draft revision for v2 graph writes, expose receipts,
-// and distinguish temporary operation labels from executable block references.
+// distinguish temporary operation labels from executable block references, and type trigger mode.
 import { WorkflowProposalSchema } from '@memlia/contracts'
 import {
   BLOCK_RETRY_MAX_TRIES,
@@ -3368,6 +3368,11 @@ const v2WorkflowOperationInputsSchema = z
   )
   .describe('Block configuration keyed by sub-block id.')
 
+const v2WorkflowTriggerModeSchema = z
+  .boolean()
+  .optional()
+  .describe('Boolean trigger-mode switch for blocks that support triggers; never a mode name.')
+
 /**
  * The keys `edit` accepts. Open because the per-block input set is defined by
  * the block registry rather than by this contract, but the envelope around it
@@ -3379,6 +3384,7 @@ const v2WorkflowOperationParamsSchema = z
     z
       .object({
         inputs: v2WorkflowOperationInputsSchema.optional(),
+        triggerMode: v2WorkflowTriggerModeSchema,
       })
       .catchall(
         z.unknown().describe('One operation parameter; see the description for the accepted keys.')
@@ -3405,6 +3411,7 @@ const v2AddWorkflowBlockParamsSchema = z
       .min(1, 'params.name is required to add a block')
       .describe('Block display name.'),
     inputs: v2WorkflowOperationInputsSchema.optional(),
+    triggerMode: v2WorkflowTriggerModeSchema,
   })
   .catchall(z.unknown().describe('One block-specific input or connection descriptor.'))
   .describe(
@@ -3438,6 +3445,7 @@ const v2InsertIntoSubflowParamsSchema = z
       .min(1, 'params.name is required to insert a block')
       .describe('Block display name.'),
     inputs: v2WorkflowOperationInputsSchema.optional(),
+    triggerMode: v2WorkflowTriggerModeSchema,
   })
   .catchall(z.unknown().describe('One block-specific input or connection descriptor.'))
   .describe(

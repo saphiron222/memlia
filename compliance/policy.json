@@ -1182,6 +1182,16 @@
         182
       ],
       "reason": "Test Memlia natif, source exacte uniquement : createRequire(import.meta.url).resolve du littéral pg-boss résout le point d’entrée installé dist/index.js ; dirname/join du nom fixe worker.js puis pathToFileURL construisent la cible sœur dist/worker.js. Package existant pg-boss12.38.0 verrouillé, licence MIT vérifiée dans le LICENSE du package ; Worker natif exporté par défaut, son import relatif tools.js reste dans ce package. Aucune cible issue d’une entrée utilisateur, du modèle ou d’EE. Seule l’expression182 de ce blob exact est admise ; ni code généré, artefact, nouvelle cible ou modification future du fichier. Test de boucle Worker avec fetch contrôlé, sans base réelle ; aucune qualification PostgreSQL/Excel/Linux/browser déduite."
+    },
+    {
+      "path": "scripts/ci/linux-chat-fixture.ts",
+      "sha256": "d9dcc718ec38f7777bb8085a66c47e8108bdb12a47e4564ffa9b44674178323b",
+      "lines": [
+        50,
+        253,
+        255
+      ],
+      "reason": "Fixture CI Memlia native, source exacte uniquement : createRequire('/work/packages/db/package.json') résout le littéral postgres ; createRequire('/work/apps/sim/package.json') résout le littéral better-auth/crypto ; le second chargeur DB résout encore postgres. Packages existants verrouillés postgres3.4.9 (Unlicense) et better-auth1.6.27 (MIT), aucune cible issue d’une entrée utilisateur ni EE. Les imports des fonctions produit restent littéraux et contrôlés normalement. Cette revue de trois expressions exactes n’admet ni code généré, artefact, nouvelle cible ou modification future du fichier ; qualification réelle PostgreSQL/Chromium distincte."
     }
   ]
 }
