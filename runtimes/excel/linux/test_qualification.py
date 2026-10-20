@@ -3,6 +3,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import sys
 import unittest
 from unittest import mock
 from test_supervisor import Engine, IMAGE, CID
@@ -10,6 +11,12 @@ from test_supervisor import Engine, IMAGE, CID
 spec = importlib.util.spec_from_file_location('qualification', Path(__file__).with_name('qualification.py'))
 q = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(q)
+
+# These are checkout-source unit tests; installed-wheel tests run separately.
+# Resolve both packages before any test, without relying on fixture execution order
+# or an editable Memlia installation in the interpreter's environment.
+for source in (q.ROOT / 'packages/memlia-contracts/python', q.ROOT / 'runtimes/excel/src'):
+    sys.path.insert(0, str(source))
 
 
 class RecipeTests(unittest.TestCase):
