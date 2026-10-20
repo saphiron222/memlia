@@ -233,10 +233,12 @@ async function main() {
 export async function closeApplicationConnections() {
   try {
     const { closeRedisConnection } = await import('../../apps/sim/lib/core/config/redis')
+    const { closeExecutionSignalHub } = await import('../../apps/sim/lib/execution/signal')
     const { chatPubSub } = await import('../../apps/sim/lib/mothership/chat-status')
     const { mcpPubSub } = await import('../../apps/sim/lib/mcp/pubsub')
     chatPubSub?.dispose()
     mcpPubSub?.dispose()
+    closeExecutionSignalHub()
     await closeRedisConnection()
   } finally {
     const { db } = await import('../../packages/db/index')
