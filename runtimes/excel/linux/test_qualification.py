@@ -20,6 +20,66 @@ for source in (q.ROOT / 'packages/memlia-contracts/python', q.ROOT / 'runtimes/e
 
 
 class RecipeTests(unittest.TestCase):
+    def test_omitted_optional_host_mounts_keeps_native_start_and_exact_cleanup(self):
+        engine = Engine()
+        engine.before_inspect = lambda row, count: row['HostConfig'].pop('Mounts', None)
+        adapter = q.RecipeDocker(engine, IMAGE)
+        try:
+            result = q.s._run_owned(adapter, IMAGE, b'fixture')
+        except q.s.IsolationError:
+            self.fail('valid omitted request Mounts refused before exact owned cleanup')
+        self.assertEqual(result, engine.result)
+        self.assertEqual(adapter.missing_fields, [])
+        self.assertEqual(engine.actions(), ['create', 'inspect', 'start', 'inspect', 'inspect', 'rm', 'ls'])
+        self.assertIsNone(engine.row)
+
+    def test_effective_mounts_must_be_present_and_a_list(self):
+        for change in (lambda row: row.pop('Mounts', None),
+                       *(lambda row, value=value: row.update(Mounts=value)
+                         for value in ({}, '', None, False))):
+            engine = Engine()
+            engine.before_inspect = lambda row, count: change(row)
+            with self.subTest(change=change), self.assertRaises(q.s.IsolationError):
+                q.s._run_owned(engine, IMAGE, b'fixture')
+            self.assertNotIn('start', engine.actions())
+            self.assertNotIn('stop', engine.actions())
+            self.assertNotIn('rm', engine.actions())
+
+    def test_optional_request_mounts_reject_malformed_empty_values(self):
+        for value in ({}, '', False, 0, True):
+            engine = Engine()
+            engine.before_inspect = lambda row, count: row['HostConfig'].update(Mounts=value)
+            with self.subTest(value=value), self.assertRaises(q.s.IsolationError):
+                q.s._run_owned(engine, IMAGE, b'fixture')
+            self.assertNotIn('start', engine.actions())
+            self.assertNotIn('stop', engine.actions())
+            self.assertNotIn('rm', engine.actions())
+
+    def test_optional_request_mount_omission_never_permits_foreign_mounts_or_missing_limits(self):
+        changes = [
+            lambda row: row['HostConfig'].update(Mounts=[{'Type': 'bind', 'Source': '/foreign'}]),
+            lambda row: row['HostConfig'].update(Mounts={'Type': 'volume'}),
+            lambda row: row.update(Mounts=[{'Type': 'bind', 'Destination': '/tmp', 'Source': '/foreign'}]),
+            lambda row: row.update(Mounts=[{'Type': 'volume', 'Destination': '/tmp', 'Source': 'foreign'}]),
+            lambda row: row.update(Mounts=[{'Type': 'tmpfs', 'Destination': '/foreign'}]),
+            lambda row: row.update(Mounts=[{'Type': 'tmpfs', 'Destination': '/tmp', 'Source': '/foreign'}]),
+            lambda row: row['HostConfig'].pop('Memory', None),
+            lambda row: row['HostConfig'].pop('Tmpfs', None),
+            lambda row: row['HostConfig'].update(Tmpfs={'/tmp': 'rw'}),
+            lambda row: row['Config']['Labels'].clear(),
+        ]
+        for index, change in enumerate(changes):
+            engine = Engine()
+            def malformed(row, count):
+                row['HostConfig'].pop('Mounts', None)
+                change(row)
+            engine.before_inspect = malformed
+            with self.subTest(change=index), self.assertRaises(q.s.IsolationError):
+                q.s._run_owned(engine, IMAGE, b'fixture')
+            self.assertNotIn('start', engine.actions())
+            self.assertNotIn('stop', engine.actions())
+            self.assertNotIn('rm', engine.actions())
+
     def test_recipe_refuses_non_linux_without_a_docker_call(self):
         with mock.patch.object(q.platform, 'system', return_value='Darwin'):
             with self.assertRaisesRegex(ValueError, '^linux_recipe_unavailable$'):
@@ -37,13 +97,13 @@ class RecipeTests(unittest.TestCase):
     def test_missing_metadata_report_is_closed_and_never_relaxes_inspection(self):
         engine = Engine()
         def remove(row, count):
-            row['HostConfig'].pop('Mounts', None)
+            row['HostConfig'].pop('Memory', None)
             row['HostConfig']['FOREIGN_CANARY'] = 'private'
         engine.before_inspect = remove
         adapter = q.RecipeDocker(engine, IMAGE)
         with self.assertRaises(q.s.IsolationError):
             q.s._run_owned(adapter, IMAGE, b'{}')
-        self.assertEqual(adapter.missing_fields, ['HostConfig.Mounts'])
+        self.assertEqual(adapter.missing_fields, ['HostConfig.Memory'])
         self.assertNotIn('start', engine.actions())
         self.assertNotIn('rm', engine.actions())
 

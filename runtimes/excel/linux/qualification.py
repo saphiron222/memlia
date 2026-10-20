@@ -103,7 +103,7 @@ class RecipeDocker:
             raw = self.raw(args, payload, deadline=deadline, cancel=cancel, limit=limit)
             row = s._one(raw)
             # Closed names only; missing metadata still fails in native _inspect.
-            required = (*s.HOST, 'CapAdd', 'Binds', 'Mounts', 'Devices', 'DeviceRequests', 'VolumesFrom', 'PortBindings', 'Ulimits')
+            required = (*s.HOST, 'CapAdd', 'Binds', 'Devices', 'DeviceRequests', 'VolumesFrom', 'PortBindings', 'Ulimits')
             host = row.get('HostConfig')
             self.missing_fields = sorted('HostConfig.'+key for key in required if type(host) is not dict or key not in host)
             return raw

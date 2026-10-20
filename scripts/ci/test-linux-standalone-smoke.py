@@ -238,4 +238,85 @@ class StagingTests(unittest.TestCase):
         source['DATABASE_URL']='postgresql://foreign:fixture@outside:5432/user_database'
         with self.assertRaises(smoke.Refused):smoke.runtime_env(source,12345)
 
+
+class ReceiptPublicationTests(unittest.TestCase):
+    workflows = ('memlia-linux-build.yml', 'memlia-linux-swap-build.yml')
+
+    def reader(self, workflow):
+        source = (HERE.parents[1]/'.github/workflows'/workflow).read_text()
+        start = source.index("          python3 - <<'PY'\n") + len("          python3 - <<'PY'\n")
+        end = source.index('          PY\n', start)
+        return ''.join(line[10:] for line in source[start:end].splitlines(keepends=True))
+
+    def publish(self, workflow, raw, linked=False):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); metrics = root/'memlia-metrics'; metrics.mkdir()
+            receipt = metrics/'standalone-http.json'
+            if linked:
+                target = root/'foreign.json'; target.write_bytes(raw); receipt.symlink_to(target)
+            else:
+                receipt.write_bytes(raw)
+            # Historical closed receipts still appear; raw logs must never be enumerated.
+            (metrics/'standalone.json').write_text('{"phase":"standalone","status":"failed"}')
+            (metrics/'standalone.log').write_text('PRIVATE_CANARY')
+            return subprocess.run([sys.executable, '-c', self.reader(workflow)],
+                                  env={'RUNNER_TEMP':str(root)}, capture_output=True,
+                                  text=True, timeout=5)
+
+    def test_actual_workflow_readers_publish_the_existing_closed_http_failure(self):
+        receipt = {'status':'failed', 'reason':'listener_unavailable', 'health':False,
+                   'loginHtml':False, 'assets':0, 'cleanup':True, 'forcedStop':False,
+                   'databaseQualified':False, 'authenticationQualified':False, 'seconds':24.061}
+        for workflow in self.workflows:
+            with self.subTest(workflow=workflow):
+                result = self.publish(workflow, json.dumps(receipt).encode())
+                self.assertEqual(result.returncode, 0, result.stderr)
+                rows = [json.loads(row) for row in result.stdout.splitlines()]
+                self.assertIn({'phase':'standalone-http', **receipt}, rows)
+                self.assertIn({'phase':'standalone','status':'failed'}, rows)
+                self.assertNotIn('PRIVATE_CANARY', result.stdout+result.stderr)
+
+    def test_early_failure_and_success_shapes_are_both_visible(self):
+        cases = [{'status':'failed','reason':'artifact_invalid','cleanup':True},
+                 {'status':'passed','reason':None,'health':True,'loginHtml':True,'assets':2,
+                  'cleanup':True,'forcedStop':False,'databaseQualified':False,
+                  'authenticationQualified':False,'seconds':1.25}]
+        for workflow in self.workflows:
+            for receipt in cases:
+                with self.subTest(workflow=workflow,status=receipt['status']):
+                    result = self.publish(workflow,json.dumps(receipt).encode())
+                    self.assertEqual(result.returncode,0,result.stderr)
+                    self.assertIn({'phase':'standalone-http',**receipt},
+                                  [json.loads(row) for row in result.stdout.splitlines()])
+
+    def test_unknown_fields_values_malformed_and_oversized_receipts_are_not_published(self):
+        base = {'status':'failed','reason':'artifact_invalid','cleanup':True}
+        cases = [json.dumps({**base,'raw':'PRIVATE_CANARY'}).encode(),
+                 json.dumps({**base,'reason':'PRIVATE_CANARY'}).encode(),
+                 json.dumps({**base,'cleanup':'PRIVATE_CANARY'}).encode(),
+                 b'{"status":"PRIVATE_CANARY"', b'PRIVATE_CANARY'+b' '*4096,
+                 json.dumps({**base,'status':'passed'}).encode()]
+        for workflow in self.workflows:
+            for raw in cases:
+                with self.subTest(workflow=workflow,bytes=len(raw)):
+                    result = self.publish(workflow,raw)
+                    self.assertNotEqual(result.returncode,0)
+                    self.assertNotIn('PRIVATE_CANARY',result.stdout+result.stderr)
+                    self.assertNotIn('"phase": "standalone-http"',result.stdout)
+
+    def test_linked_receipt_is_not_read_or_published(self):
+        raw=b'{"status":"failed","reason":"PRIVATE_CANARY","cleanup":true}'
+        for workflow in self.workflows:
+            result=self.publish(workflow,raw,linked=True)
+            self.assertNotEqual(result.returncode,0)
+            self.assertNotIn('PRIVATE_CANARY',result.stdout+result.stderr)
+
+    def test_reader_code_is_identical_and_checked_before_build_in_both_workflows(self):
+        self.assertEqual(self.reader(self.workflows[0]),self.reader(self.workflows[1]))
+        for workflow in self.workflows:
+            source=(HERE.parents[1]/'.github/workflows'/workflow).read_text()
+            self.assertIn('python3 scripts/ci/test-linux-standalone-smoke.py -v', source)
+            self.assertLess(source.index('python3 scripts/ci/test-linux-standalone-smoke.py -v'),
+                            source.index('run: bash scripts/ci/run-linux-build.sh'))
+
 if __name__ == '__main__': unittest.main()

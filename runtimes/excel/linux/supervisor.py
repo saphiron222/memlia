@@ -140,13 +140,19 @@ def _inspect(docker, cid, name, nonce, image, deadline):
             # Avoid Python's True == 1 equivalence in isolation metadata.
             if type(host[key]) is not type(expected) or host[key] != expected:
                 refuse()
-        for key in ("CapAdd", "Binds", "Mounts", "Devices", "DeviceRequests", "VolumesFrom", "PortBindings"):
+        for key in ("CapAdd", "Binds", "Devices", "DeviceRequests", "VolumesFrom", "PortBindings"):
             if key not in host or host[key] not in (None, [], {}):
                 refuse()
+        # Moby HostConfig.Mounts is a request spec tagged json:",omitempty".
+        # Our --tmpfs is checked in HOST; any supplied request mount still refuses.
+        if "Mounts" in host and host["Mounts"] not in (None, []):
+            refuse()
         limits = sorted((u["Name"], u["Soft"], u["Hard"]) for u in host["Ulimits"])
         if limits != [("core", 0, 0), ("nofile", 256, 256)]:
             refuse()
         # Docker versions may list --tmpfs here or only in HostConfig.Tmpfs.
+        if type(row["Mounts"]) is not list:
+            refuse()
         for mount in row["Mounts"]:
             if mount["Type"] != "tmpfs" or mount["Destination"] != "/tmp" or mount.get("Source") not in (None, ""):
                 refuse()

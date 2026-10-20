@@ -31,6 +31,7 @@ jobs:
           python3 scripts/ci/check-upstream-notices.py --root . --history
           python3 scripts/ci/test-linux-build-metrics.py -v
           python3 scripts/ci/test-linux-swap-host.py -v
+          python3 scripts/ci/test-linux-standalone-smoke.py -v
       - name: Construire avec Turbopack et swap disque possédé
         shell: bash
         run: bash scripts/ci/run-linux-build.sh --swap turbopack
@@ -39,14 +40,47 @@ jobs:
         shell: bash
         run: |
           python3 - <<'PY'
-          import json,os
+          import json,math,os,stat
           from pathlib import Path
           root=Path(os.environ['RUNNER_TEMP'])/'memlia-metrics'
           names=['host','toolchain','result','next-config','next-limits']
           for phase in ['test','install','inventory','typegen','typecheck','cli','sandbox','config','next','standalone']:
               names.extend([phase,phase+'-container'])
+          names.append('standalone-http')
           for name in names:
               path=root/(name+'.json')
+              if name == 'standalone-http':
+                  if not path.exists() and not path.is_symlink(): continue
+                  try:
+                      # Only the fixed producer's closed receipt may cross the VM boundary.
+                      if root.is_symlink() or path.is_symlink(): raise ValueError()
+                      fd=os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                      with os.fdopen(fd, 'rb') as stream:
+                          if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode): raise ValueError()
+                          data=stream.read(4097)
+                      if len(data)>4096: raise ValueError()
+                      value=json.loads(data)
+                      small={'status','reason','cleanup'}
+                      full=small | {'health','loginHtml','assets','forcedStop','databaseQualified','authenticationQualified','seconds'}
+                      reasons={'artifact_invalid','staging_refused','environment_invalid','listener_unavailable',
+                               'timeout','server_exited','http_refused','health_refused','login_refused',
+                               'assets_missing','asset_refused','private_log_limit','interrupted',
+                               'smoke_unavailable','cleanup_failed'}
+                      if not isinstance(value,dict) or set(value) not in (small,full): raise ValueError()
+                      if value['status'] not in ('passed','failed') or type(value['cleanup']) is not bool: raise ValueError()
+                      if value['reason'] is not None and (type(value['reason']) is not str or value['reason'] not in reasons): raise ValueError()
+                      if set(value)==full:
+                          if any(type(value[k]) is not bool for k in ('health','loginHtml','forcedStop','databaseQualified','authenticationQualified')): raise ValueError()
+                          if value['databaseQualified'] or value['authenticationQualified']: raise ValueError()
+                          if type(value['assets']) is not int or value['assets'] not in (0,2): raise ValueError()
+                          if type(value['seconds']) not in (int,float) or not math.isfinite(value['seconds']) or not 0<=value['seconds']<=2**53-1: raise ValueError()
+                      if value['status']=='passed':
+                          if set(value)!=full or value['reason'] is not None or not value['cleanup'] or not value['health'] or not value['loginHtml'] or value['assets']!=2: raise ValueError()
+                      elif value['reason'] is None: raise ValueError()
+                  except Exception:
+                      raise SystemExit('Invalid standalone HTTP receipt') from None
+                  print(json.dumps({'phase':'standalone-http',**value},sort_keys=True,allow_nan=False))
+                  continue
               if path.is_file():
                   with path.open('rb') as stream: data=stream.read(131073)
                   if len(data)>131072: raise SystemExit('Receipt exceeds publication bound')
