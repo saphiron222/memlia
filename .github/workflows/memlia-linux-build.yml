@@ -110,7 +110,7 @@ jobs:
           import json,os,stat
           from pathlib import Path
           root=Path(os.environ['RUNNER_TEMP'])/'memlia-metrics'
-          names=['chat-ui']
+          names=['chat-ui','ui-readiness','ui-service-web','ui-service-realtime','ui-service-cache']
           for phase in ('bootstrap','migrate','grants','metadata','baseline','seed','stage','cleanup','readback'):
               names.extend(['ui-'+phase,'ui-'+phase+'-container'])
           for name in names:
@@ -119,7 +119,7 @@ jobs:
               try:
                   if root.is_symlink() or path.is_symlink(): raise ValueError()
                   fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
-                  bound=4096 if name=='chat-ui' else 131072
+                  bound=4096 if name in ('chat-ui','ui-readiness','ui-service-web','ui-service-realtime','ui-service-cache') else 131072
                   with os.fdopen(fd,'rb') as f:
                       if not stat.S_ISREG(os.fstat(f.fileno()).st_mode): raise ValueError()
                       data=f.read(bound+1)
@@ -131,6 +131,16 @@ jobs:
                       if any(type(receipt[k])is not bool for k in flags): raise ValueError()
                       if receipt['status'] not in ('passed','failed') or receipt['reason'] not in (None,'cleanup_failed','journey_failed'): raise ValueError()
                       if (receipt['status']=='passed') != (receipt['reason'] is None and all(receipt[k] for k in flags)): raise ValueError()
+                  elif name=='ui-readiness':
+                      if type(receipt)is not dict or set(receipt)!={'phase','status','service','httpStatus','errorClass'} or receipt['phase']!='ui-readiness':raise ValueError()
+                      if receipt['status'] not in ('passed','failed') or receipt['service'] not in ('realtime','web'):raise ValueError()
+                      if receipt['httpStatus'] is not None and (type(receipt['httpStatus'])is not int or not 100<=receipt['httpStatus']<=599):raise ValueError()
+                      if receipt['errorClass'] not in (None,'timeout','connection','http','os','unexpected'):raise ValueError()
+                      if receipt['status']=='passed' and (receipt['service']!='web' or receipt['httpStatus']!=200 or receipt['errorClass']is not None):raise ValueError()
+                  elif name.startswith('ui-service-'):
+                      if type(receipt)is not dict or set(receipt)!={'phase','service','running','oomKilled','errorPresent'} or receipt['phase']!='ui-service-state':raise ValueError()
+                      if receipt['service'] not in ('web','realtime','cache') or name!='ui-service-'+receipt['service']:raise ValueError()
+                      if any(type(receipt[k])is not bool for k in ('running','oomKilled','errorPresent')):raise ValueError()
               except Exception:
                   raise SystemExit('Invalid UI receipt') from None
               print(json.dumps({'phase':name,**receipt},sort_keys=True))

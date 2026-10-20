@@ -29,13 +29,13 @@ class ChatCI(unittest.TestCase):
 
 
 class ClosedPublication(unittest.TestCase):
-    def emit(self,value=None,raw=None,link=False):
+    def emit(self,value=None,raw=None,link=False,name="chat-ui"):
         workflow=(HERE.parent.parent/'.github/workflows/memlia-linux-build.yml').read_text()
         code=workflow.split('      - name: Lire uniquement les reçus UI fermés\n',1)[1].split("          python3 - <<'PY'\n",1)[1].split("          PY\n",1)[0]
         code='\n'.join(line[10:] for line in code.splitlines())
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);metrics=root/'memlia-metrics';metrics.mkdir()
-            target=metrics/'chat-ui.json'
+            target=metrics/(name+'.json')
             if link:
                 (root/'foreign').write_text(json.dumps(value));target.symlink_to(root/'foreign')
             else:target.write_text(raw if raw is not None else json.dumps(value))
@@ -60,6 +60,37 @@ class ClosedPublication(unittest.TestCase):
         value={**self.valid(),'status':'failed','reason':'journey_failed','canvas':False}
         run=self.emit(value);self.assertEqual(run.returncode,0)
         self.assertEqual(json.loads(run.stdout)['status'],'failed')
+
+    def test_readiness_and_service_receipts_are_collected_with_closed_fields(self):
+        cases={
+            'ui-readiness':dict(phase='ui-readiness',status='failed',service='realtime',httpStatus=503,errorClass=None),
+            **{'ui-service-'+service:dict(phase='ui-service-state',service=service,running=False,oomKilled=False,errorPresent=True)
+               for service in ('web','realtime','cache')},
+        }
+        for name,value in cases.items():
+            with self.subTest(name=name):
+                run=self.emit(value,name=name)
+                self.assertEqual(run.returncode,0)
+                self.assertEqual(json.loads(run.stdout),value)
+
+    def test_diagnostic_receipts_refuse_unbounded_fields_types_links_and_success_claims(self):
+        readiness=dict(phase='ui-readiness',status='failed',service='web',httpStatus=401,errorClass=None)
+        service=dict(phase='ui-service-state',service='web',running=False,oomKilled=False,errorPresent=False)
+        cases=[('ui-readiness',{**readiness,'message':'PRIVATE_CANARY'}),
+               ('ui-readiness',{**readiness,'httpStatus':True}),
+               ('ui-readiness',{**readiness,'errorClass':'PRIVATE_CANARY'}),
+               ('ui-readiness',{**readiness,'status':'passed'}),
+               ('ui-service-web',{**service,'service':'cache'}),
+               ('ui-service-web',{**service,'running':1}),
+               ('ui-service-web',{**service,'error':'PRIVATE_CANARY'})]
+        for name,value in cases:
+            with self.subTest(name=name,fields=tuple(value)):
+                run=self.emit(value,name=name)
+                self.assertNotEqual(run.returncode,0)
+                self.assertNotIn('PRIVATE_CANARY',run.stdout+run.stderr)
+        for name,value in [('ui-readiness',readiness),('ui-service-web',service)]:
+            self.assertNotEqual(self.emit(value,name=name,link=True).returncode,0)
+            self.assertNotEqual(self.emit(name=name,raw=' '*4097).returncode,0)
 
 class DeadlineAndOwnership(unittest.TestCase):
     def test_total_remaining_budget_reserves_cleanup_and_never_extends(self):
