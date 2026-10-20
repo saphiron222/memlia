@@ -67,7 +67,7 @@ HTTPServer(('127.0.0.1',port),Handler).serve_forever()
 '''
 
 class HttpTests(unittest.TestCase):
-    def run_fixture(self, mode='good', ownership=True, native=False):
+    def run_fixture(self, mode='good', ownership=True, native=False, timeout=9):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);server=root/'server.py';record=root/'requests'
             server.write_text(SERVER)
@@ -82,7 +82,7 @@ class HttpTests(unittest.TestCase):
                 except OSError:return False
             with patch.object(smoke,'owned_listener',wraps=smoke.owned_listener if native else portable_listener) as listener_probe:
                 result=smoke.smoke([sys.executable,str(server),str(port),mode,str(record)],root,
-                                   {'PATH':os.environ.get('PATH','/usr/bin:/bin')},port,timeout=9)
+                                   {'PATH':os.environ.get('PATH','/usr/bin:/bin')},port,timeout=timeout)
             observed.extend(call.args[0] for call in listener_probe.call_args_list)
             requests=record.read_text().splitlines() if record.exists() else []
             for pid in set(observed):
@@ -349,7 +349,7 @@ class HttpDiagnosticTests(unittest.TestCase):
         with patch.dict(globals(), SERVER=server):
             result, requests = HttpTests().run_fixture()
         self.assertEqual(result['status'], 'failed')
-        self.assertEqual(result['reason'], 'smoke_unavailable')
+        self.assertEqual(result['reason'], 'http_refused')
         self.assertEqual(result.get('requestStage'), 'login')
         self.assertIn('httpStatus', result)
         self.assertIsNone(result['httpStatus'])
@@ -361,7 +361,7 @@ class HttpDiagnosticTests(unittest.TestCase):
         with patch.dict(globals(), SERVER=server):
             result, requests = HttpTests().run_fixture()
         self.assertEqual(result['status'], 'failed')
-        self.assertEqual(result['reason'], 'smoke_unavailable')
+        self.assertEqual(result['reason'], 'timeout')
         self.assertEqual(result.get('requestStage'), 'login')
         self.assertIn('httpStatus', result)
         self.assertIsNone(result['httpStatus'])
@@ -456,6 +456,103 @@ class DiagnosticPublicationTests(unittest.TestCase):
                     self.assertNotEqual(result.returncode,0)
                     self.assertNotIn('PRIVATE_CANARY',result.stdout+result.stderr)
                     self.assertNotIn('"phase": "standalone-http"',result.stdout)
+
+
+class HealthReadinessTests(unittest.TestCase):
+    def run_delayed_health(self, delay, timeout, status=200):
+        server = SERVER.replace(
+            '  self.send_response(status);',
+            f"  if self.path=='/api/health':time.sleep({delay});status={status}\n"
+            '  self.send_response(status);')
+        with patch.dict(globals(), SERVER=server):
+            return HttpTests().run_fixture(timeout=timeout)
+
+    def test_health_headers_can_arrive_after_five_seconds_within_startup_budget(self):
+        result, requests = self.run_delayed_health(5.2, 15)
+        self.assertEqual(result['status'], 'passed')
+        self.assertEqual(len(requests), 4)
+        self.assertFalse(result['forcedStop'])
+
+    def test_health_headers_cannot_extend_the_existing_startup_deadline(self):
+        result, requests = self.run_delayed_health(3, 9)
+        self.assertEqual(result['status'], 'failed')
+        self.assertEqual(result['reason'], 'timeout')
+        self.assertEqual(result['requestStage'], 'health')
+        self.assertIsNone(result['httpStatus'])
+        self.assertEqual(requests, ['/api/health'])
+        self.assertLess(result['seconds'], 3)
+
+    def test_delayed_non_200_health_is_not_retried_or_treated_as_ready(self):
+        result, requests = self.run_delayed_health(.1, 9, 503)
+        self.assertEqual(result['status'], 'failed')
+        self.assertEqual(result['reason'], 'http_refused')
+        self.assertEqual(result['httpStatus'], 503)
+        self.assertEqual(requests, ['/api/health'])
+
+    def test_health_body_keeps_five_second_bound_after_headers(self):
+        server = SERVER.replace(
+            '  try:self.wfile.write(body)',
+            "  if self.path=='/api/health':time.sleep(5.2)\n"
+            '  try:self.wfile.write(body)')
+        with patch.dict(globals(), SERVER=server):
+            result, requests = HttpTests().run_fixture(timeout=15)
+        self.assertEqual(result['status'], 'failed')
+        self.assertEqual(result['reason'], 'timeout')
+        self.assertEqual(result['httpStatus'], 200)
+        self.assertEqual(requests, ['/api/health'])
+
+
+class OwnedTerminationTests(unittest.TestCase):
+    def run_exit_fixture(self, mode='good', spontaneous=False):
+        # Actual child/signal/HTTP; only Linux procfs ownership is replaced by
+        # the existing portable listener boundary. No Next build is claimed.
+        server = SERVER.replace('import sys,time', 'import sys,time,signal,os')
+        server = server.replace(
+            'class Handler(BaseHTTPRequestHandler):',
+            'signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))\n'
+            'class Handler(BaseHTTPRequestHandler):')
+        if spontaneous:
+            server = server.replace(
+                '  try:self.wfile.write(body)',
+                '  if self.path=="/_next/static/two.css":\n'
+                '   self.wfile.write(body);self.wfile.flush();os._exit(143)\n'
+                '  try:self.wfile.write(body)')
+        children = []
+        real_popen, real_probe = smoke.subprocess.Popen, smoke.probe
+        def spawn(*args, **kwargs):
+            child = real_popen(*args, **kwargs)
+            children.append(child)
+            return child
+        def probe(*args, **kwargs):
+            real_probe(*args, **kwargs)
+            if spontaneous:
+                args[0].wait(timeout=2)
+        with patch.dict(globals(), SERVER=server), \
+             patch.object(smoke.subprocess, 'Popen', side_effect=spawn), \
+             patch.object(smoke, 'probe', side_effect=probe):
+            result, requests = HttpTests().run_fixture(mode)
+        self.assertEqual(len(children), 1)
+        self.assertEqual(children[0].returncode, 143)
+        return result, requests
+
+    def test_owned_sigterm_exit_143_preserves_successful_http_result(self):
+        result, requests = self.run_exit_fixture()
+        self.assertEqual(len(requests), 4)
+        self.assertEqual(result['status'], 'passed')
+        self.assertIsNone(result['reason'])
+        self.assertFalse(result['forcedStop'])
+
+    def test_owned_sigterm_exit_143_never_erases_http_failure(self):
+        result, requests = self.run_exit_fixture('health-invalid')
+        self.assertEqual(requests, ['/api/health'])
+        self.assertEqual(result['status'], 'failed')
+        self.assertEqual(result['reason'], 'health_refused')
+
+    def test_spontaneous_exit_143_after_http_probes_remains_failed(self):
+        result, requests = self.run_exit_fixture(spontaneous=True)
+        self.assertEqual(len(requests), 4)
+        self.assertEqual(result['status'], 'failed')
+        self.assertEqual(result['reason'], 'server_exited')
 
 
 if __name__ == '__main__': unittest.main()

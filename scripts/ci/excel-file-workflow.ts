@@ -83,7 +83,8 @@ async function main() {
     checks.authenticated = checks.webHasNoDdl = true
     async function request(path: string, method = 'GET', body?: unknown, credential: string | null = key) {
       const response = await dispatchInProcessV2Request(new NextRequest('http://localhost:3000' + path, {
-        method, headers: { ...(credential ? { 'x-api-key': credential } : {}),
+        // Trusted synthetic in-process transport supplies its test client IP, as a proxy would.
+        method, headers: { 'x-forwarded-for': '192.0.2.10', ...(credential ? { 'x-api-key': credential } : {}),
           ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(90_000),
       }))

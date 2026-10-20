@@ -141,6 +141,8 @@ jobs:
               cd apps/sim
               bun --no-env-file run build:cli-runtime
               bun --no-env-file run build:sandbox-bundles
+              # Native request/auth guard; only its pre-auth bucket storage is doubled.
+              bun test --no-env-file --tsconfig-override /work/apps/sim/tsconfig.json --timeout 10000 /work/scripts/ci/excel-file-workflow-request.test.ts
             ' > "$private/install.private.log" 2>&1
           state="$(timeout 10 docker inspect --format '{{.State.Running}} {{.State.OOMKilled}} {{.State.ExitCode}}' "$(cat "$private/install.cid")")"
           [[ "$state" == 'false false 0' ]]

@@ -131,7 +131,22 @@ def get(child, port, path, deadline, receipt):
     client = http.client.HTTPConnection('127.0.0.1', port, timeout=min(5, remaining))
     try:
         client.request('GET', path)
+        # Next listens before its handlers are ready. Only the initial health
+        # headers may use the remaining startup budget; connection stays at 5s.
+        connection_socket = client.sock
+        if path == '/api/health' and connection_socket is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise Refused('timeout')
+            connection_socket.settimeout(remaining)
         response = client.getresponse()
+        # HTTP/1.0 may detach client.sock while the response retains this socket.
+        # Restore the normal bound before reading any response body.
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise Refused('timeout')
+        if path == '/api/health' and connection_socket is not None and connection_socket.fileno() >= 0:
+            connection_socket.settimeout(min(5, remaining))
         if type(response.status) is int and 100 <= response.status <= 599:
             receipt['httpStatus'] = response.status
         if response.status != 200:  # No redirect is ever followed.
@@ -200,6 +215,10 @@ def smoke(argv, cwd, env, port, timeout=75):
             receipt['reason'] = error.args[0]
         except KeyboardInterrupt:
             receipt['reason'] = 'interrupted'
+        except TimeoutError:
+            receipt['reason'] = 'timeout'
+        except http.client.HTTPException:
+            receipt['reason'] = 'http_refused'
         except Exception:
             receipt['reason'] = 'smoke_unavailable'
         finally:
@@ -212,8 +231,10 @@ def smoke(argv, cwd, env, port, timeout=75):
                 cleanup_handlers[signum] = signal.signal(signum, cleanup_interrupted)
             try:
                 if child is not None:
+                    termination_requested = False
                     if child.poll() is None:
                         child.terminate()
+                        termination_requested = True
                         try:
                             child.wait(timeout=3)
                         except subprocess.TimeoutExpired:
@@ -222,7 +243,10 @@ def smoke(argv, cwd, env, port, timeout=75):
                             child.wait(timeout=3)
                     elif receipt['status'] == 'passed':
                         receipt.update(status='failed', reason='server_exited')
-                    if child.returncode not in (0, -signal.SIGTERM, -signal.SIGKILL):
+                    # Next handles our SIGTERM with process.exit(128 + SIGTERM).
+                    # A spontaneous 143 must not become an expected shutdown.
+                    expected_term_exit = termination_requested and child.returncode == 128 + signal.SIGTERM
+                    if child.returncode not in (0, -signal.SIGTERM, -signal.SIGKILL) and not expected_term_exit:
                         receipt.update(status='failed', reason=receipt['reason'] or 'server_exited')
                 receipt['cleanup'] = True
             except Exception:
