@@ -1,7 +1,9 @@
+// Modified by Memlia: preserve private file provenance and revalidate guarded publication.
 import { PrincipalSubjectUserRequiredError, resolvePrincipalSubject } from '@sim/auth/principal'
 import { createLogger } from '@sim/logger'
 import { getErrorMessage } from '@sim/utils/errors'
 import { omit } from '@sim/utils/object'
+import { stringifyBoundedJson } from '@/lib/core/utils/bounded-json'
 import { assertKnownSizeWithinLimit } from '@/lib/core/utils/stream-limits'
 import type {
   InternalToolFile,
@@ -15,6 +17,7 @@ import type {
 import { uploadCopilotFile } from '@/lib/uploads/contexts/copilot'
 import { uploadExecutionFile } from '@/lib/uploads/contexts/execution'
 import type { ExecutionContext } from '@/lib/uploads/contexts/execution/utils'
+import type { WorkspaceFileSecretProvenance } from '@/lib/uploads/contexts/workspace/file-secret-provenance'
 import { deleteFile } from '@/lib/uploads/core/storage-service'
 import { deleteFileMetadata } from '@/lib/uploads/server/metadata'
 import { MAX_BUFFERED_TRANSFER_BYTES } from '@/lib/uploads/shared/types'
@@ -115,13 +118,40 @@ export async function storeInternalToolFileResult<T>(
   signal?: AbortSignal
 ): Promise<T> {
   signal?.throwIfAborted()
+  const publication = publications.get(result)
+  if (
+    !publication &&
+    (publicationMarker in result || result.files.some((file) => publicationMarker in file))
+  ) {
+    throw new Error('Tool file publication binding was lost')
+  }
+  if (publication) {
+    if (publication.used) throw new Error('Tool file publication already attempted')
+    publication.used = true
+    if (
+      result.files.length !== 1 ||
+      result.files[0] !== publication.originalFile ||
+      result.present !== publication.snapshot.present ||
+      result.files[0].name !== publication.snapshot.files[0]!.name ||
+      result.files[0].mimeType !== publication.snapshot.files[0]!.mimeType ||
+      !Buffer.isBuffer(result.files[0].buffer) ||
+      !result.files[0].buffer.equals(publication.snapshot.files[0]!.buffer)
+    ) {
+      throw new Error('Tool file publication binding changed')
+    }
+    result = publication.snapshot
+  }
   const files = validateFiles(result)
   const scope = resolveFileStorageScope(context)
   const createdFiles: CreatedFile[] = []
   const storedFiles = new Map<InternalToolFile, UserFile>()
 
   try {
+    if (publication && (scope.kind !== 'execution' || context.copilotToolExecution)) {
+      throw new Error('Tool file publication requires a workflow execution')
+    }
     for (const file of files) {
+      if (publication) await publication.revalidate(context, signal)
       signal?.throwIfAborted()
       const metadata = resolveStoredFileMetadata(file.name, file.mimeType, file.buffer)
       const storedFile =
@@ -131,7 +161,8 @@ export async function storeInternalToolFileResult<T>(
               file.buffer,
               metadata.fileName,
               metadata.mimeType,
-              scope.userId
+              scope.userId,
+              ...(publication ? ([publication.provenance] as const) : [])
             )
           : await uploadCopilotFile({
               buffer: file.buffer,
@@ -148,6 +179,10 @@ export async function storeInternalToolFileResult<T>(
       if (!storedFile) throw new Error('Tool output file was not stored')
       return storedFile
     })
+    if (publication) {
+      await publication.revalidate(context, signal)
+      signal?.throwIfAborted()
+    }
     const output = await finalize(result.present(presentedFiles))
     signal?.throwIfAborted()
     return output
@@ -184,4 +219,50 @@ export async function presentInternalToolOperationResult(
     },
     signal
   )
+}
+
+type PublicationRevalidation = (
+  context: InternalToolOperationContext,
+  signal?: AbortSignal
+) => Promise<void>
+const publicationMarker = Symbol('private file publication guard')
+const publications = new WeakMap<
+  InternalToolFileResult,
+  {
+    snapshot: InternalToolFileResult
+    originalFile: InternalToolFile
+    used: boolean
+    provenance: WorkspaceFileSecretProvenance
+    revalidate: PublicationRevalidation
+  }
+>()
+
+/** In-process binding only: cloning or serializing a result cannot carry this guard. */
+export function bindInternalToolFilePublication(
+  result: InternalToolFileResult,
+  provenance: WorkspaceFileSecretProvenance,
+  revalidate: PublicationRevalidation
+): InternalToolFileResult {
+  const encoded = stringifyBoundedJson(provenance, 1024 * 1024, { strict: true })
+  if (encoded === undefined || !['exact', 'unrecorded', 'unknown'].includes(provenance.status)) {
+    throw new Error('Tool file provenance is invalid')
+  }
+  if (publications.has(result) || result.files.length !== 1 || typeof revalidate !== 'function') {
+    throw new Error('Tool file publication binding is invalid')
+  }
+  const files = validateFiles(result).map((file) => ({
+    buffer: Buffer.from(file.buffer),
+    name: file.name,
+    mimeType: file.mimeType,
+  }))
+  Object.defineProperty(result, publicationMarker, { value: true, enumerable: true })
+  Object.defineProperty(result.files[0], publicationMarker, { value: true, enumerable: true })
+  publications.set(result, {
+    originalFile: result.files[0]!,
+    used: false,
+    snapshot: { ...result, files, present: result.present },
+    provenance: JSON.parse(encoded),
+    revalidate,
+  })
+  return result
 }

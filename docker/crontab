@@ -1,4 +1,3 @@
-# Modified by Memlia in 2026. Upstream Apache-2.0 license and notices retained.
 # Background jobs for the Docker Compose deployment.
 #
 # These mirror helm/sim/values.yaml `cronjobs.jobs` one-for-one — same paths,

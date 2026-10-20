@@ -27,8 +27,8 @@ export const anthropicProvider: ProviderConfig = {
       providerId: 'anthropic',
       providerLabel: 'Anthropic',
       createClient: (apiKey) => {
-        if (getProviderRuntimeContext()?.controlledRun)
-          return createControlledAnthropicClient(apiKey)
+        const controls = getProviderRuntimeContext()?.controlledRun
+        if (controls) return createControlledAnthropicClient(apiKey, controls.anthropicWorkspaceId)
         const cacheKey = `anthropic::${apiKey}`
         return getCachedProviderClient(
           cacheKey,

@@ -1,3 +1,4 @@
+// Modified by Memlia: capture-only opt-in Excel materialization before native deployment INSERT.
 import { AuditAction, AuditResourceType, recordAudit } from '@sim/audit'
 import type { PrincipalActor } from '@sim/auth/principal'
 import { db, workflowDeploymentVersion, workflow as workflowTable } from '@sim/db'
@@ -10,9 +11,11 @@ import { and, eq } from 'drizzle-orm'
 import type { NextRequest } from 'next/server'
 import { env } from '@/lib/core/config/env'
 import type { OrchestrationErrorCode } from '@/lib/core/orchestration/types'
+import { stringifyBoundedJson } from '@/lib/core/utils/bounded-json'
 import { generateRequestId } from '@/lib/core/utils/request'
 import { getSocketServerUrl } from '@/lib/core/utils/urls'
 import type { DbOrTx } from '@/lib/db/types'
+import { readExcelProcedureSnapshotCapture } from '@/lib/memlia/excel/materialize-procedure-snapshot'
 import { captureServerEvent } from '@/lib/posthog/server'
 import { validateTriggerWebhookConfigForDeploy } from '@/lib/webhooks/deploy'
 import { normalizedStringify } from '@/lib/workflows/comparison/normalize'
@@ -191,7 +194,46 @@ export async function prepareWorkflowSnapshotDeployment(params: {
   workflowState: WorkflowState
   tx?: DbOrTx
   workspaceOperationId?: string
+  /** Opaque server capture, never a request DTO field or authorization. */
+  excelProcedureSnapshot?: unknown
 }) {
+  let excelIdentity: ReturnType<typeof readExcelProcedureSnapshotCapture> | undefined
+  if (Object.hasOwn(params, 'excelProcedureSnapshot')) {
+    try {
+      const capture = params.excelProcedureSnapshot
+      excelIdentity = readExcelProcedureSnapshotCapture(capture)
+      // Capture all JSON caller inputs before validation can await. Keep only the native TX and
+      // nontransferable handle by reference; neither can be reconstructed from JSON.
+      const json = stringifyBoundedJson(
+        {
+          params: params.params,
+          actorId: params.actorId,
+          requestId: params.requestId,
+          idempotencyKey: params.idempotencyKey,
+          workflowState: params.workflowState,
+          ...(params.workspaceOperationId === undefined
+            ? {}
+            : { workspaceOperationId: params.workspaceOperationId }),
+        },
+        2 * 1024 * 1024,
+        { strict: true }
+      )
+      if (json === undefined) throw new Error('refused')
+      params = { ...JSON.parse(json), tx: params.tx, excelProcedureSnapshot: capture }
+      if (
+        params.params.workflowId !== excelIdentity.scope.workflowId ||
+        `sha256:${sha256Hex(normalizedStringify(params.workflowState))}` !==
+          excelIdentity.expectedStateDigest
+      )
+        throw new Error('refused')
+    } catch {
+      return {
+        success: false as const,
+        error: 'Excel deployment snapshot refused',
+        errorCode: 'validation' as const,
+      }
+    }
+  }
   const workflowState = params.workflowState
   const validation = await validateDeploymentState(workflowState.blocks)
   if (!validation.success) return validation
@@ -201,6 +243,7 @@ export async function prepareWorkflowSnapshotDeployment(params: {
     workflowId: params.params.workflowId,
     userId: params.params.userId,
     workflowState: canonicalizeDeploymentWorkflowState(workflowState),
+    ...(excelIdentity ? { excelInputDigest: excelIdentity.inputDigest } : {}),
   })
   let outboxEventId: string | undefined
   const prepared = await prepareWorkflowDeployment({
@@ -210,6 +253,7 @@ export async function prepareWorkflowSnapshotDeployment(params: {
     requestHash,
     idempotencyKey: bindIdempotencyKeyToRequest(params.idempotencyKey, requestHash),
     workflowState,
+    ...(excelIdentity ? { excelProcedureSnapshot: params.excelProcedureSnapshot } : {}),
     name: params.params.versionName,
     description: params.params.versionDescription,
     readinessComponents: DEPLOYMENT_READINESS_COMPONENTS,

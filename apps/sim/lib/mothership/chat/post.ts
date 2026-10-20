@@ -1132,6 +1132,7 @@ export async function handleUnifiedChatPost(req: NextRequest) {
         return capabilityRefusalResponse(chatCapability)
       }
 
+      let localProvider: 'openai' | 'anthropic' | undefined
       let localModel: string | undefined
       if (localMode) {
         if (branch.kind !== 'workflow' || !branch.workspaceId || req.signal.aborted)
@@ -1143,13 +1144,14 @@ export async function handleUnifiedChatPost(req: NextRequest) {
         if (
           req.signal.aborted ||
           capabilities.backend !== 'local' ||
-          capabilities.provider !== 'openai' ||
+          (capabilities.provider !== 'openai' && capabilities.provider !== 'anthropic') ||
           capabilities.workspaceId !== branch.workspaceId ||
           capabilities.workflowId !== branch.workflowId ||
           !capabilities.requestSupported
         )
           throw new Error('Local Chat request is unavailable.')
         // Capture the non-secret model before chat storage or complete preparation awaits.
+        localProvider = capabilities.provider
         localModel = capabilities.model
       }
 
@@ -1306,7 +1308,11 @@ export async function handleUnifiedChatPost(req: NextRequest) {
           workflowId: branch.workflowId,
           currentMessage: { id: userMessageId, content: body.message },
         })
-        if (req.signal.aborted || localAdmission.localChat.request.model !== localModel)
+        if (
+          req.signal.aborted ||
+          localAdmission.localChat.request.model !== localModel ||
+          localAdmission.localChat.budget.pricingProfile.provider !== localProvider
+        )
           throw new Error('Local Chat request is unavailable.')
         executionContext = {
           userId: authenticatedUserId,

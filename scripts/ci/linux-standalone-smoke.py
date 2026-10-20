@@ -119,7 +119,8 @@ def owned_listener(pid, port):
         return False
 
 
-def get(child, port, path, deadline):
+def get(child, port, path, deadline, receipt):
+    receipt['httpStatus'] = None
     if child.poll() is not None:
         raise Refused('server_exited')
     if not owned_listener(child.pid, port):
@@ -131,6 +132,8 @@ def get(child, port, path, deadline):
     try:
         client.request('GET', path)
         response = client.getresponse()
+        if type(response.status) is int and 100 <= response.status <= 599:
+            receipt['httpStatus'] = response.status
         if response.status != 200:  # No redirect is ever followed.
             raise Refused('http_refused')
         data = bytearray()
@@ -151,19 +154,22 @@ def get(child, port, path, deadline):
         client.close()
 
 
-def probe(child, port, deadline):
-    kind, body = get(child, port, '/api/health', deadline)
+def probe(child, port, deadline, receipt):
+    receipt['requestStage'] = 'health'
+    kind, body = get(child, port, '/api/health', deadline, receipt)
     if kind != 'application/json' or json.loads(body).get('status') != 'ok':
         raise Refused('health_refused')
-    kind, body = get(child, port, '/login', deadline)
+    receipt['requestStage'] = 'login'
+    kind, body = get(child, port, '/login', deadline, receipt)
     if kind != 'text/html' or b'<html' not in body.lower():
         raise Refused('login_refused')
     candidates = re.findall(rb'["\'](/_next/static/[A-Za-z0-9_./-]+)["\']', body)
     assets = list(dict.fromkeys(path for path in candidates if path.endswith((b'.js', b'.css'))))[:2]
     if len(assets) != 2 or any(b'..' in asset.split(b'/') for asset in assets):
         raise Refused('assets_missing')
-    for asset in assets:
-        kind, content = get(child, port, asset.decode('ascii'), deadline)
+    for index, asset in enumerate(assets, 1):
+        receipt['requestStage'] = 'asset_1' if index == 1 else 'asset_2'
+        kind, content = get(child, port, asset.decode('ascii'), deadline, receipt)
         if not content or kind not in ('text/css', 'text/javascript', 'application/javascript'):
             raise Refused('asset_refused')
     if child.poll() is not None:
@@ -175,7 +181,7 @@ def smoke(argv, cwd, env, port, timeout=75):
     deadline = started + timeout - 8
     receipt = {'status': 'failed', 'reason': None, 'health': False, 'loginHtml': False,
                'assets': 0, 'cleanup': False, 'forcedStop': False, 'databaseQualified': False,
-               'authenticationQualified': False}
+               'authenticationQualified': False, 'requestStage': None, 'httpStatus': None}
     child = None
     with tempfile.TemporaryFile() as private_log:
         try:
@@ -186,7 +192,7 @@ def smoke(argv, cwd, env, port, timeout=75):
                 if os.fstat(private_log.fileno()).st_size > 8 * LIMIT:
                     raise Refused('private_log_limit')
                 time.sleep(.05)
-            probe(child, port, deadline)
+            probe(child, port, deadline, receipt)
             if os.fstat(private_log.fileno()).st_size > 8 * LIMIT:
                 raise Refused('private_log_limit')
             receipt.update(health=True, loginHtml=True, assets=2, status='passed')
@@ -249,7 +255,8 @@ def main():
     # These three paths are supplied by the owned Docker phase, never by HTTP.
     app, scratch, report = map(Path, sys.argv[1:])
     os.umask(0o077)
-    result = {'status': 'failed', 'reason': 'artifact_invalid', 'cleanup': True}
+    result = {'status': 'failed', 'reason': 'artifact_invalid', 'cleanup': True,
+              'requestStage': None, 'httpStatus': None}
     stage = None
     previous = {}
     def interrupted(_signum, _frame):

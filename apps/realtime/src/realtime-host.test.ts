@@ -1,0 +1,178 @@
+// Copyright (c) 2026 Memlia. All rights reserved.
+import { once } from 'node:events'
+import type { Server } from 'node:http'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+const observed = vi.hoisted(() => ({
+  servers: [] as Server[],
+  hosts: [] as unknown[],
+}))
+
+// Keep the HTTP listener real. Refuse non-loopback binds in the test itself,
+// including the historical hard-coded 0.0.0.0 path exercised by the RED.
+vi.mock('http', async (importOriginal) => {
+  const native = await importOriginal<typeof import('node:http')>()
+  return {
+    ...native,
+    createServer: () => {
+      const server = native.createServer()
+      observed.servers.push(server)
+      const listen = server.listen
+      vi.spyOn(server, 'listen').mockImplementation((...args) => {
+        const host: unknown = args[1]
+        observed.hosts.push(host)
+        if (host === '127.0.0.1') return Reflect.apply(listen, server, args)
+        return server
+      })
+      return server
+    },
+  }
+})
+
+// DB, Socket.IO, rooms, authentication and business handlers are explicit
+// boundaries here. This suite qualifies configuration and the real HTTP bind,
+// not authentication, permissions, collaboration or the database.
+vi.mock('@sim/logger', () => ({
+  createLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn() }),
+}))
+vi.mock('@/config/socket', () => ({
+  createSocketIOServer: async () => ({ use: vi.fn(), on: vi.fn(), engine: { on: vi.fn() } }),
+  shutdownSocketIOAdapter: vi.fn(),
+}))
+vi.mock('@/database/preflight', () => ({ assertSchemaCompatibility: vi.fn() }))
+vi.mock('@/access-revalidation', () => ({
+  startAccessRevalidationSweep: () => ({ stop: vi.fn() }),
+}))
+vi.mock('@/handlers', () => ({ setupAllHandlers: vi.fn() }))
+vi.mock('@/handlers/connection', () => ({ waitForConnectionCleanup: vi.fn() }))
+vi.mock('@/handlers/file-doc', () => ({
+  flushAllFileDocRooms: vi.fn(),
+  registerFileDocPresenceRelay: vi.fn(),
+}))
+vi.mock('@/handlers/file-doc-store', () => ({
+  initFileDocStore: vi.fn(),
+  getFileDocStore: () => ({ shutdown: vi.fn() }),
+}))
+vi.mock('@/middleware/auth', () => ({ authenticateSocket: vi.fn() }))
+vi.mock('@/rooms', () => {
+  class RoomManager {
+    async initialize() {}
+    async shutdown() {}
+  }
+  return { MemoryRoomManager: RoomManager, RedisRoomManager: RoomManager }
+})
+vi.mock('@/routes/http', () => ({
+  createHttpHandler: () => (_request: unknown, response: import('node:http').ServerResponse) => {
+    response.writeHead(200, { 'Content-Type': 'text/plain' })
+    response.end('owned-listener')
+  },
+}))
+
+function preserveListeners<T>(read: () => T[], remove: (listener: T) => void): () => void {
+  const before = read()
+  return () => {
+    for (const listener of read()) {
+      if (!before.includes(listener)) remove(listener)
+    }
+    expect(read()).toEqual(before)
+  }
+}
+
+let restoreListeners: (() => void)[]
+
+beforeEach(() => {
+  vi.resetModules()
+  observed.servers.length = 0
+  observed.hosts.length = 0
+  vi.stubEnv('REALTIME_HOST', undefined)
+  vi.stubEnv('REDIS_URL', undefined)
+  vi.stubEnv('DISABLE_AUTH', undefined)
+  restoreListeners = [
+    preserveListeners(
+      () => process.listeners('uncaughtException'),
+      (listener) => process.removeListener('uncaughtException', listener)
+    ),
+    preserveListeners(
+      () => process.listeners('unhandledRejection'),
+      (listener) => process.removeListener('unhandledRejection', listener)
+    ),
+    preserveListeners(
+      () => process.listeners('SIGINT'),
+      (listener) => process.removeListener('SIGINT', listener)
+    ),
+    preserveListeners(
+      () => process.listeners('SIGTERM'),
+      (listener) => process.removeListener('SIGTERM', listener)
+    ),
+  ]
+})
+
+afterEach(async () => {
+  for (const server of observed.servers) {
+    server.closeAllConnections()
+    if (server.listening) await new Promise<void>((resolve) => server.close(() => resolve()))
+    expect(server.listening).toBe(false)
+  }
+  for (const restore of restoreListeners) restore()
+})
+
+describe('operator-selected realtime bind', () => {
+  it('preserves the container default and authentication when the setting is absent', async () => {
+    const { env, isAuthDisabled } = await import('./env')
+    expect(env).toHaveProperty('REALTIME_HOST', '0.0.0.0')
+    expect(isAuthDisabled).toBe(false)
+  })
+
+  it.each(['127.0.0.1', '0.0.0.0', '::1', '::'])('accepts the IP literal %s', async (host) => {
+    vi.stubEnv('REALTIME_HOST', host)
+    const { env } = await import('./env')
+    expect(env).toHaveProperty('REALTIME_HOST', host)
+  })
+
+  it.each(['', 'localhost', 'https://127.0.0.1', '127.0.0.1:3002', ' 127.0.0.1 ', '999.1.1.1'])(
+    'refuses an explicit invalid bind rather than reverting to a wildcard: %s',
+    async (host) => {
+      vi.stubEnv('REALTIME_HOST', host)
+      await expect(import('./env')).rejects.toThrow('Invalid realtime server environment')
+      expect(observed.servers).toHaveLength(0)
+    }
+  )
+
+  it('makes the actual entry point listen on IPv4 loopback and closes its owned listener', async () => {
+    const native = await vi.importActual<typeof import('node:http')>('node:http')
+    const reservation = native.createServer()
+    reservation.listen(0, '127.0.0.1')
+    await once(reservation, 'listening')
+    const address = reservation.address()
+    if (!address || typeof address === 'string') throw new Error('port reservation unavailable')
+    const port = address.port
+    await new Promise<void>((resolve) => reservation.close(() => resolve()))
+    vi.stubEnv('PORT', String(port))
+    vi.stubEnv('REALTIME_HOST', '127.0.0.1')
+
+    await import('./index')
+    await vi.waitFor(() => expect(observed.hosts).toHaveLength(1))
+    expect(observed.hosts).toEqual(['127.0.0.1'])
+    const server = observed.servers[0]
+    await vi.waitFor(() => expect(server.listening).toBe(true))
+    expect(server.address()).toEqual({ address: '127.0.0.1', family: 'IPv4', port })
+    const result = await new Promise<{ status: number | undefined; body: string }>(
+      (resolve, reject) => {
+        const request = native.get(
+          { hostname: '127.0.0.1', port, path: '/health', agent: false },
+          (response) => {
+            let body = ''
+            response.setEncoding('utf8')
+            response.on('data', (part: string) => {
+              body += part
+            })
+            response.on('end', () => resolve({ status: response.statusCode, body }))
+          }
+        )
+        request.on('error', reject)
+        request.setTimeout(1000, () => request.destroy(new Error('owned request timeout')))
+      }
+    )
+    expect(result).toEqual({ status: 200, body: 'owned-listener' })
+  })
+})

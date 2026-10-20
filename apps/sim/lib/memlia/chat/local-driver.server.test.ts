@@ -4,6 +4,19 @@
 
 import { resetEnvFlagsMock, setEnvFlags } from '@sim/testing'
 import {
+  workflowContextMock,
+  workflowContextMockFns,
+} from '@sim/testing/mocks/workflow-context.mock'
+import { workspaceAuthzMock, workspaceAuthzMockFns } from '@sim/testing/mocks/workspace-authz.mock'
+import { fixtures as excelFixtures } from '../../../../../packages/memlia-contracts/tests/fixtures'
+
+vi.mock('@/lib/workflows/application/context', () => workflowContextMock)
+vi.mock('@sim/platform-authz/workspace', () => workspaceAuthzMock)
+vi.mock('@/lib/permission-groups/config-scope.server', () => ({
+  resolvePermissionGroupConfig: async () => null,
+}))
+
+import {
   mothershipAsyncRunsMock,
   mothershipAsyncRunsMockFns,
 } from '@sim/testing/mocks/mothership-async-runs.mock'
@@ -62,7 +75,8 @@ vi.mock('@/lib/mothership/async-runs/repository', () => mothershipAsyncRunsMock)
 vi.mock('@/lib/mothership/persistence/tool-permission/auto-allow', () => ({
   getAutoAllowedTools: async () => new Set(),
 }))
-vi.mock('@/lib/permission-groups/capability-assertions', () => ({
+vi.mock('@/lib/permission-groups/capability-assertions', async (original) => ({
+  ...(await original<typeof import('@/lib/permission-groups/capability-assertions')>()),
   isWorkspaceCapabilityWithheld: async () => false,
 }))
 vi.mock('@/lib/mothership/request/session/abort', () => ({
@@ -529,137 +543,201 @@ it('refuses duplicate proposal IDs even when a callback arrives concurrently', a
   expect(infra.execute).not.toHaveBeenCalled()
 })
 
-it('composes native budget/binding/OpenAI SDK proposal and synthesis with native SSE and handlers', async () => {
-  const native = await vi.importActual<
-    typeof import('@/lib/memlia/ai/budgeted-catalog-provider.server')
-  >('@/lib/memlia/ai/budgeted-catalog-provider.server')
-  const { getStaticProviderModels } = await import('@/providers/models')
-  const { getModelPricing } = await import('@/providers/pricing')
-  const { createSSEStream } = await import('@/lib/mothership/request/lifecycle/start')
-  const def = getStaticProviderModels('openai').find((m) => m.id === 'gpt-5.4')!
-  const profile = {
-    version: 1 as const,
-    basis: 'native_list_price_estimate_v1' as const,
-    provider: 'openai' as const,
-    model: def.id,
-    pricing: getModelPricing(def.id)!,
-    bounds: { contextTokens: def.contextWindow!, outputTokens: 100 },
-    maximumCostUsd: '100',
-  }
-  const intent = {
-    request: {
-      expectedRevision: 7,
-      operations: [{ operation_type: 'remove', block_id: 'block-a' }],
-      layout: { mode: 'preserve' },
-    },
-  }
-  function response(output: unknown[], text?: string) {
-    return new Response(
-      [
-        ...(text ? [{ type: 'response.output_text.delta', delta: text }] : []),
+it.each(['openai', 'anthropic'] as const)(
+  'composes native budget/binding/%s SDK proposal and synthesis with native SSE and handlers',
+  async (provider) => {
+    const native = await vi.importActual<
+      typeof import('@/lib/memlia/ai/budgeted-catalog-provider.server')
+    >('@/lib/memlia/ai/budgeted-catalog-provider.server')
+    const { getStaticProviderModels } = await import('@/providers/models')
+    const { getModelPricing } = await import('@/providers/pricing')
+    const { createSSEStream } = await import('@/lib/mothership/request/lifecycle/start')
+    const def = getStaticProviderModels(provider).find(
+      (m) => m.id === (provider === 'openai' ? 'gpt-5.4' : 'claude-haiku-4-5')
+    )!
+    const profile = {
+      version: 1 as const,
+      basis: 'native_list_price_estimate_v1' as const,
+      provider,
+      model: def.id,
+      pricing: getModelPricing(def.id)!,
+      bounds: { contextTokens: def.contextWindow!, outputTokens: 100 },
+      maximumCostUsd: '100',
+    }
+    const intent = {
+      request: {
+        expectedRevision: 7,
+        operations: [{ operation_type: 'remove', block_id: 'block-a' }],
+        layout: { mode: 'preserve' },
+      },
+    }
+    function anthropicResponse(tool: boolean) {
+      const events = [
         {
-          type: 'response.completed',
-          response: {
-            id: 'fixture-response',
-            status: 'completed',
-            output,
-            usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
-          },
-        },
-      ]
-        .map((e) => `data: ${JSON.stringify(e)}\n\n`)
-        .join(''),
-      { headers: { 'Content-Type': 'text/event-stream' } }
-    )
-  }
-  const http = vi
-    .fn()
-    .mockResolvedValueOnce(
-      response([
-        {
-          type: 'function_call',
-          id: 'model-call',
-          call_id: 'model-call',
-          name: 'propose_workflow_operations',
-          arguments: JSON.stringify(intent),
-        },
-      ])
-    )
-    .mockResolvedValueOnce(
-      response(
-        [
-          {
+          type: 'message_start',
+          message: {
+            id: 'msg_fixture',
             type: 'message',
             role: 'assistant',
-            content: [{ type: 'output_text', text: 'Applied.' }],
+            model: def.id,
+            content: [],
+            stop_reason: null,
+            stop_sequence: null,
+            usage: {
+              input_tokens: 1,
+              output_tokens: 0,
+              cache_read_input_tokens: 0,
+              cache_creation_input_tokens: 0,
+              cache_creation: null,
+              service_tier: 'standard',
+            },
           },
-        ],
-        'Applied.'
+        },
+        {
+          type: 'content_block_start',
+          index: 0,
+          content_block: tool
+            ? { type: 'tool_use', id: 'model-call', name: 'propose_workflow_operations', input: {} }
+            : { type: 'text', text: '' },
+        },
+        {
+          type: 'content_block_delta',
+          index: 0,
+          delta: tool
+            ? { type: 'input_json_delta', partial_json: JSON.stringify(intent) }
+            : { type: 'text_delta', text: 'Applied.' },
+        },
+        { type: 'content_block_stop', index: 0 },
+        {
+          type: 'message_delta',
+          delta: { stop_reason: tool ? 'tool_use' : 'end_turn', stop_sequence: null },
+          usage: { output_tokens: 1 },
+        },
+        { type: 'message_stop' },
+      ]
+      return new Response(
+        events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(''),
+        { headers: { 'Content-Type': 'text/event-stream' } }
       )
-    )
-  vi.stubGlobal('fetch', http)
-  infra.attribution.mockResolvedValue({ actorUserId: 'user-a' })
-  infra.provider.mockImplementation(native.runBudgetedCatalogProvider)
-  const f = fixture()
-  const localChat = {
-    ...input(),
-    budget: { windowId: 'budget-a', windowVersion: 1, pricingProfile: profile },
-    limits: { maxDurationMs: 2000 },
-  }
-  const body = await new Response(
-    createSSEStream({
-      requestPayload: { message: 'Fixture', mode: 'agent', workflowId: 'workflow-a' },
-      userId: 'user-a',
-      workspaceId: 'workspace-a',
-      streamId: 'stream-a',
-      executionId: 'exec-a',
-      runId: 'run-a',
-      chatId: 'chat-a',
-      currentChat: null,
-      message: 'Fixture',
-      titleModel: 'gpt-5.4',
-      requestId: 'request-a',
-      orchestrateOptions: {
+    }
+    function response(output: unknown[], text?: string) {
+      return new Response(
+        [
+          ...(text ? [{ type: 'response.output_text.delta', delta: text }] : []),
+          {
+            type: 'response.completed',
+            response: {
+              id: 'fixture-response',
+              status: 'completed',
+              output,
+              usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+            },
+          },
+        ]
+          .map((e) => `data: ${JSON.stringify(e)}\n\n`)
+          .join(''),
+        { headers: { 'Content-Type': 'text/event-stream' } }
+      )
+    }
+    const http = vi
+      .fn()
+      .mockResolvedValueOnce(
+        provider === 'anthropic'
+          ? anthropicResponse(true)
+          : response([
+              {
+                type: 'function_call',
+                id: 'model-call',
+                call_id: 'model-call',
+                name: 'propose_workflow_operations',
+                arguments: JSON.stringify(intent),
+              },
+            ])
+      )
+      .mockResolvedValueOnce(
+        provider === 'anthropic'
+          ? anthropicResponse(false)
+          : response(
+              [
+                {
+                  type: 'message',
+                  role: 'assistant',
+                  content: [{ type: 'output_text', text: 'Applied.' }],
+                },
+              ],
+              'Applied.'
+            )
+      )
+    vi.stubGlobal('fetch', http)
+    infra.attribution.mockResolvedValue({ actorUserId: 'user-a' })
+    infra.provider.mockImplementation(native.runBudgetedCatalogProvider)
+    const f = fixture()
+    const localChat = {
+      ...input(),
+      request: { ...input().request, model: def.id },
+      ...(provider === 'anthropic' ? { anthropicWorkspaceId: 'wrkspc_fixture123' } : {}),
+      budget: { windowId: 'budget-a', windowVersion: 1, pricingProfile: profile },
+      limits: { maxDurationMs: 2000 },
+    }
+    const body = await new Response(
+      createSSEStream({
+        requestPayload: { message: 'Fixture', mode: 'agent', workflowId: 'workflow-a' },
         userId: 'user-a',
         workspaceId: 'workspace-a',
-        workflowId: 'workflow-a',
+        streamId: 'stream-a',
+        executionId: 'exec-a',
+        runId: 'run-a',
         chatId: 'chat-a',
-        goRoute: '/api/mothership',
-        interactive: true,
-        executionContext: f.exec,
-        localChat,
-      },
+        currentChat: null,
+        message: 'Fixture',
+        titleModel: 'gpt-5.4',
+        requestId: 'request-a',
+        orchestrateOptions: {
+          userId: 'user-a',
+          workspaceId: 'workspace-a',
+          workflowId: 'workflow-a',
+          chatId: 'chat-a',
+          goRoute: '/api/mothership',
+          interactive: true,
+          executionContext: f.exec,
+          localChat,
+        },
+      })
+    ).text()
+    const frames = body
+      .split('\n')
+      .filter((l) => l.startsWith('data: '))
+      .map((l) => JSON.parse(l.slice(6)))
+    expect(frames.filter((e) => e.type === 'complete')).toHaveLength(1)
+    expect(frames.find((e) => e.type === 'complete').payload.status, JSON.stringify(frames)).toBe(
+      'complete'
+    )
+    expect(body).toContain('Applied.')
+    expect(body).not.toMatch(/PRIVATE_KEY|PRIVATE_SESSION|operations|model-call/)
+    expect(http).toHaveBeenCalledTimes(2)
+    expect(infra.reserve).toHaveBeenCalledTimes(2)
+    expect(infra.settle).toHaveBeenCalledTimes(2)
+    expect(infra.reserve.mock.invocationCallOrder[0]).toBeLessThan(http.mock.invocationCallOrder[0])
+    expect(infra.reserve.mock.invocationCallOrder[1]).toBeLessThan(http.mock.invocationCallOrder[1])
+    expect(infra.propose).toHaveBeenCalledWith(intent.request, expect.any(AbortSignal))
+    expect(infra.execute).toHaveBeenCalledOnce()
+    expect(infra.settle.mock.calls.every(([, result]) => result.kind === 'known')).toBe(true)
+    expect(infra.generic).not.toHaveBeenCalled()
+    expect(infra.worker).not.toHaveBeenCalled()
+    const wire = JSON.parse(http.mock.calls[1][1].body)
+    const result =
+      provider === 'openai'
+        ? wire.input.find((x: { type: string }) => x.type === 'function_call_output').output
+        : wire.messages
+            .flatMap((m: { content: unknown[] }) => m.content)
+            .find((x: { type: string }) => x.type === 'tool_result').content
+    expect(JSON.parse(result)).toEqual({
+      status: 'applied',
+      baseRevision: 7,
+      draftRevision: 8,
     })
-  ).text()
-  const frames = body
-    .split('\n')
-    .filter((l) => l.startsWith('data: '))
-    .map((l) => JSON.parse(l.slice(6)))
-  expect(frames.filter((e) => e.type === 'complete')).toHaveLength(1)
-  expect(frames.find((e) => e.type === 'complete').payload.status, JSON.stringify(frames)).toBe(
-    'complete'
-  )
-  expect(body).toContain('Applied.')
-  expect(body).not.toMatch(/PRIVATE_KEY|PRIVATE_SESSION|operations|model-call/)
-  expect(http).toHaveBeenCalledTimes(2)
-  expect(infra.reserve).toHaveBeenCalledTimes(2)
-  expect(infra.settle).toHaveBeenCalledTimes(2)
-  expect(infra.reserve.mock.invocationCallOrder[0]).toBeLessThan(http.mock.invocationCallOrder[0])
-  expect(infra.reserve.mock.invocationCallOrder[1]).toBeLessThan(http.mock.invocationCallOrder[1])
-  expect(infra.propose).toHaveBeenCalledWith(intent.request, expect.any(AbortSignal))
-  expect(infra.execute).toHaveBeenCalledOnce()
-  expect(infra.settle.mock.calls.every(([, result]) => result.kind === 'known')).toBe(true)
-  expect(infra.generic).not.toHaveBeenCalled()
-  expect(infra.worker).not.toHaveBeenCalled()
-  const result = JSON.parse(http.mock.calls[1][1].body).input.find(
-    (x: { type: string }) => x.type === 'function_call_output'
-  )
-  expect(JSON.parse(result.output)).toEqual({
-    status: 'applied',
-    baseRevision: 7,
-    draftRevision: 8,
-  })
-})
+  }
+)
 
 it('refuses a late new proposal after the local lifecycle already completed', async () => {
   const f = fixture()
@@ -709,4 +787,178 @@ it('a publisher cannot replace the reserved handler frame or turn it into an in-
   expect(infra.execute).not.toHaveBeenCalled()
   expect(f.context.toolCalls.has('publisher-foreign')).toBe(false)
   expect(f.context.toolCalls.get('proposal-a')?.status).toBe('skipped')
+})
+
+it.each(['excel_describe_capabilities', 'excel_preview_procedure'])(
+  'P11 presents already analyzed %s without second dispatch or consent',
+  async (name) => {
+    const f = fixture()
+    infra.provider.mockImplementation(async (o) =>
+      nativeRun(o, async () => [
+        { type: 'tool_call_start', id: 'excel-model-id', name },
+        { type: 'tool_call_end', id: 'excel-model-id', name, status: 'success' },
+        { type: 'turn_end', turn: 'final' },
+      ])
+    )
+    await runLocalChat(input(), f.context, f.exec, f.options)
+    expect(infra.generic).not.toHaveBeenCalled()
+    expect(infra.wait).not.toHaveBeenCalled()
+    expect(infra.execute).not.toHaveBeenCalled()
+    expect([...f.context.toolCalls.values()]).toMatchObject([{ name, status: 'success' }])
+    expect(f.context.toolCalls.has('excel-model-id')).toBe(false)
+    expect(JSON.stringify(f.events)).not.toContain('PRIVATE_SESSION')
+  }
+)
+
+it('P11 composes Excel analysis through native budget/provider, lifecycle SSE and handlers', async () => {
+  const native = await vi.importActual<
+    typeof import('@/lib/memlia/ai/budgeted-catalog-provider.server')
+  >('@/lib/memlia/ai/budgeted-catalog-provider.server')
+  const { getStaticProviderModels } = await import('@/providers/models')
+  const { getModelPricing } = await import('@/providers/pricing')
+  const { createSSEStream } = await import('@/lib/mothership/request/lifecycle/start')
+  const def = getStaticProviderModels('openai').find((m) => m.id === 'gpt-5.4')!
+  const profile = {
+    version: 1 as const,
+    basis: 'native_list_price_estimate_v1' as const,
+    provider: 'openai' as const,
+    model: def.id,
+    pricing: getModelPricing(def.id)!,
+    bounds: { contextTokens: def.contextWindow!, outputTokens: 100 },
+    maximumCostUsd: '100',
+  }
+  const {
+    schemaVersion,
+    organizationId,
+    workspaceId,
+    procedureId,
+    version,
+    parentVersion,
+    workflowId,
+    deployedVersionId,
+    ownerUserId,
+    digest,
+    policyVersion,
+    ...draft
+  } = structuredClone(excelFixtures.ExcelProcedure)
+  draft.decimalPolicy.precision = 18
+  const intent = { request: draft }
+  workflowContextMockFns.mockResolveActiveWorkflowApplicationContext.mockResolvedValue({
+    workflowId: 'workflow-a',
+    workflow: { id: 'workflow-a', workspaceId: 'workspace-a' },
+    workspaceId: 'workspace-a',
+    workspaceOrganizationId: null,
+    allowPersonalApiKeys: true,
+    billedAccountUserId: 'not-authority',
+  })
+  workspaceAuthzMockFns.mockResolveEffectiveWorkspacePermission.mockResolvedValue('read')
+  function response(output: unknown[], text?: string) {
+    return new Response(
+      [
+        ...(text ? [{ type: 'response.output_text.delta', delta: text }] : []),
+        {
+          type: 'response.completed',
+          response: {
+            id: 'fixture-response',
+            status: 'completed',
+            output,
+            usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+          },
+        },
+      ]
+        .map((e) => `data: ${JSON.stringify(e)}\n\n`)
+        .join(''),
+      { headers: { 'Content-Type': 'text/event-stream' } }
+    )
+  }
+  const http = vi
+    .fn()
+    .mockResolvedValueOnce(
+      response([
+        {
+          type: 'function_call',
+          id: 'model-call',
+          call_id: 'model-call',
+          name: 'excel_preview_procedure',
+          arguments: JSON.stringify(intent),
+        },
+      ])
+    )
+    .mockResolvedValueOnce(
+      response(
+        [
+          {
+            type: 'message',
+            role: 'assistant',
+            content: [{ type: 'output_text', text: 'Declarations analyzed; no calculation.' }],
+          },
+        ],
+        'Declarations analyzed; no calculation.'
+      )
+    )
+  vi.stubGlobal('fetch', http)
+  infra.attribution.mockResolvedValue({ actorUserId: 'user-a' })
+  infra.provider.mockImplementation(native.runBudgetedCatalogProvider)
+  const f = fixture()
+  const localChat = {
+    ...input(),
+    budget: { windowId: 'budget-a', windowVersion: 1, pricingProfile: profile },
+    limits: { maxDurationMs: 2000 },
+  }
+  const body = await new Response(
+    createSSEStream({
+      requestPayload: { message: 'Fixture', mode: 'agent', workflowId: 'workflow-a' },
+      userId: 'user-a',
+      workspaceId: 'workspace-a',
+      streamId: 'stream-a',
+      executionId: 'exec-a',
+      runId: 'run-a',
+      chatId: 'chat-a',
+      currentChat: null,
+      message: 'Fixture',
+      titleModel: 'gpt-5.4',
+      requestId: 'request-a',
+      orchestrateOptions: {
+        userId: 'user-a',
+        workspaceId: 'workspace-a',
+        workflowId: 'workflow-a',
+        chatId: 'chat-a',
+        goRoute: '/api/mothership',
+        interactive: true,
+        executionContext: f.exec,
+        localChat,
+      },
+    })
+  ).text()
+  const frames = body
+    .split('\n')
+    .filter((l) => l.startsWith('data: '))
+    .map((l) => JSON.parse(l.slice(6)))
+  expect(frames.filter((e) => e.type === 'complete')).toHaveLength(1)
+  expect(frames.find((e) => e.type === 'complete').payload.status, JSON.stringify(frames)).toBe(
+    'complete'
+  )
+  expect(body).toContain('Declarations analyzed; no calculation.')
+  expect(body).not.toMatch(/PRIVATE_KEY|PRIVATE_SESSION|operations|model-call/)
+  expect(http).toHaveBeenCalledTimes(2)
+  expect(infra.reserve).toHaveBeenCalledTimes(2)
+  expect(infra.settle).toHaveBeenCalledTimes(2)
+  expect(infra.reserve.mock.invocationCallOrder[0]).toBeLessThan(http.mock.invocationCallOrder[0])
+  expect(infra.reserve.mock.invocationCallOrder[1]).toBeLessThan(http.mock.invocationCallOrder[1])
+  expect(infra.propose).not.toHaveBeenCalled()
+  expect(infra.execute).not.toHaveBeenCalled()
+  expect(infra.wait).not.toHaveBeenCalled()
+  expect(infra.settle.mock.calls.every(([, result]) => result.kind === 'known')).toBe(true)
+  expect(infra.generic).not.toHaveBeenCalled()
+  expect(infra.worker).not.toHaveBeenCalled()
+  const result = JSON.parse(http.mock.calls[1][1].body).input.find(
+    (x: { type: string }) => x.type === 'function_call_output'
+  )
+  expect(JSON.parse(result.output)).toMatchObject({
+    analysis: 'declarative_draft',
+    executionAvailable: false,
+    persisted: false,
+    dataflow: { declaredDataflowValid: true },
+    capabilities: { primitiveOptionsCompatible: true },
+  })
 })

@@ -665,7 +665,7 @@ const UserInputImpl = forwardRef<UserInputHandle, UserInputProps>(function UserI
       <PromptEditor
         editor={editor}
         aria-label='Message'
-        placeholder='Ask Sim to '
+        placeholder='Ask Memlia to '
         onSubmit={handleEnterSubmit}
         onArrowUpOnEmpty={handleArrowUpOnEmpty}
         className={cn(

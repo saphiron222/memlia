@@ -1236,6 +1236,8 @@ export const GENERATED_SCHEMA_TABLES = {
     'version',
     'name',
     'description',
+    'snapshotDigest',
+    'preparationKind',
     'state',
     'isActive',
     'createdAt',

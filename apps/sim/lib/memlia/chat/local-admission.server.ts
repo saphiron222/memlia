@@ -82,14 +82,11 @@ export async function prepareLocalChatAdmission(
     })
     const { policy } = readChatInstallationPolicyFile()
     const workflow = selectWorkflowReadPolicy(policy, input.workflowId)
-    if (
-      policy.provider !== 'openai' ||
-      !policy.localBackend ||
-      workflow?.policy !== 'sanitized_details'
-    )
-      throw unavailable()
+    if (!policy.localBackend || workflow?.policy !== 'sanitized_details') throw unavailable()
     // Own primitive configuration selections before any asynchronous boundary.
     const model = policy.model
+    const provider = policy.provider
+    const anthropicWorkspaceId = policy.anthropicWorkspaceId
     const windowId = policy.localBackend.budgetWindow.id
     const windowVersion = policy.localBackend.budgetWindow.version
     await assertWorkspaceCapability(principal.userId, input.workspaceId, 'copilot.use')
@@ -110,12 +107,13 @@ export async function prepareLocalChatAdmission(
     if (
       observed.windowId !== windowId ||
       observed.windowVersion !== windowVersion ||
-      profile.model !== model
+      profile.model !== model ||
+      profile.provider !== provider
     )
       throw unavailable()
     // Last sensitive read, after all admission observations; never logged or persisted.
     // The budgeted driver must still COMMIT a reservation before each physical transport.
-    const apiKey = getRotatingApiKey('openai')
+    const apiKey = getRotatingApiKey(provider)
     if (typeof apiKey !== 'string' || apiKey.length === 0) throw unavailable()
     const localChat = captureLocalChatOptions({
       principal,
@@ -123,6 +121,7 @@ export async function prepareLocalChatAdmission(
       workflow: { ...workflow, previewOperations: true },
       request: { model, maxTokens: profile.bounds.outputTokens, messages, apiKey },
       budget: { windowId, windowVersion, pricingProfile: profile },
+      ...(anthropicWorkspaceId === undefined ? {} : { anthropicWorkspaceId }),
     })
     return { intent, localChat }
   } catch {

@@ -1,3 +1,4 @@
+// Modified by Memlia: explicit durable workflow backend; no implicit inline fallback.
 /**
  * Types and constants for the async job queue system
  */
@@ -351,4 +352,4 @@ export interface JobQueueBackend {
   ): Promise<WorkspaceJobCancellationResult>
 }
 
-export type AsyncBackendType = 'trigger-dev' | 'database'
+export type AsyncBackendType = 'trigger-dev' | 'database' | 'pg-boss'

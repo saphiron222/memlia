@@ -18,6 +18,7 @@ jobs:
     timeout-minutes: 120
     env:
       MEMLIA_PUBLIC_RUN: '1'
+      MEMLIA_CI_CHAT_UI: '1'
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -32,6 +33,12 @@ jobs:
           python3 scripts/ci/test-linux-build-metrics.py -v
           python3 scripts/ci/test-linux-swap-host.py -v
           python3 scripts/ci/test-linux-standalone-smoke.py -v
+          python3 scripts/ci/test-linux-chat-ci.py -v
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24.22.0'
+      - name: Vérifier les frontières navigateur sans serveur
+        run: node --test scripts/ci/linux-chat-browser.test.ts
       - name: Construire avec Turbopack et swap disque possédé
         shell: bash
         run: bash scripts/ci/run-linux-build.sh --swap turbopack
@@ -66,16 +73,25 @@ jobs:
                                'timeout','server_exited','http_refused','health_refused','login_refused',
                                'assets_missing','asset_refused','private_log_limit','interrupted',
                                'smoke_unavailable','cleanup_failed'}
-                      if not isinstance(value,dict) or set(value) not in (small,full): raise ValueError()
+                      diagnostics={'requestStage','httpStatus'}
+                      if not isinstance(value,dict) or set(value) not in (small,full,small|diagnostics,full|diagnostics): raise ValueError()
                       if value['status'] not in ('passed','failed') or type(value['cleanup']) is not bool: raise ValueError()
                       if value['reason'] is not None and (type(value['reason']) is not str or value['reason'] not in reasons): raise ValueError()
-                      if set(value)==full:
+                      if diagnostics <= set(value):
+                          stage,status=value['requestStage'],value['httpStatus']
+                          if stage not in (None,'health','login','asset_1','asset_2'): raise ValueError()
+                          if status is not None and (type(status) is not int or not 100<=status<=599): raise ValueError()
+                          if stage is None and status is not None: raise ValueError()
+                          if not full <= set(value) and (stage is not None or status is not None): raise ValueError()
+                          if value['reason']=='http_refused' and stage is None: raise ValueError()
+                      if full <= set(value):
                           if any(type(value[k]) is not bool for k in ('health','loginHtml','forcedStop','databaseQualified','authenticationQualified')): raise ValueError()
                           if value['databaseQualified'] or value['authenticationQualified']: raise ValueError()
                           if type(value['assets']) is not int or value['assets'] not in (0,2): raise ValueError()
                           if type(value['seconds']) not in (int,float) or not math.isfinite(value['seconds']) or not 0<=value['seconds']<=2**53-1: raise ValueError()
                       if value['status']=='passed':
-                          if set(value)!=full or value['reason'] is not None or not value['cleanup'] or not value['health'] or not value['loginHtml'] or value['assets']!=2: raise ValueError()
+                          if not full <= set(value) or value['reason'] is not None or not value['cleanup'] or not value['health'] or not value['loginHtml'] or value['assets']!=2: raise ValueError()
+                          if diagnostics <= set(value) and (stage!='asset_2' or status!=200): raise ValueError()
                       elif value['reason'] is None: raise ValueError()
                   except Exception:
                       raise SystemExit('Invalid standalone HTTP receipt') from None
@@ -85,5 +101,38 @@ jobs:
                   with path.open('rb') as stream: data=stream.read(131073)
                   if len(data)>131072: raise SystemExit('Receipt exceeds publication bound')
                   print(json.dumps(json.loads(data),sort_keys=True))
+          PY
+      - name: Lire uniquement les reçus UI fermés
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json,os,stat
+          from pathlib import Path
+          root=Path(os.environ['RUNNER_TEMP'])/'memlia-metrics'
+          names=['chat-ui']
+          for phase in ('bootstrap','migrate','grants','metadata','baseline','seed','stage','cleanup','readback'):
+              names.extend(['ui-'+phase,'ui-'+phase+'-container'])
+          for name in names:
+              path=root/(name+'.json')
+              if not path.exists() and not path.is_symlink(): continue
+              try:
+                  if root.is_symlink() or path.is_symlink(): raise ValueError()
+                  fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+                  bound=4096 if name=='chat-ui' else 131072
+                  with os.fdopen(fd,'rb') as f:
+                      if not stat.S_ISREG(os.fstat(f.fileno()).st_mode): raise ValueError()
+                      data=f.read(bound+1)
+                  if len(data)>bound: raise ValueError()
+                  receipt=json.loads(data)
+                  if name=='chat-ui':
+                      flags={'authenticated','socket','workflow','canvas','chatRefused','browserClosed'}
+                      if type(receipt)is not dict or set(receipt)!=flags|{'status','reason'}: raise ValueError()
+                      if any(type(receipt[k])is not bool for k in flags): raise ValueError()
+                      if receipt['status'] not in ('passed','failed') or receipt['reason'] not in (None,'cleanup_failed','journey_failed'): raise ValueError()
+                      if (receipt['status']=='passed') != (receipt['reason'] is None and all(receipt[k] for k in flags)): raise ValueError()
+              except Exception:
+                  raise SystemExit('Invalid UI receipt') from None
+              print(json.dumps({'phase':name,**receipt},sort_keys=True))
           PY
       # No artifacts: raw logs, .next, maps, heap dumps and dependencies stay on the ephemeral VM.

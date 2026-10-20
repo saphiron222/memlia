@@ -11,6 +11,7 @@ import {
   anthropicThinkingTextToolExpectedThinking,
   anthropicThinkingTextToolStreamEvents,
 } from '@/providers/__fixtures__/anthropic'
+import { executeAnthropicProviderRequest } from '@/providers/anthropic/core'
 import { createAnthropicStreamingToolLoopStream } from '@/providers/anthropic/streaming-tool-loop'
 import type { AnthropicUsageLike } from '@/providers/anthropic/usage'
 import { runWithProviderRuntimeContext } from '@/providers/runtime-context'
@@ -698,5 +699,303 @@ describe('createAnthropicStreamingToolLoopStream', () => {
       status: 'error',
     })
     expect(mockExecuteTool).not.toHaveBeenCalled()
+  })
+
+  it('observes each controlled Anthropic turn before its terminal event', async () => {
+    const references: unknown[] = []
+    const observed: unknown[] = []
+    const usage = {
+      input_tokens: 10,
+      output_tokens: 20,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+      cache_creation: null,
+      service_tier: 'standard',
+    }
+    const final = makeFinalMessage({
+      content: [{ type: 'text', text: 'Done' }],
+      usage,
+      stop_reason: 'end_turn',
+    })
+    const messageStream = makeMessageStream([{ type: 'message_stop' }], final)
+    const sdk = { messages: { stream: vi.fn((_payload: unknown) => messageStream) } }
+    const events = await runWithProviderRuntimeContext(
+      {
+        controlledRun: {
+          signal: new AbortController().signal,
+          beforeModelCall() {},
+          async beforeModelTransport(_signal, attempt) {
+            references.push(attempt)
+          },
+          async observeModelAttempt(attempt, observation) {
+            expect(attempt).toBe(references[0])
+            observed.push(observation)
+          },
+          async executeTool() {
+            throw new Error('No fixture tool expected')
+          },
+        },
+      },
+      async () =>
+        collectStream(
+          createAnthropicStreamingToolLoopStream({
+            anthropic: sdk as never,
+            payload: { model: 'claude-haiku-4-5', max_tokens: 100, messages: [] },
+            request: { model: 'claude-haiku-4-5', maxTokens: 100 },
+            messages: [],
+            providerId: 'anthropic',
+            logger,
+            timeSegments: [],
+            onComplete: vi.fn(),
+          })
+        )
+    )
+    expect(observed).toEqual([
+      {
+        kind: 'usage',
+        usage: {
+          input: 10,
+          output: 20,
+          cacheRead: 0,
+          cacheWrites: [
+            { tokens: 0, inputRateMultiplier: 1.25 },
+            { tokens: 0, inputRateMultiplier: 2 },
+          ],
+        },
+        cost: { kind: 'list_price_estimate', usd: 0.00011 },
+      },
+    ])
+    expect(references).toHaveLength(1)
+    expect(references[0]).toBeDefined()
+    expect(events).toContainEqual({ type: 'turn_end', turn: 'final' })
+    expect(sdk.messages.stream.mock.calls[0]?.[0]).toMatchObject({ service_tier: 'standard_only' })
+  })
+
+  function observedFixture(mode: 'known' | 'missing_usage' | 'no_stop' | 'reject' | 'transport') {
+    const completion = vi.fn()
+    const abort = new AbortController()
+    const captured: AgentStreamEvent[] = []
+    const references: unknown[] = []
+    const observations: unknown[] = []
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const usage = {
+      input_tokens: 10,
+      output_tokens: 20,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+      cache_creation: null,
+      service_tier: 'standard',
+    }
+    const tool = makeFinalMessage({
+      content: [{ type: 'tool_use', id: 'tool_observed', name: 'get_weather', input: {} }],
+      usage,
+      stop_reason: 'tool_use',
+    })
+    if (mode === 'missing_usage') Reflect.deleteProperty(tool.usage, 'output_tokens')
+    const terminal = makeFinalMessage({
+      content: [{ type: 'text', text: 'Done' }],
+      usage,
+      stop_reason: 'end_turn',
+    })
+    const stream = vi.fn(
+      (_payload: unknown, _options?: { maxRetries?: number; signal: AbortSignal }) => {
+        if (mode === 'transport') throw new Error('PRIVATE_TRANSPORT_CANARY')
+        const first = stream.mock.calls.length === 1
+        const events = first
+          ? [
+              {
+                type: 'content_block_start',
+                content_block: { type: 'tool_use', id: 'tool_observed', name: 'get_weather' },
+              },
+              ...(mode === 'no_stop' ? [] : [{ type: 'message_stop' }]),
+            ]
+          : [{ type: 'message_stop' }]
+        return { ...makeMessageStream(events, first ? tool : terminal), abort: vi.fn() }
+      }
+    )
+    const execute = vi.fn(async () => ({
+      rawResponse: { success: true, output: { fixture: true } },
+      modelResponse: { success: true, output: { fixture: true } },
+    }))
+    const result = runWithProviderRuntimeContext(
+      {
+        controlledRun: {
+          signal: abort.signal,
+          beforeModelCall() {},
+          async beforeModelTransport(_signal, attempt) {
+            references.push(attempt)
+          },
+          async observeModelAttempt(_attempt, observation) {
+            observations.push(observation)
+            if (observations.length === 1) await gate
+            if (mode === 'reject')
+              throw Object.assign(new Error('PRIVATE_LEDGER_CANARY'), { cause: 'PRIVATE_CAUSE' })
+          },
+          executeTool: execute,
+        },
+      },
+      () =>
+        createAnthropicStreamingToolLoopStream({
+          anthropic: { messages: { stream } } as never,
+          payload: { model: 'claude-haiku-4-5', max_tokens: 100, messages: [] },
+          request: {
+            model: 'claude-haiku-4-5',
+            abortSignal: abort.signal,
+            tools: [
+              {
+                id: 'get_weather',
+                description: 'Fixture only',
+                params: {},
+                parameters: { type: 'object', properties: {}, required: [] },
+              },
+            ],
+          },
+          messages: [],
+          providerId: 'anthropic',
+          logger,
+          timeSegments: [],
+          onComplete: completion,
+        })
+    )
+    const drain = (async () => {
+      const reader = result.getReader()
+      try {
+        while (true) {
+          const next = await reader.read()
+          if (next.done) break
+          captured.push(next.value)
+        }
+      } finally {
+        reader.releaseLock()
+      }
+    })()
+    void drain.catch(() => {})
+    return {
+      completion,
+      abort,
+      captured,
+      references,
+      observations,
+      execute,
+      stream,
+      release: () => release(),
+      drain,
+    }
+  }
+
+  it('awaits settlement before tools and terminal events on every native turn', async () => {
+    const run = observedFixture('known')
+    await vi.waitFor(() => expect(run.observations).toHaveLength(1))
+    expect(run.execute).not.toHaveBeenCalled()
+    expect(run.captured.some((e) => e.type === 'turn_end')).toBe(false)
+    run.release()
+    await run.drain
+    expect(run.observations).toHaveLength(2)
+    expect(run.references).toHaveLength(2)
+    expect(run.references[0]).not.toBe(run.references[1])
+    expect(run.execute).toHaveBeenCalledOnce()
+    expect(run.stream.mock.calls.every((call) => call[1]?.maxRetries === 0)).toBe(true)
+  })
+  it.each(['missing_usage', 'no_stop', 'transport'] as const)(
+    'records unknown %s and refuses tools and terminal output',
+    async (mode) => {
+      const run = observedFixture(mode)
+      await vi.waitFor(() => expect(run.observations).toHaveLength(1))
+      expect(run.observations[0]).toMatchObject({ kind: 'unknown' })
+      run.release()
+      await expect(run.drain).rejects.toThrow('Controlled Anthropic streaming failed.')
+      expect(run.execute).not.toHaveBeenCalled()
+      expect(run.captured.some((e) => e.type === 'turn_end')).toBe(false)
+      expect(run.stream).toHaveBeenCalledOnce()
+    }
+  )
+  it('never retries or exposes a settlement failure and stops before tools', async () => {
+    const run = observedFixture('reject')
+    await vi.waitFor(() => expect(run.observations).toHaveLength(1))
+    run.release()
+    await expect(run.drain).rejects.toThrow('Controlled Anthropic streaming failed.')
+    expect(run.execute).not.toHaveBeenCalled()
+    expect(run.stream).toHaveBeenCalledOnce()
+    expect(run.observations).toHaveLength(1)
+    expect(JSON.stringify(logger.error.mock.calls)).not.toMatch(/PRIVATE_(LEDGER|CAUSE|TRANSPORT)/)
+  })
+  it('settles complete usage after abort without executing a tool or final boundary', async () => {
+    const run = observedFixture('known')
+    await vi.waitFor(() => expect(run.observations).toHaveLength(1))
+    run.abort.abort()
+    run.release()
+    await run.drain
+    expect(run.observations[0]).toMatchObject({ kind: 'usage' })
+    expect(run.observations).toHaveLength(1)
+    expect(run.execute).not.toHaveBeenCalled()
+    expect(run.captured.some((e) => e.type === 'turn_end')).toBe(false)
+    expect(run.stream).toHaveBeenCalledOnce()
+    expect(run.completion.mock.calls[0][0]).toMatchObject({
+      tokens: { input: 10, output: 20 },
+      cost: { total: 0.00011 },
+    })
+  })
+  it('does not leak a controlled tool exception into subsequent model history', async () => {
+    const run = observedFixture('known')
+    run.execute.mockRejectedValue(new Error('PRIVATE_TOOL_CANARY'))
+    run.release()
+    await run.drain
+    expect(run.execute).toHaveBeenCalledOnce()
+    expect(run.stream).toHaveBeenCalledTimes(2)
+    expect(JSON.stringify(run.stream.mock.calls)).not.toContain('PRIVATE_TOOL_CANARY')
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain('PRIVATE_TOOL_CANARY')
+  })
+})
+
+describe('controlled observed architecture refuses before SDK construction', () => {
+  it.each([
+    { providerId: 'anthropic', stream: false, tools: [{ id: 'get_weather' }] },
+    { providerId: 'anthropic', stream: true, tools: [] },
+    { providerId: 'azure-anthropic', stream: true, tools: [{ id: 'get_weather' }] },
+  ])('refuses unsupported observed path $providerId/$stream', async (shape) => {
+    const createClient = vi.fn()
+    const observe = vi.fn()
+    const guard = vi.fn()
+    await expect(
+      runWithProviderRuntimeContext(
+        {
+          controlledRun: {
+            signal: new AbortController().signal,
+            beforeModelCall() {},
+            beforeModelTransport: guard,
+            observeModelAttempt: observe,
+            async executeTool() {
+              throw new Error('No tool expected')
+            },
+          },
+        },
+        () =>
+          executeAnthropicProviderRequest(
+            {
+              model: 'claude-haiku-4-5',
+              apiKey: 'FICTITIOUS_KEY',
+              stream: shape.stream,
+              tools: shape.tools.map((tool) => ({
+                ...tool,
+                description: 'Fixture only',
+                params: {},
+                parameters: { type: 'object' as const, properties: {}, required: [] },
+              })),
+            },
+            {
+              providerId: shape.providerId,
+              providerLabel: 'Fixture only',
+              createClient,
+              logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } as never,
+            }
+          )
+      )
+    ).rejects.toThrow('Model observation requires the Anthropic streaming tool loop.')
+    expect(createClient).not.toHaveBeenCalled()
+    expect(guard).not.toHaveBeenCalled()
+    expect(observe).not.toHaveBeenCalled()
   })
 })

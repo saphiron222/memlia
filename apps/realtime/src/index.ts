@@ -1,3 +1,5 @@
+// Modified by Memlia in 2026: honor the validated operator-selected realtime bind address.
+// Upstream Apache-2.0 license and notices retained.
 import { createServer } from 'http'
 import { createLogger } from '@sim/logger'
 import type { Server as SocketIOServer } from 'socket.io'
@@ -109,7 +111,7 @@ async function main() {
 
   await assertSchemaCompatibility()
 
-  httpServer.listen(PORT, '0.0.0.0', () => {
+  httpServer.listen(PORT, env.REALTIME_HOST, () => {
     logger.info(`Socket.IO server running on port ${PORT}`)
     logger.info(`Health check available at: http://localhost:${PORT}/health`)
   })

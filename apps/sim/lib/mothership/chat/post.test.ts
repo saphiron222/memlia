@@ -379,7 +379,7 @@ describe('handleUnifiedChatPost', () => {
         apiKey: 'FICTITIOUS_HTTP_KEY',
         messages: [{ role: 'assistant', content: 'FICTITIOUS_HISTORY' }],
       },
-      budget: { windowId: 'private-window' },
+      budget: { windowId: 'private-window', pricingProfile: { provider: 'openai' } },
     }
     const send = (body: unknown = input(), headers: Record<string, string> = {}) =>
       handleUnifiedChatPost(
@@ -430,6 +430,63 @@ describe('handleUnifiedChatPost', () => {
     })
     afterEach(() => vi.unstubAllEnvs())
 
+    it('admits the Anthropic HTTP selection with its ephemeral server workspace', async () => {
+      const observed = {
+        version: 1,
+        backend: 'local',
+        provider: 'anthropic',
+        model: 'claude-haiku-4-5',
+        workspaceId: ids.workspace,
+        workflowId: 'wf-1',
+        requestSupported: true,
+      }
+      readLocalChatCapabilities.mockResolvedValue(observed)
+      const original = prepareLocalChatAdmission.getMockImplementation()!
+      prepareLocalChatAdmission.mockImplementation(async (value) => {
+        const prepared = await original(value)
+        return {
+          ...prepared,
+          localChat: {
+            ...prepared.localChat,
+            anthropicWorkspaceId: 'wrkspc_fixture123',
+            request: { ...prepared.localChat.request, model: 'claude-haiku-4-5' },
+            budget: { ...prepared.localChat.budget, pricingProfile: { provider: 'anthropic' } },
+          },
+        }
+      })
+      resolveOrCreateChat.mockImplementation(async () => {
+        observed.provider = 'openai'
+        return { chatId: ids.chat, chat: { id: ids.chat }, isNew: false }
+      })
+      const response = await send()
+      expect(response.status).toBe(200)
+      expect(resolveOrCreateChat).toHaveBeenCalledWith(
+        expect.objectContaining({ model: 'claude-haiku-4-5' })
+      )
+      expect(createSSEStream.mock.calls[0][0].orchestrateOptions.localChat).toMatchObject({
+        anthropicWorkspaceId: 'wrkspc_fixture123',
+        request: { model: 'claude-haiku-4-5' },
+      })
+      expect(JSON.stringify(admitTurn.mock.calls)).not.toMatch(/wrkspc_|FICTITIOUS_HTTP_KEY/)
+      expect(buildCopilotRequestPayload).not.toHaveBeenCalled()
+    })
+    it('refuses provider drift after asynchronous preparation even when the model is unchanged', async () => {
+      const original = prepareLocalChatAdmission.getMockImplementation()!
+      prepareLocalChatAdmission.mockImplementation(async (value) => {
+        const prepared = await original(value)
+        return {
+          ...prepared,
+          localChat: {
+            ...prepared.localChat,
+            budget: { ...prepared.localChat.budget, pricingProfile: { provider: 'anthropic' } },
+          },
+        }
+      })
+      expect((await send()).status).toBe(503)
+      expect(prepareLocalChatAdmission).toHaveBeenCalledOnce()
+      expect(admitTurn).not.toHaveBeenCalled()
+      expect(createSSEStream).not.toHaveBeenCalled()
+    })
     it('creates local chat metadata with the observed administrator model', async () => {
       const response = await send({ ...input(), chatId: undefined, createNewChat: true })
       expect(response.status).toBe(200)
@@ -487,7 +544,7 @@ describe('handleUnifiedChatPost', () => {
 
     it.each([
       { backend: 'legacy' },
-      { provider: 'anthropic' },
+      { provider: 'azure-anthropic' },
       { workspaceId: 'foreign-workspace' },
       { workflowId: 'foreign-workflow' },
       { requestSupported: false },

@@ -1,0 +1,2 @@
+ALTER TABLE "workflow_deployment_version" ADD COLUMN "snapshot_digest" text;--> statement-breakpoint
+ALTER TABLE "workflow_deployment_version" ADD CONSTRAINT "workflow_deployment_version_snapshot_digest_check" CHECK ("workflow_deployment_version"."snapshot_digest" IS NULL OR (char_length("workflow_deployment_version"."snapshot_digest") = 71 AND "workflow_deployment_version"."snapshot_digest" ~ '^sha256:[a-f0-9]{64}$'));

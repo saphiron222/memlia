@@ -1,7 +1,8 @@
+// Modified by Memlia: use the fixed product identity in native Chat labels.
 import { useEffect, useRef, useState } from 'react'
 
 const BUILD_PLACEHOLDER = {
-  prefix: 'Ask Sim to ',
+  prefix: 'Ask Memlia to ',
   suffixes: [
     'respond to my emails...',
     'find and track leads...',

@@ -1,3 +1,4 @@
+// Modified by Memlia: fail closed for explicit durable workflow selection.
 /**
  * Binds the pure capability definitions to the application's validated server environment.
  *
@@ -5,7 +6,7 @@
  */
 
 import {
-  ASYNC_JOBS_CAPABILITY,
+  getConfiguredAsyncJobsProviderId,
   CACHE_CAPABILITY,
   type ConfiguredOAuthClient,
   type FallbackCapabilityDefinition,
@@ -39,7 +40,7 @@ export function getSelectedSandboxProviderId() {
 }
 
 export function getConfiguredAsyncJobsProvider() {
-  return requireCapability(ASYNC_JOBS_CAPABILITY, env).providerId
+  return getConfiguredAsyncJobsProviderId(env)
 }
 
 export function getConfiguredCacheProvider() {

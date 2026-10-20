@@ -302,14 +302,19 @@ it.each([
     new Error('Chat installation policy is unavailable.')
   )
 })
-it('does not select the unsupported Anthropic physical cost path as a local backend', () => {
-  expect(() =>
-    parseChatInstallationPolicy({
-      ...localConfiguration(),
-      provider: 'anthropic',
-      model: models.anthropic,
-    })
-  ).toThrowError(new Error('Chat installation policy is unavailable.'))
+it('selects the strict Anthropic local backend and its server-only API workspace', () => {
+  const decision = parseChatInstallationPolicy({
+    ...localConfiguration(),
+    provider: 'anthropic',
+    model: 'claude-haiku-4-5',
+    anthropicWorkspaceId: 'wrkspc_Fictitious1234',
+  })
+  expect(decision).toMatchObject({
+    provider: 'anthropic',
+    model: 'claude-haiku-4-5',
+    activation: 'blocked',
+    anthropicWorkspaceId: 'wrkspc_Fictitious1234',
+  })
 })
 it('refuses nested backend accessors and hidden authority without evaluating them', () => {
   let reads = 0
@@ -338,4 +343,33 @@ it('refuses nested backend accessors and hidden authority without evaluating the
     )
   }
   expect(reads).toBe(0)
+})
+
+it.each([
+  '',
+  'workspace',
+  'wrkspc_short',
+  'wrkspc_Fictitious1234\r\nx-test: value',
+  null,
+  undefined,
+])(
+  'refuses malformed server API workspace without changing provider selection (%#)',
+  (anthropicWorkspaceId) => {
+    expect(() =>
+      parseChatInstallationPolicy({
+        ...localConfiguration(),
+        provider: 'anthropic',
+        model: 'claude-haiku-4-5',
+        anthropicWorkspaceId,
+      })
+    ).toThrow('Chat installation policy is unavailable.')
+  }
+)
+it('refuses Anthropic workspace on OpenAI before any credentials or transport', () => {
+  expect(() =>
+    parseChatInstallationPolicy({
+      ...localConfiguration(),
+      anthropicWorkspaceId: 'wrkspc_Fictitious1234',
+    })
+  ).toThrow('Chat installation policy is unavailable.')
 })

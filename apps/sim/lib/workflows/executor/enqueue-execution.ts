@@ -1,8 +1,10 @@
-// Modified by Memlia: share native workflow payload preparation without changing enqueue decisions.
+// Modified by Memlia: preserve native payload/legacy dispatch; durable mode accepts only server-minted admission.
+import { randomUUID } from 'node:crypto'
 import { createLogger } from '@sim/logger'
 import { toError } from '@sim/utils/errors'
 import { releaseExecutionSlot } from '@/lib/billing/calculations/usage-reservation'
 import { getJobQueue, shouldExecuteInline } from '@/lib/core/async-jobs'
+import { preparePgBossWorkflowAdmission } from '@/lib/core/async-jobs/backends/pg-boss-workflow-admission'
 import { isAsyncJobEnqueueError } from '@/lib/core/async-jobs/types'
 import { toTriggerMaxDurationSeconds } from '@/lib/core/execution-limits'
 import { WORKFLOW_EXECUTION_JOB_ID_PREFIX } from '@/lib/workflows/executor/execution-job-ids'
@@ -50,6 +52,36 @@ export type EnqueueWorkflowExecutionResult =
 export async function enqueueWorkflowExecution(
   params: EnqueueWorkflowExecutionParams
 ): Promise<EnqueueWorkflowExecutionResult> {
+  // Capture the complete authenticated server input before queue initialization can await.
+  // Presence (including malformed configuration) cannot enter the legacy path.
+  if (process.env.MEMLIA_DURABLE_WORKFLOWS_ENABLED !== undefined) {
+    const executionId = params.executionId
+    let queue: Awaited<ReturnType<typeof getJobQueue>>
+    let admission: ReturnType<typeof preparePgBossWorkflowAdmission>
+    try {
+      admission = preparePgBossWorkflowAdmission(params, {
+        commandId: randomUUID(),
+        submittedAt: new Date().toISOString(),
+        admissionCompleted: true,
+      })
+      queue = await getJobQueue()
+    } catch {
+      await releaseExecutionSlot(executionId)
+      return { outcome: 'rejected', executionId, retainExecutionClaim: false }
+    }
+    try {
+      const jobId = await queue.enqueue('workflow-execution', admission)
+      return { outcome: 'queued', jobId, executionId, retainExecutionClaim: true }
+    } catch (error) {
+      // The native admission handle retains uncertainty across concurrent/previous attempts.
+      // Never retry an unknown commit with a new identity or release its native slot.
+      if (isAsyncJobEnqueueError(error) && error.acceptance === 'rejected') {
+        await releaseExecutionSlot(executionId)
+        return { outcome: 'rejected', executionId, retainExecutionClaim: false }
+      }
+      return { outcome: 'ambiguous', executionId, retainExecutionClaim: true }
+    }
+  }
   const { requestId, workflowId, userId, workspaceId, executionId, executionTimeoutMs } = params
   const asyncLogger = logger.withMetadata({
     requestId,

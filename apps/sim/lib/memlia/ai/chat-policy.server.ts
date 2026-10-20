@@ -25,6 +25,10 @@ const configuration = z
     provider: z.enum(['openai', 'anthropic']),
     model: z.string().min(1).max(256),
     destination: z.literal('official'),
+    anthropicWorkspaceId: z
+      .string()
+      .regex(/^wrkspc_[A-Za-z0-9]{8,100}$/)
+      .optional(),
     localBackend: localBackend.optional(),
     data: z
       .object({
@@ -47,7 +51,9 @@ export function parseChatInstallationPolicy(raw: unknown) {
     const parsed = configuration.safeParse(raw)
     if (
       !parsed.success ||
-      (parsed.data.localBackend !== undefined && parsed.data.provider !== 'openai') ||
+      (Object.hasOwn(parsed.data, 'anthropicWorkspaceId') &&
+        (parsed.data.provider !== 'anthropic' ||
+          typeof parsed.data.anthropicWorkspaceId !== 'string')) ||
       !getProviderModels(parsed.data.provider).includes(parsed.data.model) ||
       getModelSunsetStatus(parsed.data.model) === 'deprecated'
     )

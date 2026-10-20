@@ -335,3 +335,94 @@ it.each(['disabled', 'absent'])(
     expect(infra.key).not.toHaveBeenCalled()
   }
 )
+
+it('admits Anthropic only after native permissions and captures the server API workspace', async () => {
+  const anthropic = {
+    ...configuration(),
+    provider: 'anthropic',
+    model: 'claude-haiku-4-5',
+    anthropicWorkspaceId: 'wrkspc_Fictitious1234',
+  }
+  infra.policy.mockImplementation(() => ({ policy: parseChatInstallationPolicy(anthropic) }))
+  infra.window.mockImplementation(async () => ({
+    windowId: 'window_1',
+    windowVersion: 7,
+    pricingProfile: {
+      ...profile(),
+      provider: 'anthropic',
+      model: 'claude-haiku-4-5',
+      pricing: getModelPricing('claude-haiku-4-5')!,
+      bounds: { contextTokens: 200000, outputTokens: 100 },
+    },
+  }))
+  const result = await prepareLocalChatAdmission(fixture())
+  expect(infra.key).toHaveBeenCalledExactlyOnceWith('anthropic')
+  expect(result.localChat).toMatchObject({
+    anthropicWorkspaceId: 'wrkspc_Fictitious1234',
+    request: { model: 'claude-haiku-4-5' },
+    budget: { pricingProfile: { provider: 'anthropic' } },
+  })
+  expect(result.localChat.request).not.toHaveProperty('anthropicWorkspaceId')
+  expect(JSON.stringify(result.intent)).not.toContain('wrkspc_')
+})
+
+it('owns the policy primitives across native authorization before resolving a key', async () => {
+  const config = {
+    ...configuration(),
+    provider: 'anthropic',
+    model: 'claude-haiku-4-5',
+    anthropicWorkspaceId: 'wrkspc_fixture123',
+  }
+  const policy = { ...parseChatInstallationPolicy(config) }
+  infra.policy.mockReturnValue({ kind: 'installation_file_observation', policy })
+  let release!: () => void
+  infra.capability.mockImplementation(
+    () =>
+      new Promise<void>((resolve) => {
+        release = resolve
+      })
+  )
+  infra.window.mockResolvedValue({
+    windowId: 'window_1',
+    windowVersion: 7,
+    pricingProfile: {
+      ...profile(),
+      provider: 'anthropic',
+      model: 'claude-haiku-4-5',
+      pricing: getModelPricing('claude-haiku-4-5')!,
+      bounds: { contextTokens: 200000, outputTokens: 100 },
+    },
+  })
+  const pending = prepareLocalChatAdmission(fixture())
+  // Untrusted mutation of the source object cannot alter the already selected server primitives.
+  Object.assign(policy, {
+    provider: 'openai',
+    model: 'gpt-5.4',
+    anthropicWorkspaceId: 'wrkspc_mutated123',
+  })
+  release()
+  const result = await pending
+  expect(result.localChat).toMatchObject({
+    anthropicWorkspaceId: 'wrkspc_fixture123',
+    request: { model: 'claude-haiku-4-5' },
+  })
+  expect(infra.key).toHaveBeenCalledExactlyOnceWith('anthropic')
+})
+
+it.each(['capability', 'model'] as const)(
+  'preserves native Anthropic %s refusals before key lookup',
+  async (port) => {
+    infra.policy.mockReturnValue({
+      kind: 'installation_file_observation',
+      policy: parseChatInstallationPolicy({
+        ...configuration(),
+        provider: 'anthropic',
+        model: 'claude-haiku-4-5',
+      }),
+    })
+    infra[port].mockRejectedValue(new Error('PRIVATE_PERMISSION_CANARY'))
+    await expect(prepareLocalChatAdmission(fixture())).rejects.toThrow(unavailable)
+    expect(infra.key).not.toHaveBeenCalled()
+    expect(infra.window).not.toHaveBeenCalled()
+  }
+)

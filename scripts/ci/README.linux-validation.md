@@ -253,3 +253,64 @@ socket enfant et est explicitement ignoré sur Mac. Ces tests ne remplacent pas
 une exécution du standalone Next réel dans la future CI. Aucun build Linux avec
 ce nouveau smoke, aucune recette navigateur, Windows ou release n'est revendiqué
 par l'ajout du code.
+
+## Recette navigateur du standalone, sans fournisseur
+
+Le job de build Linux sélectionne explicitement `MEMLIA_CI_CHAT_UI=1`, uniquement
+avec `--swap turbopack`. Il réemploie le standalone de cette même compilation,
+après le smoke health/login/deux assets existant. Aucun second build n'est lancé.
+Les modes sans sélection UI et `--validation-only` conservent leur parcours ;
+la sélection UI avec un mode incompatible est refusée.
+
+La recette installe le Chromium attendu par `@playwright/test` déjà verrouillé,
+avec le Node24.22.0 du runner, puis crée une base et trois rôles synthétiques dans
+le PostgreSQL possédé par le job. Le rôle de migration seul migre le journal0440 ;
+les rôles web/realtime n'ont ni DDL, ni superuser, ni création de rôle/base.
+Un utilisateur fictif est créé par la fixture avec le hachage Better Auth natif.
+Le navigateur remplit le vrai formulaire, sans cookie ni session injectés.
+Il doit observer une vraie session, le token natif et une connexion Socket.IO
+encore ouverte, la création native d'un workflow, puis son graphe sauvegardé et
+ses nœuds DOM visibles sans spinner. Enfin, le panneau doit afficher le refus
+Chat et l'API capabilities doit répondre `unavailable` avec `no-store`.
+
+La policy root-owned est délibérément `{}` et donc invalide. Aucune clé ni aucun
+appel fournisseur n'est configuré. Cette preuve ne qualifie ni conversation IA,
+ni qualité d'une proposition, ni confirmation d'une modification par modèle.
+Elle ne qualifie pas non plus le déploiement Compose ou Windows.
+Les seules deux origines du contexte navigateur sont `localhost:3000` et
+`localhost:3002` (ainsi que leur transport WebSocket). Web/realtime/Valkey sont
+sur un réseau Docker interne, ports web/realtime publiés sur127.0.0.1 seulement.
+Ce contrôle du contexte Playwright ne prétend pas être une sandbox OS du navigateur.
+
+Après le build, web est limité à5Gio, realtime256Mio et Valkey128Mio, sans swap
+supplémentaire, avec CPU/PID bornés, filesystem racine RO et capabilities retirées.
+Les options effectives et identités/labels possédés sont inspectés. Les mesures
+cgroup des phases restent celles du contrôleur existant ; l'inspection des options
+n'est pas une mesure de pic des services. Le plafond UI est1200s, readiness180s et
+navigateur900s au maximum, avec150s réservées aux arrêts et au nettoyage. Ces
+plafonds n'étendent jamais le superviseur global6900s ni le job120min existants.
+
+Les services sont arrêtés avant la suppression native du compte et des seuls
+résidus attribués à la fixture. Les183 inventaires doivent retrouver exactement
+leur baseline avant commit et en readback. Une erreur HTTP, un service mort/OOM,
+un signal, un dépassement ou un nettoyage incomplet interdit le succès global.
+La base/les rôles temporaires disparaissent avec le PostgreSQL possédé du job.
+Les logs, DSN, mots de passe, cookies, captures et traces réseau restent privés
+sur le runner éphémère, sans upload. Seul le reçu JSON fermé `chat-ui.json`
+(borne4Kio, champs exacts, pas de symlink) et les métriques fermées sont publiés.
+
+Les tests locaux de préparation couvrent les frontières et le shell avec des
+doubles explicités, sans lancer Docker, PostgreSQL, Chromium ou Next. La vraie
+recette Linux navigateur reste NON TESTÉE jusqu'à une exécution Actions relue.
+Le runner standard gratuit n'offre pas une garantie de disque40Gio : la réserve
+existante du swap et les contrôles disque restent bloquants, sans suppression
+globale de SDK. La revue et les gates de publication précèdent tout lancement.
+
+La CLI Playwright est résolue depuis `apps/sim/package.json` par le résolveur Node
+natif, avec version `1.61.1` contrôlée avant téléchargement ; aucune disposition
+particulière de `node_modules` n'est supposée. Le cache reste disponible pour le
+nettoyage natif de la fixture, puis son identité, son état vivant et l'absence
+d'OOM sont contrôlés avant son arrêt attendu. Un échec reste bloquant même si le
+nettoyage est rappelé. L'observation du canvas vérifie aussi la visibilité et
+l'opacité des nœuds et de leurs ancêtres ; les tests locaux de cette logique
+restent des doubles DOM, pas une qualification Chromium/Linux.

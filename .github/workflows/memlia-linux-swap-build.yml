@@ -71,16 +71,25 @@ jobs:
                                'timeout','server_exited','http_refused','health_refused','login_refused',
                                'assets_missing','asset_refused','private_log_limit','interrupted',
                                'smoke_unavailable','cleanup_failed'}
-                      if not isinstance(value,dict) or set(value) not in (small,full): raise ValueError()
+                      diagnostics={'requestStage','httpStatus'}
+                      if not isinstance(value,dict) or set(value) not in (small,full,small|diagnostics,full|diagnostics): raise ValueError()
                       if value['status'] not in ('passed','failed') or type(value['cleanup']) is not bool: raise ValueError()
                       if value['reason'] is not None and (type(value['reason']) is not str or value['reason'] not in reasons): raise ValueError()
-                      if set(value)==full:
+                      if diagnostics <= set(value):
+                          stage,status=value['requestStage'],value['httpStatus']
+                          if stage not in (None,'health','login','asset_1','asset_2'): raise ValueError()
+                          if status is not None and (type(status) is not int or not 100<=status<=599): raise ValueError()
+                          if stage is None and status is not None: raise ValueError()
+                          if not full <= set(value) and (stage is not None or status is not None): raise ValueError()
+                          if value['reason']=='http_refused' and stage is None: raise ValueError()
+                      if full <= set(value):
                           if any(type(value[k]) is not bool for k in ('health','loginHtml','forcedStop','databaseQualified','authenticationQualified')): raise ValueError()
                           if value['databaseQualified'] or value['authenticationQualified']: raise ValueError()
                           if type(value['assets']) is not int or value['assets'] not in (0,2): raise ValueError()
                           if type(value['seconds']) not in (int,float) or not math.isfinite(value['seconds']) or not 0<=value['seconds']<=2**53-1: raise ValueError()
                       if value['status']=='passed':
-                          if set(value)!=full or value['reason'] is not None or not value['cleanup'] or not value['health'] or not value['loginHtml'] or value['assets']!=2: raise ValueError()
+                          if not full <= set(value) or value['reason'] is not None or not value['cleanup'] or not value['health'] or not value['loginHtml'] or value['assets']!=2: raise ValueError()
+                          if diagnostics <= set(value) and (stage!='asset_2' or status!=200): raise ValueError()
                       elif value['reason'] is None: raise ValueError()
                   except Exception:
                       raise SystemExit('Invalid standalone HTTP receipt') from None

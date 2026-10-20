@@ -56,20 +56,17 @@ const authorized = defineAuthorizedWorkspaceUseCase({
     }
     if (!input.localRequested) return { version: 1, backend: 'legacy' }
     let model: string
+    let provider: 'openai' | 'anthropic'
     try {
       const { policy } = readChatInstallationPolicyFile()
-      if (
-        policy.provider !== 'openai' ||
-        !policy.localBackend ||
-        policy.data.workflow !== 'sanitized_details'
-      )
-        return unavailable()
+      if (!policy.localBackend || policy.data.workflow !== 'sanitized_details') return unavailable()
       if (
         input.workflowId !== undefined &&
         selectWorkflowReadPolicy(policy, input.workflowId)?.policy !== 'sanitized_details'
       )
         return unavailable()
       model = policy.model
+      provider = policy.provider
     } catch {
       return unavailable()
     }
@@ -79,7 +76,7 @@ const authorized = defineAuthorizedWorkspaceUseCase({
     return {
       version: 1,
       backend: 'local',
-      provider: 'openai',
+      provider,
       model,
       workspaceId: context.workspaceId,
       ...(input.workflowId === undefined ? {} : { workflowId: input.workflowId }),

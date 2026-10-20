@@ -319,4 +319,143 @@ class ReceiptPublicationTests(unittest.TestCase):
             self.assertLess(source.index('python3 scripts/ci/test-linux-standalone-smoke.py -v'),
                             source.index('run: bash scripts/ci/run-linux-build.sh'))
 
+class HttpDiagnosticTests(unittest.TestCase):
+    def test_each_non_200_response_reports_its_stage_without_following_or_continuing(self):
+        cases = [('health','/api/health',503), ('login','/login',302),
+                 ('asset_1','/_next/static/one.js',403), ('asset_2','/_next/static/two.css',404)]
+        order = ['/api/health','/login','/_next/static/one.js','/_next/static/two.css']
+        for stage, path, status in cases:
+            server = SERVER.replace('  self.send_response(status);',
+                                    f'  if self.path=={path!r}:status={status}\n  self.send_response(status);')
+            with self.subTest(stage=stage), patch.dict(globals(), SERVER=server):
+                result, requests = HttpTests().run_fixture()
+                self.assertEqual(result['status'], 'failed')
+                self.assertEqual(result['reason'], 'http_refused')
+                self.assertEqual(result.get('requestStage'), stage)
+                self.assertEqual(result.get('httpStatus'), status)
+                self.assertEqual(requests, order[:order.index(path)+1])
+
+    def test_success_records_the_last_asset_200_without_qualifying_authentication(self):
+        result, _ = HttpTests().run_fixture()
+        self.assertEqual(result['status'], 'passed')
+        self.assertEqual(result.get('requestStage'), 'asset_2')
+        self.assertEqual(result.get('httpStatus'), 200)
+        self.assertFalse(result['databaseQualified'])
+        self.assertFalse(result['authenticationQualified'])
+
+    def test_a_later_request_without_response_does_not_retain_the_previous_200(self):
+        server = SERVER.replace('  self.send_response(status);',
+                                "  if self.path=='/login':return\n  self.send_response(status);")
+        with patch.dict(globals(), SERVER=server):
+            result, requests = HttpTests().run_fixture()
+        self.assertEqual(result['status'], 'failed')
+        self.assertEqual(result['reason'], 'smoke_unavailable')
+        self.assertEqual(result.get('requestStage'), 'login')
+        self.assertIn('httpStatus', result)
+        self.assertIsNone(result['httpStatus'])
+        self.assertEqual(requests, ['/api/health','/login'])
+
+    def test_response_timeout_keeps_the_current_stage_and_no_previous_status(self):
+        server = SERVER.replace('  self.send_response(status);',
+                                "  if self.path=='/login':time.sleep(30)\n  self.send_response(status);")
+        with patch.dict(globals(), SERVER=server):
+            result, requests = HttpTests().run_fixture()
+        self.assertEqual(result['status'], 'failed')
+        self.assertEqual(result['reason'], 'smoke_unavailable')
+        self.assertEqual(result.get('requestStage'), 'login')
+        self.assertIn('httpStatus', result)
+        self.assertIsNone(result['httpStatus'])
+        self.assertEqual(requests, ['/api/health','/login'])
+
+    def test_no_request_and_early_artifact_failure_have_explicit_null_diagnostics(self):
+        result, requests = HttpTests().run_fixture(ownership=False)
+        self.assertEqual(requests, [])
+        self.assertIn('requestStage', result)
+        self.assertIsNone(result['requestStage'])
+        self.assertIn('httpStatus', result)
+        self.assertIsNone(result['httpStatus'])
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); report = root/'receipt.json'
+            with patch.object(sys, 'argv', ['smoke',str(root/'absent'),str(root),str(report)]):
+                self.assertEqual(smoke.main(), 1)
+            receipt = json.loads(report.read_text())
+        self.assertIn('requestStage', receipt)
+        self.assertIsNone(receipt['requestStage'])
+        self.assertIn('httpStatus', receipt)
+        self.assertIsNone(receipt['httpStatus'])
+
+    def test_nonstandard_status_is_refused_without_publishing_an_out_of_range_number(self):
+        server = SERVER.replace('  self.send_response(status);',
+                                '  status=600\n  self.send_response(status);')
+        with patch.dict(globals(), SERVER=server):
+            result, requests = HttpTests().run_fixture()
+        self.assertEqual(result['status'], 'failed')
+        self.assertEqual(result['reason'], 'http_refused')
+        self.assertEqual(result.get('requestStage'), 'health')
+        self.assertIn('httpStatus', result)
+        self.assertIsNone(result['httpStatus'])
+        self.assertEqual(requests, ['/api/health'])
+
+
+class DiagnosticPublicationTests(unittest.TestCase):
+    def test_both_readers_publish_only_the_closed_stage_and_bounded_status(self):
+        base = {'status':'failed','reason':'http_refused','health':False,'loginHtml':False,
+                'assets':0,'cleanup':True,'forcedStop':False,'databaseQualified':False,
+                'authenticationQualified':False,'seconds':1.25}
+        cases = [{**base,'requestStage':stage,'httpStatus':status}
+                 for stage, status in [('health',100),('login',302),('asset_1',599),('asset_2',None)]]
+        cases += [{'status':'failed','reason':'artifact_invalid','cleanup':True,
+                   'requestStage':None,'httpStatus':None},
+                  {**base,'status':'passed','reason':None,'health':True,'loginHtml':True,
+                   'assets':2,'requestStage':'asset_2','httpStatus':200}]
+        reader = ReceiptPublicationTests()
+        for workflow in reader.workflows:
+            for receipt in cases:
+                with self.subTest(workflow=workflow,stage=receipt['requestStage'],status=receipt['httpStatus']):
+                    result = reader.publish(workflow,json.dumps(receipt).encode())
+                    self.assertEqual(result.returncode,0,result.stderr)
+                    self.assertIn({'phase':'standalone-http',**receipt},
+                                  [json.loads(row) for row in result.stdout.splitlines()])
+
+    def test_a_real_oversized_200_is_published_as_failed_without_its_body(self):
+        receipt, requests = HttpTests().run_fixture('oversize')
+        self.assertEqual(receipt['status'], 'failed')
+        self.assertEqual(receipt['reason'], 'http_refused')
+        self.assertEqual(receipt.get('requestStage'), 'login')
+        self.assertEqual(receipt.get('httpStatus'), 200)
+        self.assertEqual(requests, ['/api/health','/login'])
+        reader = ReceiptPublicationTests()
+        for workflow in reader.workflows:
+            with self.subTest(workflow=workflow):
+                result = reader.publish(workflow,json.dumps(receipt).encode())
+                self.assertEqual(result.returncode,0,result.stderr)
+                self.assertIn({'phase':'standalone-http',**receipt},
+                              [json.loads(row) for row in result.stdout.splitlines()])
+                self.assertNotIn('PRIVATE_CANARY', result.stdout+result.stderr)
+                self.assertLess(len(result.stdout),4096)
+
+    def test_readers_refuse_invalid_diagnostics_without_printing_their_values(self):
+        base = {'status':'failed','reason':'http_refused','health':False,'loginHtml':False,
+                'assets':0,'cleanup':True,'forcedStop':False,'databaseQualified':False,
+                'authenticationQualified':False,'seconds':1.25,
+                'requestStage':'health','httpStatus':503}
+        cases = [{**base,'requestStage':value} for value in ('PRIVATE_CANARY',True,1,{},[])]
+        cases += [{**base,'httpStatus':value} for value in ('PRIVATE_CANARY',True,99,600,503.0,{},[])]
+        cases += [{key:value for key,value in base.items() if key != missing}
+                  for missing in ('requestStage','httpStatus')]
+        cases += [{**base,'requestStage':None}, {**base,'extra':'PRIVATE_CANARY'},
+                  {'status':'failed','reason':'artifact_invalid','cleanup':True,
+                   'requestStage':'health','httpStatus':503},
+                  {**base,'status':'passed','reason':None,'health':True,'loginHtml':True,
+                   'assets':2,'requestStage':'login','httpStatus':200}]
+        reader = ReceiptPublicationTests()
+        for workflow in reader.workflows:
+            for receipt in cases:
+                with self.subTest(workflow=workflow,stage=receipt.get('requestStage'),status=receipt.get('httpStatus')):
+                    result = reader.publish(workflow,json.dumps(receipt).encode())
+                    self.assertNotEqual(result.returncode,0)
+                    self.assertNotIn('PRIVATE_CANARY',result.stdout+result.stderr)
+                    self.assertNotIn('"phase": "standalone-http"',result.stdout)
+
+
 if __name__ == '__main__': unittest.main()

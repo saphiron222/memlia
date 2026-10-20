@@ -260,3 +260,38 @@ describe('controlled Anthropic client — actual SDK with HTTP doubles', () => {
     expect(process.env.ANTHROPIC_CUSTOM_HEADERS).toBe('')
   })
 })
+
+it('uses only the explicit server Anthropic API workspace in actual SDK headers', async () => {
+  const http = vi.fn<typeof fetch>(async () => message())
+  vi.stubGlobal('fetch', http)
+  await createControlledAnthropicClient(apiKey, 'wrkspc_Fictitious1234').messages.create(request)
+  const headers = new Headers(http.mock.calls[0][1]?.headers)
+  expect(headers.get('anthropic-workspace-id')).toBe('wrkspc_Fictitious1234')
+  expect(headers.get('x-api-key')).toBe(apiKey)
+  expect(headers.has('authorization')).toBe(false)
+  expect(http.mock.calls[0][1]?.redirect).toBe('error')
+})
+
+it.each(['', 'wrong', 'wrkspc_short', 'wrkspc_Fictitious1234\r\nx-test: value'])(
+  'refuses an invalid server workspace before constructing HTTP (%#)',
+  async (workspace) => {
+    const http = vi.fn<typeof fetch>(async () => message())
+    vi.stubGlobal('fetch', http)
+    expect(() => createControlledAnthropicClient(apiKey, workspace)).toThrow(
+      'Controlled Anthropic transport is unavailable.'
+    )
+    expect(http).not.toHaveBeenCalled()
+  }
+)
+it('still refuses ambient custom headers even with a valid explicit workspace', () => {
+  vi.stubEnv('ANTHROPIC_CUSTOM_HEADERS', 'anthropic-workspace-id: FICTITIOUS_AMBIENT')
+  expect(() => createControlledAnthropicClient(apiKey, 'wrkspc_Fictitious1234')).toThrow(
+    'Controlled Anthropic transport is unavailable.'
+  )
+})
+it('does not send a workspace header when the controlled server option is absent', async () => {
+  const http = vi.fn<typeof fetch>(async () => message())
+  vi.stubGlobal('fetch', http)
+  await createControlledAnthropicClient(apiKey).messages.create(request)
+  expect(new Headers(http.mock.calls[0][1]?.headers).has('anthropic-workspace-id')).toBe(false)
+})

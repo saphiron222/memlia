@@ -1,3 +1,5 @@
+// Modified by Memlia: opt-in Excel preparation; historical revert fixture expects the native transaction.
+import { sha256Hex } from '@sim/security/hash'
 import {
   dbChainMock,
   dbChainMockFns,
@@ -13,6 +15,13 @@ import {
   workflowsPersistenceUtilsMockFns,
 } from '@sim/testing/mocks/workflows-persistence-utils.mock'
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  captureExcelProcedureSnapshot,
+  readExcelProcedureSnapshotCapture,
+} from '@/lib/memlia/excel/materialize-procedure-snapshot'
+import { excelProcedureDraftSchema } from '@/lib/memlia/excel/procedure-capabilities'
+import { normalizedStringify } from '@/lib/workflows/comparison/normalize'
+import { fixtures } from '../../../../../packages/memlia-contracts/tests/fixtures'
 
 const {
   mockValidateWorkflowSchedules,
@@ -87,6 +96,7 @@ import {
   performFullDeploy,
   performFullUndeploy,
   performRevertToVersion,
+  prepareWorkflowSnapshotDeployment,
 } from '@/lib/workflows/orchestration/deploy'
 
 const mockRecordAudit = auditMockFns.mockRecordAudit
@@ -151,7 +161,7 @@ describe('performRevertToVersion', () => {
       }),
       /** A revert restores a graph the workspace already deployed, so it writes as nobody. */
       { workspaceId: null, subjectUserId: null },
-      dbChainMock.db
+      expect.objectContaining({ ...dbChainMock.db, rollback: expect.any(Function) })
     )
     expect(dbChainMockFns.set).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -848,5 +858,183 @@ describe('mutation lock on the orchestration entry points', () => {
     expect(result.error).toContain('locked')
     expect(result.errorCode).toBe('locked')
     expect(mockRecordAudit).not.toHaveBeenCalled()
+  })
+})
+
+function excelDeploymentInput() {
+  const full = structuredClone(fixtures.ExcelProcedure)
+  full.decimalPolicy.precision = 18
+  const procedure = excelProcedureDraftSchema.parse(
+    Object.fromEntries(
+      Object.entries(full).filter(([key]) => key in excelProcedureDraftSchema.shape)
+    )
+  )
+  const request = { procedure, sources: {}, output: {} }
+  const workflowState = {
+    blocks: {
+      excel: {
+        id: 'excel',
+        type: 'memlia_excel',
+        name: 'Excel',
+        enabled: true,
+        position: { x: 0, y: 0 },
+        subBlocks: {
+          request: { id: 'request', type: 'code' as const, value: JSON.stringify(request) },
+        },
+        outputs: {},
+      },
+    },
+    edges: [],
+    loops: {},
+    parallels: {},
+    variables: {},
+  }
+  const hash = (value: unknown) => `sha256:${sha256Hex(normalizedStringify(value))}`
+  const plan = {
+    workflowState,
+    expectedRevision: 7,
+    expectedStateDigest: hash(workflowState),
+    scope: { organizationId: null, workspaceId: 'space', workflowId: 'workflow-1' },
+    procedures: [
+      {
+        blockId: 'excel',
+        expectedRequestDigest: hash(request),
+        procedureId: 'procedure',
+        version: 1,
+        parentVersion: null,
+        ownerUserId: 'author',
+        policyVersion: 'policy',
+      },
+    ],
+  }
+  return {
+    plan,
+    args: {
+      params: { workflowId: 'workflow-1', userId: 'user-1', versionName: 'Version' },
+      actorId: 'user-1',
+      requestId: 'request',
+      idempotencyKey: 'logical-deploy',
+      workflowState,
+      excelProcedureSnapshot: captureExcelProcedureSnapshot(plan),
+    },
+  }
+}
+describe('Excel snapshot orchestration (infrastructure doubled)', () => {
+  beforeEach(() => {
+    mockPrepareWorkflowDeployment.mockReset()
+    mockEnqueueWorkflowDeploymentPreparation.mockReset()
+    mockValidateWorkflowSchedules.mockReturnValue({ isValid: true })
+    mockValidateTriggerWebhookConfigForDeploy.mockReset().mockResolvedValue({ success: true })
+    mockPrepareWorkflowDeployment.mockResolvedValue({
+      success: true,
+      reused: false,
+      operation: { id: 'operation', deploymentVersionId: 'version', version: 1 },
+    })
+  })
+  it.each([{}, null, undefined, false])(
+    'refuses present invalid handle %j before preparation or outbox',
+    async (capture) => {
+      const { args } = excelDeploymentInput()
+      const result = await prepareWorkflowSnapshotDeployment({
+        ...args,
+        excelProcedureSnapshot: capture,
+      })
+      expect(result).toEqual({
+        success: false,
+        error: 'Excel deployment snapshot refused',
+        errorCode: 'validation',
+      })
+      expect(mockPrepareWorkflowDeployment).not.toHaveBeenCalled()
+      expect(mockEnqueueWorkflowDeploymentPreparation).not.toHaveBeenCalled()
+    }
+  )
+  it('captures primitives, graph and handle before native validation awaits', async () => {
+    const { args } = excelDeploymentInput()
+    const original = structuredClone({ ...args, excelProcedureSnapshot: undefined })
+    const handle = args.excelProcedureSnapshot
+    let release!: () => void
+    const wait = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    mockValidateTriggerWebhookConfigForDeploy.mockImplementationOnce(async () => {
+      await wait
+      return { success: true }
+    })
+    const result = prepareWorkflowSnapshotDeployment(args)
+    args.params.workflowId = 'foreign'
+    args.params.userId = 'foreign'
+    args.actorId = 'foreign'
+    args.idempotencyKey = 'foreign'
+    args.workflowState.blocks.excel.name = 'Changed'
+    args.excelProcedureSnapshot = {}
+    release()
+    expect((await result).success).toBe(true)
+    expect(mockPrepareWorkflowDeployment).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workflowId: 'workflow-1',
+        actorId: 'user-1',
+        workflowState: original.workflowState,
+        excelProcedureSnapshot: handle,
+      })
+    )
+    const captured = mockPrepareWorkflowDeployment.mock.calls[0][0]
+    expect(captured.idempotencyKey).toBe(`logical-deploy:request:${captured.requestHash}`)
+  })
+  it('binds stable input digest, not a newly allocated version ID, into native request identity', async () => {
+    const first = excelDeploymentInput()
+    await prepareWorkflowSnapshotDeployment(first.args)
+    await prepareWorkflowSnapshotDeployment(first.args)
+    const changed = excelDeploymentInput()
+    changed.plan.procedures[0].policyVersion = 'new-policy'
+    changed.args.excelProcedureSnapshot = captureExcelProcedureSnapshot(changed.plan)
+    await prepareWorkflowSnapshotDeployment(changed.args)
+    const calls = mockPrepareWorkflowDeployment.mock.calls.map(([input]) => input)
+    expect(calls[0].requestHash).toBe(calls[1].requestHash)
+    expect(calls[0].requestHash).not.toBe(calls[2].requestHash)
+    const expected = sha256Hex(
+      normalizedStringify({
+        action: 'deploy',
+        workflowId: 'workflow-1',
+        userId: 'user-1',
+        workflowState: first.args.workflowState,
+        excelInputDigest: readExcelProcedureSnapshotCapture(first.args.excelProcedureSnapshot)
+          .inputDigest,
+      })
+    )
+    expect(calls[0].requestHash).toBe(expected)
+  })
+  it('refuses a graph or workflow inconsistent with the capture before SQL preparation', async () => {
+    const { args } = excelDeploymentInput()
+    args.workflowState.blocks.excel.name = 'Changed'
+    expect((await prepareWorkflowSnapshotDeployment(args)).success).toBe(false)
+    expect(mockPrepareWorkflowDeployment).not.toHaveBeenCalled()
+  })
+  it('keeps the real preparation outbox: this opt-in is NOT an inactive test admission', async () => {
+    const { args } = excelDeploymentInput()
+    const operation = {
+      id: 'operation',
+      workflowId: 'workflow-1',
+      deploymentVersionId: 'version',
+      version: 1,
+      generation: 1,
+      protocolVersion: 2,
+    }
+    mockPrepareWorkflowDeployment.mockImplementationOnce(async (input) => {
+      await input.onPrepareTransaction(mockTx, operation)
+      return { success: true, operation, reused: false }
+    })
+    mockEnqueueWorkflowDeploymentPreparation.mockResolvedValueOnce('outbox')
+    expect(await prepareWorkflowSnapshotDeployment(args)).toMatchObject({
+      success: true,
+      outboxEventId: 'outbox',
+    })
+    expect(mockEnqueueWorkflowDeploymentPreparation).toHaveBeenCalledWith(
+      mockTx,
+      expect.objectContaining({
+        operationId: 'operation',
+        deploymentVersionId: 'version',
+        userId: 'user-1',
+      })
+    )
   })
 })

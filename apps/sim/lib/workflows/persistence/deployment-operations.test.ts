@@ -1,6 +1,20 @@
-import { dbChainMockFns, resetDbChainMock, schemaMock } from '@sim/testing'
+import { sha256Hex } from '@sim/security/hash'
+import {
+  dbChainMock,
+  dbChainMockFns,
+  queueTableRows,
+  resetDbChainMock,
+  schemaMock,
+} from '@sim/testing'
 import { idMock, idMockFns } from '@sim/testing/mocks/id.mock'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  captureExcelProcedureSnapshot,
+  materializeExcelProcedureSnapshot,
+} from '@/lib/memlia/excel/materialize-procedure-snapshot'
+import { excelProcedureDraftSchema } from '@/lib/memlia/excel/procedure-capabilities'
+import { normalizedStringify } from '@/lib/workflows/comparison/normalize'
+import { fixtures } from '../../../../../packages/memlia-contracts/tests/fixtures'
 
 vi.mock('@sim/utils/id', () => idMock)
 
@@ -10,6 +24,7 @@ import {
   markDeploymentComponentReadiness,
   markDeploymentOperationFailed,
   prepareWorkflowDeployment,
+  prepareWorkflowVersionActivation,
 } from '@/lib/workflows/persistence/deployment-operations'
 
 const mockGenerateId = idMockFns.mockGenerateId
@@ -374,7 +389,7 @@ describe('deployment operation persistence', () => {
     dbChainMockFns.limit
       .mockResolvedValueOnce([{ maxGeneration: 2 }])
       .mockResolvedValueOnce([{ id: 'version-1' }])
-      .mockResolvedValueOnce([{ id: 'version-2' }])
+      .mockResolvedValueOnce([{ id: 'version-2', preparationKind: null }])
     const onActivateTransaction = vi.fn().mockResolvedValue(undefined)
 
     const result = await activateDeploymentOperation({
@@ -443,6 +458,109 @@ describe('deployment operation persistence', () => {
   })
 })
 
+describe('restriction native des versions Excel de test', () => {
+  beforeEach(() => {
+    resetDbChainMock()
+    mockGenerateId.mockReset()
+  })
+  it('refuse une promotion de test avant opération ou callback de publication', async () => {
+    queueTableRows(schemaMock.workflow, [{ id: WORKFLOW_ID, archivedAt: null }])
+    queueTableRows(schemaMock.workflowDeploymentVersion, [])
+    queueTableRows(schemaMock.workflowDeploymentVersion, [
+      {
+        id: 'test-version',
+        workflowId: WORKFLOW_ID,
+        version: 3,
+        isActive: false,
+        preparationKind: 'excel_test_v1',
+      },
+    ])
+    queueTableRows(schemaMock.workflowDeploymentOperation, [{ maxGeneration: 2 }])
+    dbChainMockFns.returning.mockResolvedValueOnce([operationRow()])
+    const callback = vi.fn()
+    const result = await prepareWorkflowVersionActivation({
+      workflowId: WORKFLOW_ID,
+      actorId: 'subject',
+      requestHash: 'hash',
+      deploymentVersionId: 'test-version',
+      onPrepareTransaction: callback,
+    })
+    expect(result.success).toBe(false)
+    expect(dbChainMockFns.insert).not.toHaveBeenCalled()
+    expect(dbChainMockFns.update).not.toHaveBeenCalled()
+    expect(callback).not.toHaveBeenCalled()
+  })
+  it.each(['preparing', 'failed', 'superseded'] as const)(
+    'refuse la reprise %s d’une activation de test sans toucher la clé ou appeler la publication',
+    async (status) => {
+      queueTableRows(schemaMock.workflow, [{ id: WORKFLOW_ID, archivedAt: null }])
+      queueTableRows(schemaMock.workflowDeploymentOperation, [
+        operationRow({
+          status,
+          action: 'activate',
+          requestHash: 'hash',
+          idempotencyKey: 'same-key',
+        }),
+      ])
+      queueTableRows(schemaMock.workflowDeploymentVersion, [{ preparationKind: 'excel_test_v1' }])
+      const callback = vi.fn()
+      const result = await prepareWorkflowVersionActivation({
+        workflowId: WORKFLOW_ID,
+        actorId: 'subject',
+        requestHash: 'hash',
+        idempotencyKey: 'same-key',
+        deploymentVersionId: 'version-2',
+        onPrepareTransaction: callback,
+      })
+      expect(result.success).toBe(false)
+      expect(dbChainMockFns.insert).not.toHaveBeenCalled()
+      expect(dbChainMockFns.update).not.toHaveBeenCalled()
+      expect(callback).not.toHaveBeenCalled()
+    }
+  )
+  it('préserve la reprise native d’une activation legacy NULL', async () => {
+    const existing = operationRow({
+      action: 'activate',
+      requestHash: 'hash',
+      idempotencyKey: 'same-key',
+    })
+    queueTableRows(schemaMock.workflow, [{ id: WORKFLOW_ID, archivedAt: null }])
+    queueTableRows(schemaMock.workflowDeploymentOperation, [existing])
+    queueTableRows(schemaMock.workflowDeploymentVersion, [{ preparationKind: null }])
+    expect(
+      await prepareWorkflowVersionActivation({
+        workflowId: WORKFLOW_ID,
+        actorId: 'subject',
+        requestHash: 'hash',
+        idempotencyKey: 'same-key',
+        deploymentVersionId: 'version-2',
+      })
+    ).toEqual({ success: true, operation: existing, reused: true })
+    expect(dbChainMockFns.insert).not.toHaveBeenCalled()
+    expect(dbChainMockFns.update).not.toHaveBeenCalled()
+  })
+  it('refuse aussi le cutover d’une opération ancienne ou incohérente visant un test', async () => {
+    const operation = operationRow({ status: 'activating' })
+    dbChainMockFns.for
+      .mockResolvedValueOnce([{ id: WORKFLOW_ID }])
+      .mockResolvedValueOnce([operation])
+    dbChainMockFns.limit
+      .mockResolvedValueOnce([{ maxGeneration: 2 }])
+      .mockResolvedValueOnce([{ id: 'version-1' }])
+      .mockResolvedValueOnce([{ id: 'version-2', preparationKind: 'excel_test_v1' }])
+    const callback = vi.fn()
+    const result = await activateDeploymentOperation({
+      workflowId: WORKFLOW_ID,
+      operationId: operation.id,
+      generation: 2,
+      onActivateTransaction: callback,
+    })
+    expect(result.success).toBe(false)
+    expect(dbChainMockFns.update).not.toHaveBeenCalled()
+    expect(callback).not.toHaveBeenCalled()
+  })
+})
+
 describe('getProtectedDeploymentVersionId', () => {
   beforeEach(() => {
     resetDbChainMock()
@@ -462,5 +580,286 @@ describe('getProtectedDeploymentVersionId', () => {
     ])
 
     await expect(getProtectedDeploymentVersionId(WORKFLOW_ID)).resolves.toBeNull()
+  })
+})
+
+// Memlia opt-in must never fall through to a legacy deployment.
+describe('Excel snapshot admission', () => {
+  beforeEach(() => {
+    resetDbChainMock()
+    mockGenerateId.mockReset()
+  })
+  it.each([{}, null, undefined, false])(
+    'refuses a forged present capture before any SQL: %j',
+    async (capture) => {
+      scriptPrepare({
+        operation: operationRow(),
+        activeVersionId: null,
+        maxVersion: 0,
+        maxGeneration: 0,
+      })
+      const result = await prepareWorkflowDeployment({
+        workflowId: WORKFLOW_ID,
+        actorId: 'user-1',
+        requestHash: 'hash',
+        idempotencyKey: 'excel-request',
+        workflowState: workflowState(),
+        excelProcedureSnapshot: capture,
+      })
+      expect(result.success).toBe(false)
+      expect(dbChainMockFns.select).not.toHaveBeenCalled()
+      expect(dbChainMockFns.values).not.toHaveBeenCalled()
+    }
+  )
+})
+
+const excelDigest = (value: unknown) => `sha256:${sha256Hex(normalizedStringify(value))}`
+function excelFixture() {
+  const full = structuredClone(fixtures.ExcelProcedure)
+  full.decimalPolicy.precision = 18
+  const procedure = excelProcedureDraftSchema.parse(
+    Object.fromEntries(
+      Object.entries(full).filter(([key]) => key in excelProcedureDraftSchema.shape)
+    )
+  )
+  const request = { procedure, sources: {}, output: {} }
+  const block = {
+    id: 'excel',
+    type: 'memlia_excel',
+    name: 'Excel',
+    position: { x: 0, y: 0 },
+    enabled: true,
+    horizontalHandles: true,
+    advancedMode: false,
+    errorEnabled: false,
+    triggerMode: false,
+    height: 100,
+    subBlocks: {
+      request: { id: 'request', type: 'code' as const, value: JSON.stringify(request) },
+    },
+    outputs: {},
+    data: {},
+    locked: false,
+  }
+  const graph = { blocks: { excel: block }, edges: [], loops: {}, parallels: {}, variables: {} }
+  const plan = {
+    workflowState: graph,
+    expectedRevision: 7,
+    expectedStateDigest: excelDigest(graph),
+    scope: { organizationId: null, workspaceId: 'space', workflowId: WORKFLOW_ID },
+    procedures: [
+      {
+        blockId: 'excel',
+        expectedRequestDigest: excelDigest(request),
+        procedureId: 'procedure',
+        version: 1,
+        parentVersion: null,
+        ownerUserId: 'author',
+        policyVersion: 'policy',
+      },
+    ],
+  }
+  const capture = captureExcelProcedureSnapshot(plan)
+  const params = {
+    workflowId: WORKFLOW_ID,
+    actorId: 'executor-not-author',
+    requestHash: 'input-hash',
+    idempotencyKey: 'stable-excel-key',
+    workflowState: graph,
+    excelProcedureSnapshot: capture,
+  }
+  return { graph, plan, capture, params, block }
+}
+function queueExcelRows(
+  f: ReturnType<typeof excelFixture>,
+  options: {
+    revision?: number
+    organizationId?: string | null
+    workspaceId?: string
+    changedGraph?: boolean
+    existing?: unknown
+    stored?: unknown
+  } = {}
+) {
+  queueTableRows(schemaMock.workflow, [{ draftRevision: options.revision ?? 7 }])
+  queueTableRows(schemaMock.workflow, [
+    { workspaceId: options.workspaceId ?? 'space', variables: {} },
+  ])
+  queueTableRows(schemaMock.workspace, [
+    { organizationId: options.organizationId ?? null, archivedAt: null },
+  ])
+  queueTableRows(schemaMock.workflowBlocks, [
+    {
+      ...f.block,
+      positionX: 0,
+      positionY: 0,
+      ...(options.changedGraph ? { name: 'Changed after capture' } : {}),
+    },
+  ])
+  queueTableRows(schemaMock.workflowEdges, [])
+  queueTableRows(schemaMock.workflowSubflows, [])
+  queueTableRows(schemaMock.workflow, [{ workspaceId: 'space', draftRevision: 7 }])
+  queueTableRows(schemaMock.workflow, [{ id: WORKFLOW_ID, archivedAt: null }])
+  queueTableRows(schemaMock.workflowDeploymentOperation, options.existing ? [options.existing] : [])
+  if (options.stored) queueTableRows(schemaMock.workflowDeploymentVersion, [options.stored])
+  queueTableRows(schemaMock.workflowDeploymentVersion, [])
+  queueTableRows(schemaMock.workflowDeploymentVersion, [{ maxVersion: 2 }])
+  queueTableRows(schemaMock.workflowDeploymentOperation, [{ maxGeneration: 4 }])
+  dbChainMockFns.returning.mockResolvedValueOnce([
+    operationRow({
+      deploymentVersionId: 'allocated-version',
+      version: 3,
+      requestHash: 'input-hash',
+    }),
+  ])
+  mockGenerateId.mockReturnValueOnce('allocated-version').mockReturnValueOnce('allocated-operation')
+}
+
+describe('Excel native raw graph and deployment lock composition (DB chains doubled)', () => {
+  beforeEach(() => {
+    resetDbChainMock()
+    mockGenerateId.mockReset()
+  })
+  it('materializes only after native lock/read with real allocated identity, final digest and unchanged input idempotence', async () => {
+    const f = excelFixture()
+    queueExcelRows(f)
+    const callback = vi.fn()
+    const result = await prepareWorkflowDeployment({ ...f.params, onPrepareTransaction: callback })
+    expect(result.success).toBe(true)
+    const values = dbChainMockFns.values.mock.calls.map(([v]) => v)
+    const stored = values[0] as {
+      state: typeof f.graph
+      snapshotDigest: string
+      id: string
+      version: number
+      isActive: boolean
+    }
+    const expected = materializeExcelProcedureSnapshot(
+      f.capture,
+      { workflowState: f.graph, revision: 7, scope: f.plan.scope },
+      { id: 'allocated-version', version: 3 }
+    )
+    expect(stored.state).toEqual(expected.workflowState)
+    expect(stored.snapshotDigest).toBe(excelDigest(stored.state))
+    expect(stored.snapshotDigest).not.toBe(f.plan.expectedStateDigest)
+    expect(stored.isActive).toBe(false)
+    expect(
+      JSON.parse(stored.state.blocks.excel.subBlocks.request.value).procedure.ownerUserId
+    ).toBe('author')
+    expect(values[1]).toMatchObject({
+      requestHash: 'input-hash',
+      idempotencyKey: 'stable-excel-key',
+      actorId: 'executor-not-author',
+    })
+    expect(dbChainMockFns.for.mock.calls.slice(0, 3)).toEqual([['update'], ['share'], ['update']])
+    expect(callback).toHaveBeenCalledOnce()
+  })
+  it.each([
+    { revision: 8 },
+    { organizationId: 'other' },
+    { workspaceId: 'other' },
+    { changedGraph: true },
+  ])('refuses drift %j without INSERT or callback', async (options) => {
+    const f = excelFixture()
+    queueExcelRows(f, options)
+    const callback = vi.fn()
+    expect(
+      (await prepareWorkflowDeployment({ ...f.params, onPrepareTransaction: callback })).success
+    ).toBe(false)
+    expect(dbChainMockFns.values).not.toHaveBeenCalled()
+    expect(callback).not.toHaveBeenCalled()
+  })
+  it('refuses a global pool in place of a business transaction', async () => {
+    const f = excelFixture()
+    await expect(prepareWorkflowDeployment({ ...f.params, tx: dbChainMock.db })).rejects.toThrow(
+      'transaction'
+    )
+    expect(dbChainMockFns.select).not.toHaveBeenCalled()
+  })
+  it('refuses a different supplied graph before SQL even with a real handle', async () => {
+    const f = excelFixture()
+    f.params.workflowState.blocks.excel.name = 'Changed'
+    expect((await prepareWorkflowDeployment(f.params)).success).toBe(false)
+    expect(dbChainMockFns.select).not.toHaveBeenCalled()
+  })
+  it('reuses only the exact final snapshot associated with the captured input', async () => {
+    const f = excelFixture()
+    const expected = materializeExcelProcedureSnapshot(
+      f.capture,
+      { workflowState: f.graph, revision: 7, scope: f.plan.scope },
+      { id: 'existing-version', version: 2 }
+    )
+    const existing = operationRow({
+      deploymentVersionId: 'existing-version',
+      requestHash: 'input-hash',
+    })
+    queueExcelRows(f, {
+      existing,
+      stored: {
+        id: 'existing-version',
+        version: 2,
+        state: expected.workflowState,
+        snapshotDigest: expected.snapshotDigest,
+      },
+    })
+    expect(await prepareWorkflowDeployment(f.params)).toEqual({
+      success: true,
+      reused: true,
+      operation: existing,
+    })
+    expect(dbChainMockFns.values).not.toHaveBeenCalled()
+    expect(mockGenerateId).not.toHaveBeenCalled()
+  })
+  it.each(['digest', 'state', 'missing'])(
+    'refuses an existing operation whose stored %s is inconsistent',
+    async (kind) => {
+      const f = excelFixture()
+      const expected = materializeExcelProcedureSnapshot(
+        f.capture,
+        { workflowState: f.graph, revision: 7, scope: f.plan.scope },
+        { id: 'existing-version', version: 2 }
+      )
+      queueExcelRows(f, {
+        existing: operationRow({
+          deploymentVersionId: 'existing-version',
+          requestHash: 'input-hash',
+        }),
+        stored:
+          kind === 'missing'
+            ? undefined
+            : {
+                id: 'existing-version',
+                version: 2,
+                state: kind === 'state' ? f.graph : expected.workflowState,
+                snapshotDigest:
+                  kind === 'digest' ? f.plan.expectedStateDigest : expected.snapshotDigest,
+              },
+      })
+      expect((await prepareWorkflowDeployment(f.params)).success).toBe(false)
+      expect(dbChainMockFns.values).not.toHaveBeenCalled()
+    }
+  )
+  it('captures caller primitives and handle before waiting for the native lock', async () => {
+    const f = excelFixture()
+    queueExcelRows(f)
+    let release!: () => void
+    const wait = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    dbChainMockFns.execute.mockImplementationOnce(async () => {
+      await wait
+      return []
+    })
+    const result = prepareWorkflowDeployment(f.params)
+    f.params.actorId = 'mutated'
+    f.params.requestHash = 'mutated'
+    f.params.excelProcedureSnapshot = {}
+    f.graph.blocks.excel.name = 'Mutated'
+    release()
+    expect((await result).success).toBe(true)
+    expect(dbChainMockFns.values.mock.calls[1][0]).toMatchObject({
+      actorId: 'executor-not-author',
+      requestHash: 'input-hash',
+    })
   })
 })

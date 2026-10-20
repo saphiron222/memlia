@@ -1,4 +1,5 @@
 /** @vitest-environment jsdom */
+// Modified by Memlia: use the fixed product identity in native Chat labels.
 import { act, type ComponentProps, useEffect, useState } from 'react'
 import { ToastProvider } from '@sim/emcn'
 import {
@@ -83,7 +84,7 @@ vi.mock(
 
 vi.mock('@/hooks/use-speech-to-text', () => ({ useSpeechToText: mocks.speech }))
 vi.mock('@/lib/uploads/client/session-upload', () => ({ uploadInternalFileSession: mocks.upload }))
-vi.mock('@/hooks/use-animated-placeholder', () => ({ useAnimatedPlaceholder: () => 'Ask Sim to' }))
+vi.mock('@/hooks/use-animated-placeholder', () => ({ useAnimatedPlaceholder: () => 'Ask Memlia to' }))
 vi.mock('@/hooks/use-chat-input-focus', () => ({ useChatInputFocus: vi.fn() }))
 vi.mock('@/app/o/[organizationId]/providers/organization-provider', () => organizationProviderMock)
 
@@ -327,7 +328,7 @@ it.each([
         </QueryClientProvider>
       )
     )
-    const input = container.querySelector<HTMLTextAreaElement>('[aria-label="Ask Sim"]')!
+    const input = container.querySelector<HTMLTextAreaElement>('[aria-label="Ask Memlia"]')!
     await act(async () => {
       input.focus()
       input.setSelectionRange(10, 14, 'backward')
@@ -340,10 +341,10 @@ it.each([
         cancelable: true,
       })
       await act(async () => {
-        container.querySelector<HTMLTextAreaElement>('[aria-label="Ask Sim"]')!.dispatchEvent(event)
+        container.querySelector<HTMLTextAreaElement>('[aria-label="Ask Memlia"]')!.dispatchEvent(event)
       })
       await act(async () => vi.advanceTimersToNextFrame())
-      const nextInput = container.querySelector<HTMLTextAreaElement>('[aria-label="Ask Sim"]')!
+      const nextInput = container.querySelector<HTMLTextAreaElement>('[aria-label="Ask Memlia"]')!
       expect(currentMode).toBe(expectedMode)
       expect(event.defaultPrevented).toBe(true)
       expect(document.activeElement).toBe(nextInput)
@@ -369,7 +370,7 @@ async function paste(files: File[]) {
   })
   await act(async () =>
     container
-      .querySelector<HTMLInputElement | HTMLTextAreaElement>('[aria-label="Ask Sim"]')!
+      .querySelector<HTMLInputElement | HTMLTextAreaElement>('[aria-label="Ask Memlia"]')!
       .dispatchEvent(event)
   )
   return event
@@ -424,7 +425,7 @@ it('keeps restored queued skills scoped when replacing a draft', async () => {
   )
   await act(async () => restore())
   expect(
-    container.querySelector<HTMLInputElement | HTMLTextAreaElement>('[aria-label="Ask Sim"]')!.value
+    container.querySelector<HTMLInputElement | HTMLTextAreaElement>('[aria-label="Ask Memlia"]')!.value
   ).toBe('\u2003review fix this')
   await act(async () =>
     container.querySelector<HTMLButtonElement>('button[aria-label="Send"]')!.click()
@@ -468,7 +469,7 @@ it.each([
       onSendQueuedHead: sendHead,
     })
     if (withAttachment) await paste([new File(['image'], 'follow-up.png', { type: 'image/png' })])
-    const input = container.querySelector<HTMLTextAreaElement>('[aria-label="Ask Sim"]')!
+    const input = container.querySelector<HTMLTextAreaElement>('[aria-label="Ask Memlia"]')!
     await act(async () => {
       input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
       expect(mocks.submit).toHaveBeenCalledTimes(1)

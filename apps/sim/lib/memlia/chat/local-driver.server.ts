@@ -27,6 +27,8 @@ const readTools = new Set([
   'read_workflow',
   'read_workflow_block',
   'preview_workflow_operations',
+  'excel_describe_capabilities',
+  'excel_preview_procedure',
 ])
 
 /** Own JSON before the lifecycle's first await. Not authentication or permission to send. */
@@ -38,7 +40,16 @@ export function captureLocalChatOptions(raw: LocalChatOptions): LocalChatOptions
     if (
       !owned ||
       Object.keys(owned).some(
-        (k) => !['principal', 'workspaceId', 'workflow', 'request', 'budget', 'limits'].includes(k)
+        (k) =>
+          ![
+            'principal',
+            'workspaceId',
+            'workflow',
+            'request',
+            'budget',
+            'limits',
+            'anthropicWorkspaceId',
+          ].includes(k)
       ) ||
       owned.principal?.kind !== 'session' ||
       !owned.principal.userId ||
@@ -57,6 +68,13 @@ export function captureLocalChatOptions(raw: LocalChatOptions): LocalChatOptions
           !['user', 'assistant', 'system'].includes(m.role) ||
           typeof m.content !== 'string'
       )
+    )
+      throw unavailable()
+    if (
+      Object.hasOwn(owned, 'anthropicWorkspaceId') &&
+      (owned.budget?.pricingProfile?.provider !== 'anthropic' ||
+        typeof owned.anthropicWorkspaceId !== 'string' ||
+        !/^wrkspc_[A-Za-z0-9]{8,100}$/.test(owned.anthropicWorkspaceId))
     )
       throw unavailable()
     for (const [key, max] of Object.entries({

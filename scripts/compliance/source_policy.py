@@ -18,6 +18,10 @@ def digest(content):
 def review_index(review):
     if not isinstance(review, dict) or review.get('scanner') != 'gitleaks' or review.get('version') != '8.30.1' or not isinstance(review.get('findings'), list):
         raise ValueError('unsupported review policy')
+    schema = review.get('schema', 'memlia.reviewed-gitleaks/v1')
+    if not isinstance(schema, str) or schema not in ('memlia.reviewed-gitleaks/v1', 'memlia.reviewed-gitleaks/v2'):
+        raise ValueError('unsupported review policy')
+    versioned = schema == 'memlia.reviewed-gitleaks/v2'
     admitted, paths = set(), {}
     for entry in review['findings']:
         if not isinstance(entry, dict):
@@ -30,11 +34,16 @@ def review_index(review):
                 or type(line) is not int or line < 1
                 or not isinstance(reason, str) or not reason.strip()):
             raise ValueError('review requires safe path, hash, rule, line and reason')
-        key = (path, rule, line)
-        if key in admitted or (path in paths and paths[path] != sha):
+        if versioned and (path == '.' or str(PurePosixPath(path)) != path):
+            raise ValueError('review requires a canonical path')
+        key = (path, sha, rule, line) if versioned else (path, rule, line)
+        if key in admitted or (not versioned and path in paths and paths[path] != sha):
             raise ValueError('duplicate or conflicting reviewed finding')
         admitted.add(key)
-        paths[path] = sha
+        if versioned:
+            paths.setdefault(path, set()).add(sha)
+        else:
+            paths[path] = sha
     return admitted, paths
 
 
@@ -43,13 +52,23 @@ def review_findings(root, report, review):
     if not root.is_dir() or not isinstance(report, list):
         raise ValueError('existing source directory and Gitleaks report array required')
     admitted, paths = review_index(review)
+    versioned = review.get('schema') == 'memlia.reviewed-gitleaks/v2'
+    expected = set() if versioned else admitted
     issues = []
     for path, sha in paths.items():
         file = root / path
         if any(part.is_symlink() for part in [file, *file.parents]) or not file.is_file():
             issues.append({'path': path, 'rule': 'reviewed-file-unavailable'})
-        elif digest(file.read_bytes()) != sha:
-            issues.append({'path': path, 'rule': 'reviewed-blob-changed'})
+        else:
+            current = digest(file.read_bytes())
+            if versioned:
+                if current not in sha:
+                    issues.append({'path': path, 'rule': 'reviewed-blob-changed'})
+                else:
+                    expected.update((p, rule, line) for p, blob, rule, line in admitted
+                                    if p == path and blob == current)
+            elif current != sha:
+                issues.append({'path': path, 'rule': 'reviewed-blob-changed'})
     observed = set()
     for finding in report:
         if not isinstance(finding, dict) or finding.get('Commit'):
@@ -64,9 +83,9 @@ def review_findings(root, report, review):
                 issues.append({'rule': 'finding-outside-reviewed-root'})
                 continue
         observed.add((path, rule, line))
-        if (path, rule, line) not in admitted:
+        if (path, rule, line) not in expected:
             issues.append({'path': path, 'rule': 'unreviewed-gitleaks-finding', 'scanner_rule': rule, 'line': line})
-    for path, rule, line in sorted(admitted - observed):
+    for path, rule, line in sorted(expected - observed):
         issues.append({'path': path, 'rule': 'expected-gitleaks-finding-missing', 'scanner_rule': rule, 'line': line})
     return issues
 
@@ -89,6 +108,7 @@ def review_history_findings(root, report, review):
     if not root.is_dir() or not isinstance(report, list):
         raise ValueError('existing repository and Gitleaks report array required')
     admitted, paths = review_index(review)
+    versioned = review.get('schema') == 'memlia.reviewed-gitleaks/v2'
     issues, blobs = [], {}
     for finding in report:
         if not isinstance(finding, dict):
@@ -101,7 +121,7 @@ def review_history_findings(root, report, review):
                 or type(line) is not int or line < 1
                 or not isinstance(commit, str) or not re.fullmatch('[a-f0-9]{40}', commit)):
             raise ValueError('history requires exact commit, safe path, rule and line')
-        if (path, rule, line) not in admitted:
+        if path not in paths or (not versioned and (path, rule, line) not in admitted):
             issues.append({'path': path, 'commit': commit, 'rule': 'unreviewed-gitleaks-finding', 'scanner_rule': rule, 'line': line})
             continue
         key = (commit, path)
@@ -115,8 +135,11 @@ def review_history_findings(root, report, review):
                 content = subprocess.run(['git', '-C', str(root), 'cat-file', 'blob', f'{commit}:{path}'],
                                          capture_output=True, env=env)
                 blobs[key] = digest(content.stdout) if content.returncode == 0 else None
-        if blobs[key] != paths[path]:
+        matches_blob = blobs[key] in paths[path] if versioned else blobs[key] == paths[path]
+        if not matches_blob:
             issues.append({'path': path, 'commit': commit, 'rule': 'reviewed-historical-blob-unavailable-or-changed'})
+        elif versioned and (path, blobs[key], rule, line) not in admitted:
+            issues.append({'path': path, 'commit': commit, 'rule': 'unreviewed-gitleaks-finding', 'scanner_rule': rule, 'line': line})
     return issues
 
 

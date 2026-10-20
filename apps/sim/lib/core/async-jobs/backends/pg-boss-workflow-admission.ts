@@ -13,6 +13,7 @@ import {
 import { CORE_TRIGGER_TYPES } from '@/stores/logs/filters/types'
 import { AsyncJobEnqueueError, validateMaxDurationSeconds } from '../types'
 import { admitPgBossJob, copyPgBossAdmissionJson, PgBossAdmissionError } from './pg-boss-admission'
+import { PG_BOSS_MAX_DURATION_SECONDS } from './pg-boss-transport'
 import { capturePgBossWorkflowSessionAuthority } from './pg-boss-workflow-session-authority'
 
 export interface PreparedPgBossWorkflowAdmission {
@@ -102,7 +103,8 @@ export function preparePgBossWorkflowAdmission(
     const maxDurationSeconds = validateMaxDurationSeconds(
       toTriggerMaxDurationSeconds(raw.executionTimeoutMs)
     )
-    if (maxDurationSeconds === undefined) throw rejection()
+    if (maxDurationSeconds === undefined || maxDurationSeconds > PG_BOSS_MAX_DURATION_SECONDS)
+      throw rejection()
     const { payload, correlation } = prepareWorkflowExecutionPayload({
       ...raw,
       principal,

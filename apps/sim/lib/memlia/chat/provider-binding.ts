@@ -15,6 +15,7 @@ import {
 import type { AgentStreamEvent } from '@/providers/stream-events'
 import type { ProviderRequest, ProviderToolConfig } from '@/providers/types'
 import { catalogToolInputs, createCatalogTools } from './catalog-tools'
+import { createExcelPreviewTools, excelPreviewInputs } from './excel-preview-tools'
 import { type ModelRunLimits, runModelAdapter } from './model-adapter'
 import { createWorkflowPreviewTools, workflowPreviewInputs } from './workflow-preview-tools'
 import { workflowProposalInputSchema } from './workflow-proposals.server'
@@ -66,6 +67,8 @@ export function captureWorkflowProposalBinding(
 
 type CatalogProviderOptions = Parameters<typeof createCatalogTools>[0] & {
   provider: 'openai' | 'anthropic'
+  /** Trusted installation option only; never a model request field. */
+  anthropicWorkspaceId?: string
   request: Pick<
     ProviderRequest,
     | 'model'
@@ -92,12 +95,24 @@ type CatalogProviderOptions = Parameters<typeof createCatalogTools>[0] & {
 
 /** Server-only binding; no ambient workflow identity, tools or conversation compactor is inherited. */
 export function runCatalogProvider(options: CatalogProviderOptions) {
+  const workspace = Object.getOwnPropertyDescriptor(options, 'anthropicWorkspaceId')
+  const workspaceId: unknown = workspace?.value
+  if (
+    workspace &&
+    (options.provider !== 'anthropic' ||
+      !('value' in workspace) ||
+      !workspace.enumerable ||
+      typeof workspaceId !== 'string' ||
+      !/^wrkspc_[A-Za-z0-9]{8,100}$/.test(workspaceId))
+  )
+    throw new Error('Invalid server Anthropic workspace binding.')
+  const anthropicWorkspaceId = typeof workspaceId === 'string' ? workspaceId : undefined
   const beforeModelTransport = options.beforeModelTransport
   const observeModelAttempt = options.observeModelAttempt
   if (observeModelAttempt !== undefined) {
     if (typeof observeModelAttempt !== 'function') throw new Error('Invalid server model observer.')
-    if (options.provider !== 'openai')
-      throw new Error('Model observation requires OpenAI streaming.')
+    if (options.provider !== 'openai' && options.provider !== 'anthropic')
+      throw new Error('Model observation requires a supported streaming provider.')
   }
   if (beforeModelTransport !== undefined && typeof beforeModelTransport !== 'function')
     throw new Error('Invalid server model transport guard.')
@@ -133,6 +148,14 @@ export function runCatalogProvider(options: CatalogProviderOptions) {
         proposalRunId: proposal?.runId,
       })
     : undefined
+  const excelPreview =
+    workflow?.previewOperations && options.principal.kind === 'session'
+      ? createExcelPreviewTools({
+          principal: options.principal,
+          workspaceId: options.workspaceId,
+          workflowId: workflow.workflowId,
+        })
+      : undefined
   const tools: ProviderToolConfig[] = Object.entries(catalogToolInputs).map(([id, schema]) => {
     const json = z.toJSONSchema(schema, { io: 'input' })
     return {
@@ -190,6 +213,34 @@ export function runCatalogProvider(options: CatalogProviderOptions) {
         required: ['request'],
       },
     })
+
+  if (excelPreview) {
+    const describeInput = jsonInput(excelPreviewInputs.excel_describe_capabilities)
+    tools.push({
+      id: 'excel_describe_capabilities',
+      description:
+        'Describe the declarative Excel primitive profile and unsupported capabilities. No workbook inspection or execution is available.',
+      params: {},
+      parameters: {
+        type: 'object',
+        properties: describeInput.properties ?? {},
+        required: describeInput.required ?? [],
+      },
+    })
+    tools.push({
+      id: 'excel_preview_procedure',
+      description:
+        'Analyze a generic Excel recipe draft: declared options, dependencies and types only. No data is read or calculated, no control is proven satisfied, and nothing is persisted, approved or executed. Ask the user about missing business rules; never invent them.',
+      params: {},
+      parameters: {
+        type: 'object',
+        properties: {
+          request: previewJsonInput(excelPreviewInputs.excel_preview_procedure.shape.request),
+        },
+        required: ['request'],
+      },
+    })
+  }
 
   if (proposal)
     tools.push({
@@ -261,19 +312,22 @@ export function runCatalogProvider(options: CatalogProviderOptions) {
     async dispatch(toolId, params, signal) {
       // Added by Sim's native prepareToolExecution, never an authority input.
       const { _toolSchema: _schema, ...modelParams } = params
+      const excelCall = Boolean(excelPreview) && Object.hasOwn(excelPreviewInputs, toolId)
       const proposalCall = Boolean(proposal) && toolId === 'propose_workflow_operations'
       const previewCall = Boolean(workflowPreview) && toolId === 'preview_workflow_operations'
       const workflowCall =
         proposalCall ||
         previewCall ||
         (Boolean(workflowReads) && (toolId === 'read_workflow' || toolId === 'read_workflow_block'))
-      const result = proposalCall
-        ? await proposeWorkflow(modelParams, signal)
-        : previewCall
-          ? await previewWorkflow(modelParams, signal)
-          : workflowCall
-            ? await readWorkflow(toolId, modelParams, signal)
-            : await catalog.dispatch(toolId, modelParams, signal)
+      const result = excelCall
+        ? await excelPreview!.dispatch(toolId, modelParams, signal)
+        : proposalCall
+          ? await proposeWorkflow(modelParams, signal)
+          : previewCall
+            ? await previewWorkflow(modelParams, signal)
+            : workflowCall
+              ? await readWorkflow(toolId, modelParams, signal)
+              : await catalog.dispatch(toolId, modelParams, signal)
       const refusal = !result.ok
         ? {
             error: result.error,
@@ -286,11 +340,20 @@ export function runCatalogProvider(options: CatalogProviderOptions) {
       // Native error formatting drops structured output. Preserve a refusal as
       // model data, while raw failure still controls the provider error events.
       const modelResponse =
-        workflowCall && !result.ok ? { success: true, output: { ok: false, ...refusal } } : response
+        (workflowCall || excelCall) && !result.ok
+          ? { success: true, output: { ok: false, ...refusal } }
+          : response
       return { rawResponse: response, modelResponse }
     },
     start(controls) {
-      const context = { controlledRun: { ...controls, beforeModelTransport, observeModelAttempt } }
+      const context = {
+        controlledRun: {
+          ...controls,
+          beforeModelTransport,
+          observeModelAttempt,
+          ...(anthropicWorkspaceId === undefined ? {} : { anthropicWorkspaceId }),
+        },
+      }
       const {
         model,
         apiKey,

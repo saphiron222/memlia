@@ -382,3 +382,33 @@ it('retains denied-model refusal with confirmation disabled', async () => {
   expect(response.status).toBe(403)
   expect(await response.json()).toEqual({ error: 'Local Chat profile is unavailable.' })
 })
+
+it('observes authorized Anthropic capabilities without exposing its API workspace or credentials', async () => {
+  infra.policy.mockImplementation(() => ({
+    policy: parseChatInstallationPolicy({
+      ...config(),
+      provider: 'anthropic',
+      model: 'claude-haiku-4-5',
+      anthropicWorkspaceId: 'wrkspc_Fictitious1234',
+    }),
+  }))
+  const response = await GET(request())
+  expect(response.status).toBe(200)
+  const body = await response.json()
+  expect(body).toEqual({ ...expected, provider: 'anthropic', model: 'claude-haiku-4-5' })
+  expect(JSON.stringify(body)).not.toMatch(/wrkspc_|pricing|apiKey/)
+})
+it('keeps native provider restrictions on Anthropic capabilities', async () => {
+  infra.policy.mockImplementation(() => ({
+    policy: parseChatInstallationPolicy({
+      ...config(),
+      provider: 'anthropic',
+      model: 'claude-haiku-4-5',
+    }),
+  }))
+  infra.modelConfig.mockResolvedValue({
+    ...DEFAULT_PERMISSION_GROUP_CONFIG,
+    allowedModelProviders: ['openai'],
+  })
+  expect((await GET(request())).status).toBe(403)
+})

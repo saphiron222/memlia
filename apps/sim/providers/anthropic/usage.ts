@@ -1,5 +1,9 @@
+// Modified by Memlia: strictly observe complete standard-tier turns without legacy defaults.
+import { isRecordLike } from '@sim/utils/object'
 import type { BlockTokens } from '@/executor/types'
 import { LIST_PRICE_POLICY, type ModelUsage, priceModelUsage } from '@/providers/cost-policy'
+import { getModelPricing } from '@/providers/pricing'
+import type { ProviderModelObservation } from '@/providers/runtime-context'
 import type { ModelPricing } from '@/providers/types'
 
 export interface AnthropicUsageLike {
@@ -137,6 +141,86 @@ export function toAnthropicModelUsage(usage: AnthropicUsageLike | null | undefin
   const accumulator = createAnthropicUsageAccumulator()
   addAnthropicUsage(accumulator, usage)
   return buildAnthropicModelUsage(accumulator)
+}
+
+/** Terminal SDK usage only; missing counters or ambiguous cache TTLs are not zero usage. */
+export function observeAnthropicUsage(model: string, response: unknown): ProviderModelObservation {
+  const unknown = (): ProviderModelObservation => ({ kind: 'unknown', reason: 'usage_unavailable' })
+  const count = (value: unknown): value is number =>
+    typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+  try {
+    if (
+      !isRecordLike(response) ||
+      typeof response.stop_reason !== 'string' ||
+      !['end_turn', 'stop_sequence', 'tool_use', 'max_tokens'].includes(response.stop_reason)
+    )
+      return { kind: 'unknown', reason: 'incomplete' }
+    const raw = response.usage
+    if (
+      !isRecordLike(raw) ||
+      raw.service_tier !== 'standard' ||
+      !count(raw.input_tokens) ||
+      !count(raw.output_tokens) ||
+      !count(raw.cache_read_input_tokens) ||
+      !count(raw.cache_creation_input_tokens)
+    )
+      return unknown()
+    let fiveMinute = 0
+    let oneHour = 0
+    if (raw.cache_creation !== undefined && raw.cache_creation !== null) {
+      if (
+        !isRecordLike(raw.cache_creation) ||
+        Object.keys(raw.cache_creation).some(
+          (key) => !['ephemeral_5m_input_tokens', 'ephemeral_1h_input_tokens'].includes(key)
+        ) ||
+        !count(raw.cache_creation.ephemeral_5m_input_tokens) ||
+        !count(raw.cache_creation.ephemeral_1h_input_tokens)
+      )
+        return unknown()
+      fiveMinute = raw.cache_creation.ephemeral_5m_input_tokens
+      oneHour = raw.cache_creation.ephemeral_1h_input_tokens
+    }
+    if (
+      !count(fiveMinute + oneHour) ||
+      fiveMinute + oneHour !== raw.cache_creation_input_tokens ||
+      !count(
+        raw.input_tokens + raw.output_tokens + raw.cache_read_input_tokens + fiveMinute + oneHour
+      )
+    )
+      return unknown()
+    // Local tools are function tools only. Native server-tool charges are not in this profile.
+    if (raw.server_tool_use !== undefined && raw.server_tool_use !== null) {
+      if (
+        !isRecordLike(raw.server_tool_use) ||
+        Object.keys(raw.server_tool_use).sort().join(',') !==
+          'web_fetch_requests,web_search_requests' ||
+        Object.entries(raw.server_tool_use).some(
+          ([key, value]) =>
+            !['web_search_requests', 'web_fetch_requests'].includes(key) || value !== 0
+        )
+      )
+        return unknown()
+    }
+    const usage = buildAnthropicModelUsage({
+      input: raw.input_tokens,
+      output: raw.output_tokens,
+      cacheRead: raw.cache_read_input_tokens,
+      cacheWriteFiveMinute: fiveMinute,
+      cacheWriteOneHour: oneHour,
+    })
+    if (!getModelPricing(model)) return { kind: 'usage', usage, cost: { kind: 'unavailable' } }
+    const cost = priceModelUsage(model, usage, LIST_PRICE_POLICY)
+    return {
+      kind: 'usage',
+      usage,
+      cost:
+        Number.isFinite(cost.total) && cost.total >= 0
+          ? { kind: 'list_price_estimate', usd: cost.total }
+          : { kind: 'unavailable' },
+    }
+  } catch {
+    return unknown()
+  }
 }
 
 /**

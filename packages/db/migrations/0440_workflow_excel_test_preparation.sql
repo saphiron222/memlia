@@ -1,0 +1,2 @@
+ALTER TABLE "workflow_deployment_version" ADD COLUMN "preparation_kind" text;--> statement-breakpoint
+ALTER TABLE "workflow_deployment_version" ADD CONSTRAINT "workflow_deployment_version_excel_test_preparation_check" CHECK ("workflow_deployment_version"."preparation_kind" IS NULL OR ("workflow_deployment_version"."preparation_kind" = 'excel_test_v1' AND "workflow_deployment_version"."is_active" = false AND "workflow_deployment_version"."snapshot_digest" IS NOT NULL));

@@ -22,7 +22,7 @@ export const localCapabilitiesResponse = z.discriminatedUnion('backend', [
     .object({
       version: z.literal(1),
       backend: z.literal('local'),
-      provider: z.literal('openai'),
+      provider: z.enum(['openai', 'anthropic']),
       model: z.string().min(1).max(256),
       workspaceId: workspaceIdSchema,
       workflowId: workflowIdSchema.optional(),

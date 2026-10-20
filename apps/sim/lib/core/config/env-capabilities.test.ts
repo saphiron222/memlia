@@ -706,3 +706,68 @@ describe('env capabilities', () => {
     })
   })
 })
+
+// Modified by Memlia: explicit durable selection must never fall through to inline.
+describe('durable workflow selection through the native server environment', () => {
+  async function selected(values: Record<string, string | undefined>) {
+    vi.resetModules()
+    for (const key of [
+      'MEMLIA_DURABLE_WORKFLOWS_ENABLED',
+      'MEMLIA_PG_BOSS_ENABLED',
+      'MEMLIA_PG_BOSS_DATABASE_URL',
+      'TRIGGER_DEV_ENABLED',
+      'TRIGGER_PROJECT_ID',
+      'TRIGGER_SECRET_KEY',
+    ])
+      vi.stubEnv(key, values[key])
+    vi.doUnmock('@/lib/core/config/env')
+    try {
+      const { getConfiguredAsyncJobsProvider } = await vi.importActual<
+        typeof import('./env-capabilities.server')
+      >('./env-capabilities.server')
+      return getConfiguredAsyncJobsProvider()
+    } finally {
+      vi.unstubAllEnvs()
+      vi.resetModules()
+    }
+  }
+  const ready = {
+    MEMLIA_DURABLE_WORKFLOWS_ENABLED: '1',
+    MEMLIA_PG_BOSS_ENABLED: '1',
+    MEMLIA_PG_BOSS_DATABASE_URL: 'postgresql://fixture:private-canary@127.0.0.1:1/fixture_test',
+  }
+  it('selects the durable workflow backend explicitly without connecting', async () => {
+    expect(await selected(ready)).toBe('pg-boss')
+  })
+  it('keeps old transport-only settings and absent selection on the legacy backend', async () => {
+    expect(await selected({ ...ready, MEMLIA_DURABLE_WORKFLOWS_ENABLED: undefined })).toBe(
+      'database'
+    )
+    expect(await selected({})).toBe('database')
+  })
+  for (const value of ['', 'false', '0', 'true', ' 1 ', 'invalid']) {
+    it(`refuses a present invalid durable selector ${JSON.stringify(value)}`, async () => {
+      await expect(selected({ ...ready, MEMLIA_DURABLE_WORKFLOWS_ENABLED: value })).rejects.toThrow(
+        'Durable workflow configuration is unavailable.'
+      )
+    })
+  }
+  for (const override of [
+    { MEMLIA_PG_BOSS_ENABLED: undefined },
+    { MEMLIA_PG_BOSS_ENABLED: 'false' },
+    { MEMLIA_PG_BOSS_DATABASE_URL: undefined },
+    { MEMLIA_PG_BOSS_DATABASE_URL: '' },
+    { MEMLIA_PG_BOSS_DATABASE_URL: 'https://private-canary.invalid' },
+    {
+      TRIGGER_DEV_ENABLED: 'true',
+      TRIGGER_PROJECT_ID: 'fixture',
+      TRIGGER_SECRET_KEY: 'private-canary',
+    },
+  ]) {
+    it('refuses incomplete or conflicting selection with a closed error', async () => {
+      await expect(selected({ ...ready, ...override })).rejects.toThrow(
+        'Durable workflow configuration is unavailable.'
+      )
+    })
+  }
+})
