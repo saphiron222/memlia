@@ -108,7 +108,7 @@ PY
 import json,sys
 from pathlib import Path
 for path in sorted(Path(sys.argv[1]).glob('*.json')):
-    if path.name=='chat-ui.json':
+    if path.name in ('chat-ui.json','ui-readiness.json','ui-service-web.json','ui-service-realtime.json','ui-service-cache.json'):
         import os,stat
         if Path(sys.argv[1]).is_symlink() or path.is_symlink(): raise SystemExit('Invalid UI receipt')
         fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
@@ -117,11 +117,23 @@ for path in sorted(Path(sys.argv[1]).glob('*.json')):
             data=f.read(4097)
         if len(data)>4096: raise SystemExit('Invalid UI receipt')
         receipt=json.loads(data)
-        flags={'authenticated','socket','workflow','canvas','chatRefused','browserClosed'}
-        if type(receipt)is not dict or set(receipt)!=flags|{'status','reason'}: raise SystemExit('Invalid UI receipt')
-        if any(type(receipt[k])is not bool for k in flags): raise SystemExit('Invalid UI receipt')
-        if receipt['status'] not in ('passed','failed') or receipt['reason'] not in (None,'cleanup_failed','journey_failed'): raise SystemExit('Invalid UI receipt')
-        if (receipt['status']=='passed') != (receipt['reason'] is None and all(receipt[k] for k in flags)): raise SystemExit('Invalid UI receipt')
+        if type(receipt)is not dict:raise SystemExit('Invalid UI receipt')
+        if path.name=='chat-ui.json':
+            flags={'authenticated','socket','workflow','canvas','chatRefused','browserClosed'}
+            if set(receipt)!=flags|{'status','reason'}: raise SystemExit('Invalid UI receipt')
+            if any(type(receipt[k])is not bool for k in flags): raise SystemExit('Invalid UI receipt')
+            if receipt['status'] not in ('passed','failed') or receipt['reason'] not in (None,'cleanup_failed','journey_failed'): raise SystemExit('Invalid UI receipt')
+            if (receipt['status']=='passed') != (receipt['reason'] is None and all(receipt[k] for k in flags)): raise SystemExit('Invalid UI receipt')
+        elif path.name=='ui-readiness.json':
+            if set(receipt)!={'phase','status','service','httpStatus','errorClass'} or receipt['phase']!='ui-readiness':raise SystemExit('Invalid UI receipt')
+            if receipt['status'] not in ('passed','failed') or receipt['service'] not in ('realtime','web'):raise SystemExit('Invalid UI receipt')
+            if receipt['httpStatus'] is not None and (type(receipt['httpStatus'])is not int or not 100<=receipt['httpStatus']<=599):raise SystemExit('Invalid UI receipt')
+            if receipt['errorClass'] not in (None,'timeout','connection','http','os','unexpected'):raise SystemExit('Invalid UI receipt')
+            if receipt['status']=='passed' and (receipt['service']!='web' or receipt['httpStatus']!=200 or receipt['errorClass']is not None):raise SystemExit('Invalid UI receipt')
+        else:
+            if set(receipt)!={'phase','service','running','oomKilled','errorPresent'} or receipt['phase']!='ui-service-state':raise SystemExit('Invalid UI receipt')
+            if receipt['service'] not in ('web','realtime','cache') or path.name!='ui-service-'+receipt['service']+'.json':raise SystemExit('Invalid UI receipt')
+            if any(type(receipt[k])is not bool for k in ('running','oomKilled','errorPresent')):raise SystemExit('Invalid UI receipt')
     else: receipt=json.loads(path.read_text())
     print(json.dumps(receipt,sort_keys=True))
 PY
@@ -410,19 +422,37 @@ PYUI
   current_stage=ui_readiness
   local readiness_seconds
   readiness_seconds="$(ui_remaining 180 150)" || return 1
-  python3 - "$readiness_seconds" <<'PYUI'
-import http.client,time,sys
+  python3 - "$readiness_seconds" "$metrics/ui-readiness.json" <<'PYUI'
+import http.client,json,time,sys
+from pathlib import Path
 end=time.monotonic()+int(sys.argv[1])
-for port,path in ((3002,'/health'),(3000,'/login')):
-    while True:
-        if time.monotonic()>=end: raise SystemExit('UI readiness unavailable')
-        c=http.client.HTTPConnection('localhost',port,timeout=min(2,end-time.monotonic()))
-        try:
-            c.request('GET',path);r=c.getresponse()
-            if r.status==200:break
-        except (OSError,TimeoutError):pass
-        finally:c.close()
-        time.sleep(.5)
+receipt={'phase':'ui-readiness','status':'failed','service':'realtime','httpStatus':None,'errorClass':None}
+def error_class(error):
+    if isinstance(error,TimeoutError):return 'timeout'
+    if isinstance(error,ConnectionError):return 'connection'
+    if isinstance(error,http.client.HTTPException):return 'http'
+    if isinstance(error,OSError):return 'os'
+    return 'unexpected'
+try:
+    for service,port,path in (('realtime',3002,'/health'),('web',3000,'/login')):
+        receipt.update(service=service,httpStatus=None,errorClass=None)
+        while True:
+            if time.monotonic()>=end: raise SystemExit(1)
+            c=http.client.HTTPConnection('localhost',port,timeout=min(2,end-time.monotonic()))
+            try:
+                c.request('GET',path);r=c.getresponse()
+                if type(r.status)is not int or not 100<=r.status<=599:raise http.client.HTTPException()
+                receipt.update(httpStatus=r.status,errorClass=None)
+                if r.status==200:break
+            except (OSError,TimeoutError) as error:receipt['errorClass']=error_class(error)
+            finally:c.close()
+            time.sleep(.5)
+    receipt['status']='passed'
+except Exception as error:
+    receipt['errorClass']=error_class(error)
+    raise SystemExit(1) from None
+finally:
+    Path(sys.argv[2]).write_text(json.dumps(receipt,sort_keys=True)+'\n')
 PYUI
   current_stage=ui_browser
   # No inherited app environment, keys or DSNs in the host browser process.
@@ -499,9 +529,15 @@ ui_stop_owned() {
   ui_owns "$name" || return 1
   # An owned service that already died/OOMed cannot become a successful journey.
   ui_docker inspect --format '{{json .State}}' "$name" > "$private/ui-state.json" || ok=0
-  python3 - "$private/ui-state.json" <<'PYUI' || ok=0
+  local mode="${name#"$prefix-ui-"}"
+  python3 - "$private/ui-state.json" "$mode" "$metrics/ui-service-$mode.json" <<'PYUI' || ok=0
 import json,sys
-s=json.load(open(sys.argv[1]));assert s['Running'] and not s['OOMKilled'] and not s['Error']
+from pathlib import Path
+s=json.load(open(sys.argv[1]));mode=sys.argv[2]
+assert mode in ('web','realtime','cache') and type(s['Running'])is bool and type(s['OOMKilled'])is bool and type(s['Error'])is str
+Path(sys.argv[3]).write_text(json.dumps({'phase':'ui-service-state','service':mode,'running':s['Running'],
+    'oomKilled':s['OOMKilled'],'errorPresent':bool(s['Error'])},sort_keys=True)+'\n')
+assert s['Running'] and not s['OOMKilled'] and not s['Error']
 PYUI
   ui_docker stop --time 5 "$name" > /dev/null 2>&1 || ok=0
   [[ "$ok" == 1 ]]

@@ -110,7 +110,7 @@ class ReviewRegressions(unittest.TestCase):
         for running,oom,owned,expected in [(True,False,True,0),(False,False,True,1),(True,True,True,1),(True,False,False,1)]:
             with self.subTest(running=running,oom=oom,owned=owned), tempfile.TemporaryDirectory() as d:
                 state=json.dumps({'Running':running,'OOMKilled':oom,'Error':''})
-                script='ui_deadline=1200; ui_seeded=1; ui_resources=(); ui_cache_started=1; prefix=owned; private="$1"; state="$2"; owned="$3"\nui_owns() { [[ "$owned" == 1 ]]; }\nui_docker() { printf \'%s %s\\n\' "$1" "${@: -1}" >> "$private/events"; if [[ "$1" == inspect ]]; then printf \'%s\' "$state"; fi; }\nphase() { printf \'%s\\n\' "$1" >> "$private/events"; }\n'+functions+'\nui_close; result=$?; cat "$private/events"; exit "$result"'
+                script='ui_deadline=1200; ui_seeded=1; ui_resources=(); ui_cache_started=1; prefix=owned; private="$1"; metrics="$1"; state="$2"; owned="$3"\nui_owns() { [[ "$owned" == 1 ]]; }\nui_docker() { printf \'%s %s\\n\' "$1" "${@: -1}" >> "$private/events"; if [[ "$1" == inspect ]]; then printf \'%s\' "$state"; fi; }\nphase() { printf \'%s\\n\' "$1" >> "$private/events"; }\n'+functions+'\nui_close; result=$?; cat "$private/events"; exit "$result"'
                 run=subprocess.run(['bash','-c',script,'test',d,state,'1' if owned else '0'],capture_output=True,text=True,timeout=5)
                 self.assertEqual(run.returncode,expected)
                 events=run.stdout.splitlines()
@@ -189,5 +189,94 @@ ui_close() { current_stage=phase_ui-readback; return 0; }
                 self.assertEqual(receipt['stage'],expected)
                 self.assertEqual(receipt['exitCode'],17)
                 self.assertEqual(receipt['status'],'failed')
+
+class UIReadinessDiagnostics(unittest.TestCase):
+    def readiness(self, statuses, error=None):
+        source=(HERE/'run-linux-build.sh').read_text()
+        block=source.split('  python3 - "$readiness_seconds"',1)[1].split("<<'PYUI'\n",1)[1].split('\nPYUI',1)[0]
+        with tempfile.TemporaryDirectory() as temporary:
+            target=Path(temporary)/'readiness.json'
+            # The production HTTP loop is intact; no host listener, Docker or real time wait.
+            prefix="""import http.client,json,sys,time
+clock=[0.0]
+time.monotonic=lambda:clock[0]
+time.sleep=lambda seconds:clock.__setitem__(0,clock[0]+seconds)
+class Connection:
+    def __init__(self,host,port,timeout):self.port=port
+    def request(self,*args):
+        if probe_error_type is not None:raise probe_error_type('PRIVATE_CANARY_body_or_url')
+    def getresponse(self):return type('Response',(),{'status':statuses[str(self.port)]})()
+    def close(self):pass
+http.client.HTTPConnection=Connection
+"""
+            setup='import http.client\nstatuses='+repr(statuses)+'\nprobe_error_type='+('None' if error is None else error)+'\n'
+            run=subprocess.run([__import__('sys').executable,'-c',setup+prefix+block,'1',str(target)],capture_output=True,text=True,timeout=5)
+            return run,json.loads(target.read_text()) if target.exists() else None
+
+    def test_success_names_the_last_service_and_records_only_closed_http_fields(self):
+        run,receipt=self.readiness({'3002':200,'3000':200})
+        self.assertEqual(run.returncode,0)
+        self.assertEqual(receipt,dict(phase='ui-readiness',status='passed',service='web',httpStatus=200,errorClass=None))
+
+    def test_failure_identifies_the_exact_service_and_last_http_status(self):
+        for statuses,service in [({'3002':503,'3000':200},'realtime'),({'3002':200,'3000':401},'web')]:
+            with self.subTest(service=service):
+                run,receipt=self.readiness(statuses)
+                self.assertNotEqual(run.returncode,0)
+                self.assertEqual(receipt,dict(phase='ui-readiness',status='failed',service=service,httpStatus=statuses['3002' if service=='realtime' else '3000'],errorClass=None))
+                self.assertNotIn('PRIVATE_CANARY',run.stdout+run.stderr)
+
+    def test_transport_classes_never_print_exception_messages(self):
+        for error,kind in [('TimeoutError','timeout'),('ConnectionRefusedError','connection'),('http.client.HTTPException','http'),('OSError','os'),('RuntimeError','unexpected')]:
+            with self.subTest(kind=kind):
+                run,receipt=self.readiness({'3002':200,'3000':200},error)
+                self.assertNotEqual(run.returncode,0)
+                self.assertIsNotNone(receipt)
+                self.assertEqual(receipt['errorClass'],kind)
+                self.assertIsNone(receipt['httpStatus'])
+                self.assertEqual(receipt['service'],'realtime')
+                self.assertNotIn('PRIVATE_CANARY',run.stdout+run.stderr)
+
+    def test_service_state_is_observed_only_after_identity_check_and_before_stop(self):
+        source=(HERE/'run-linux-build.sh').read_text()
+        function=source[source.index('ui_stop_owned() {'):source.index('run_product_phases() {')]
+        for mode,running,oom,error,owned,expected in [('web',True,False,'',True,0),('realtime',False,False,'',True,1),('cache',True,True,'PRIVATE_CANARY',True,1),('web',True,False,'',False,1)]:
+            with self.subTest(mode=mode,owned=owned),tempfile.TemporaryDirectory() as temporary:
+                root=Path(temporary);metrics=root/'metrics';metrics.mkdir()
+                state=json.dumps({'Running':running,'OOMKilled':oom,'Error':error})
+                setup='prefix=owned; private="$1"; metrics="$1/metrics"; state="$2"; owned="$3"\nui_owns() { [[ "$owned" == 1 ]]; }\nui_docker() { if [[ "$1" == inspect ]]; then printf "%s" "$state"; else printf stop >> "$private/stop"; fi; }\n'
+                run=subprocess.run(['bash','-c',setup+function+'\nui_stop_owned "$4"','state-test',temporary,state,'1' if owned else '0','owned-ui-'+mode],capture_output=True,text=True,timeout=5)
+                self.assertEqual(run.returncode,expected)
+                target=metrics/('ui-service-'+mode+'.json')
+                self.assertEqual(target.exists(),owned)
+                if owned:self.assertEqual(json.loads(target.read_text()),dict(phase='ui-service-state',service=mode,running=running,oomKilled=oom,errorPresent=bool(error)))
+                self.assertEqual((root/'stop').exists(),owned)
+                self.assertNotIn('PRIVATE_CANARY',run.stdout+run.stderr)
+
+class ClosedReadinessPublication(unittest.TestCase):
+    def emit(self, name, value=None, raw=None, link=False):
+        source=(HERE/'run-linux-build.sh').read_text()
+        code=source.split('  # Only our fixed-schema JSON receipts are shown; no raw build logs/artifacts.\n',1)[1].split("<<'PY' || receipt_ok=0\n",1)[1].split('\nPY',1)[0]
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);metrics=root/'metrics';metrics.mkdir();target=metrics/name
+            if link:
+                (root/'foreign').write_text(json.dumps(value));target.symlink_to(root/'foreign')
+            else:target.write_text(raw if raw is not None else json.dumps(value))
+            return subprocess.run([__import__('sys').executable,'-c',code,str(metrics)],capture_output=True,text=True,timeout=5)
+
+    def test_readiness_and_service_states_cross_only_the_fixed_projection(self):
+        examples=[('ui-readiness.json',dict(phase='ui-readiness',status='failed',service='realtime',httpStatus=503,errorClass=None)),
+                  ('ui-service-web.json',dict(phase='ui-service-state',service='web',running=True,oomKilled=False,errorPresent=False))]
+        for name,value in examples:
+            with self.subTest(name=name):
+                run=self.emit(name,value);self.assertEqual(run.returncode,0);self.assertEqual(json.loads(run.stdout),value)
+                for bad in [{**value,'body':'PRIVATE_CANARY'},{**value,'phase':'PRIVATE_CANARY'},
+                            {**value,'httpStatus':True} if name=='ui-readiness.json' else {**value,'running':1},
+                            {**value,'service':'PRIVATE_CANARY'},
+                            {**value,'status':'passed'} if name=='ui-readiness.json' else {**value,'service':'cache'}]:
+                    with self.subTest(fields=tuple(bad)):
+                        rejected=self.emit(name,bad);self.assertNotEqual(rejected.returncode,0);self.assertNotIn('PRIVATE_CANARY',rejected.stdout+rejected.stderr)
+                self.assertNotEqual(self.emit(name,raw=' '*4097).returncode,0)
+                self.assertNotEqual(self.emit(name,value,link=True).returncode,0)
 
 if __name__=='__main__':unittest.main()
