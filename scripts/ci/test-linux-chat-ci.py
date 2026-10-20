@@ -118,4 +118,76 @@ class ReviewRegressions(unittest.TestCase):
                 if owned:self.assertEqual(events[2:],['inspect owned-ui-cache','stop owned-ui-cache'])
                 else:self.assertEqual(len(events),2)
 
+
+class UIServiceDiagnostics(unittest.TestCase):
+    def run_cleanup(self, stage):
+        source=(HERE/'run-linux-build.sh').read_text()
+        cleanup=source[source.index('cleanup() {'):source.index('trap cleanup EXIT')]
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d);(p/'metrics').mkdir();(p/'memlia-build.test').mkdir()
+            script=('set -eo pipefail\nRUNNER_TEMP="$1"; metrics="$1/metrics"; private="$1/memlia-build.test"\n'
+                    'containers=(); network_created=0; completed=0; next_started=1; standalone_verified=1\n'
+                    'ui_selected=1; ui_verified=0; ui_seeded=0; ui_resources=(); current_stage="$2"\n'
+                    'ui_close() { current_stage=phase_ui-readback; return 0; }\n'
+                    +cleanup+'\ntrap cleanup EXIT\nexit 17\n')
+            run=subprocess.run(['bash','-c',script,'stage-test',d,stage],capture_output=True,text=True,timeout=5)
+            target=p/'metrics/result.json'
+            return run,json.loads(target.read_text()) if target.exists() else None
+
+    def test_cleanup_keeps_primary_failure_stage_before_native_readback(self):
+        run,receipt=self.run_cleanup('ui_services')
+        self.assertNotEqual(run.returncode,0)
+        self.assertEqual(receipt['stage'],'ui_services')
+        self.assertEqual(receipt['exitCode'],17)
+        self.assertEqual(receipt['status'],'failed')
+        self.assertTrue(receipt['cleanup'])
+
+    def test_unknown_primary_stage_refuses_closed_receipt_without_leaking_value(self):
+        run,receipt=self.run_cleanup('ui_PRIVATE_CANARY_stage')
+        self.assertNotEqual(run.returncode,0);self.assertIsNone(receipt)
+        self.assertNotIn('PRIVATE_CANARY',run.stdout+run.stderr)
+
+    def test_each_real_service_boundary_keeps_its_fixed_failure_stage(self):
+        source=(HERE/'run-linux-build.sh').read_text()
+        command=source.index('  ui_docker network create --internal')
+        start=source.rfind('\n  current_stage=',0,command)+1
+        block=source[start:source.index('  current_stage=ui_readiness',command)]
+        cleanup=source[source.index('cleanup() {'):source.index('trap cleanup EXIT')]
+        # The shell fragment is native. Only external Docker/inspect calls are doubled.
+        steps={'network_create':'ui_network_create','network_connect':'ui_network_connect',
+               'network_identity':'ui_network_identity','cache_pull':'ui_cache_pull',
+               'cache_start':'ui_cache_start','cache_inspect':'ui_cache_inspect',
+               'realtime':'ui_realtime','web':'ui_web'}
+        for failure,expected in steps.items():
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as d:
+                p=Path(d);(p/'metrics').mkdir();(p/'memlia-build.test').mkdir()
+                setup=r"""set -eo pipefail
+RUNNER_TEMP="$1"; metrics="$1/metrics"; private="$1/memlia-build.test"; failure="$2"; prefix=owned
+containers=(); network_created=0; completed=0; next_started=1; standalone_verified=1
+ui_selected=1; ui_verified=0; ui_seeded=0; ui_resources=(); current_stage=phase_ui-stage
+step() { [[ "$failure" != "$1" ]] || return 17; }
+ui_docker() {
+  case "$1 $2" in
+    'network create') step network_create; printf networkid;;
+    'network connect') step network_connect;;
+    'pull --platform') step cache_pull;;
+    'run -d') step cache_start; printf '%064d\n' 0;;
+    *) return 91;;
+  esac
+}
+python3() { if [[ "${2:-}" == "$private" ]]; then step network_identity; else command python3 "$@"; fi; }
+ui_owns() { return 0; }
+ui_inspect() { step cache_inspect; }
+ui_service() { step "$1"; }
+docker() { if [[ "$1 $2" == 'network inspect' ]]; then printf 'networkid owned'; fi; }
+ui_close() { current_stage=phase_ui-readback; return 0; }
+"""
+                script=setup+cleanup+'\ntrap cleanup EXIT\nservices() {\n'+block+'\n}\nservices\n'
+                run=subprocess.run(['bash','-c',script,'services-test',d,failure],capture_output=True,text=True,timeout=5)
+                self.assertNotEqual(run.returncode,0)
+                receipt=json.loads((p/'metrics/result.json').read_text())
+                self.assertEqual(receipt['stage'],expected)
+                self.assertEqual(receipt['exitCode'],17)
+                self.assertEqual(receipt['status'],'failed')
+
 if __name__=='__main__':unittest.main()

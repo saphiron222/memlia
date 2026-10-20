@@ -42,6 +42,7 @@ database_ready_exit_code=''
 database_init_exit_code=''
 cleanup() {
   result=$?
+  local -r primary_stage="${current_stage:-bootstrap}"
   trap - EXIT INT TERM
   set +e
   cleanup_ok=1
@@ -69,7 +70,7 @@ cleanup() {
     cleanup_ok=0
   fi
   python3 - "$metrics/result.json" "$result" "$completed" "$cleanup_ok" \
-    "${current_stage:-bootstrap}" "${database_ready_exit_code:-}" "${database_init_exit_code:-}" \
+    "$primary_stage" "${database_ready_exit_code:-}" "${database_init_exit_code:-}" \
     "${scope:-build}" "${next_started:-0}" "${standalone_verified:-0}" "${ui_selected:-0}" "${ui_verified:-0}" <<'PY' || receipt_ok=0
 import json,sys
 from pathlib import Path
@@ -84,6 +85,8 @@ allowed={'bootstrap','host','pull_node','pull_database','download_bun','verify_b
          'phase_test','phase_install','toolchain','phase_inventory','phase_typegen','phase_typecheck',
          'phase_cli','phase_sandbox','phase_config','phase_next','phase_standalone','completed','validation_completed'}
 allowed.update({'ui_browser_install','ui_prepare','ui_services','ui_readiness','ui_browser',*[f'phase_ui-{p}' for p in ('bootstrap','migrate','grants','metadata','baseline','seed','stage','cleanup','readback')]})
+allowed.update({'ui_network_create','ui_network_connect','ui_network_identity','ui_cache_pull',
+                'ui_cache_start','ui_cache_inspect','ui_realtime','ui_web'})
 ui_selected,ui_verified=map(int,sys.argv[11:13]);assert ui_selected in (0,1) and ui_verified in (0,1)
 scope=sys.argv[8]; next_started,standalone=map(int,sys.argv[9:11])
 assert stage in allowed and completed in (0,1) and cleanup in (0,1), 'Invalid fixed build diagnostic'
@@ -376,10 +379,12 @@ from pathlib import Path
 s=importlib.util.spec_from_file_location("smoke","/work/scripts/ci/linux-standalone-smoke.py");m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
 a=Path("/work/apps/sim");m.verify_artifacts(a,True);p=Path("/scratch/ui-stage");p.mkdir();m.stage_artifacts(a,p)
 '
-  current_stage=ui_services
+  current_stage=ui_network_create
   ui_docker network create --internal --label "org.memlia.ci=$prefix" "$prefix-ui" > "$private/ui-network.log" 2>&1
   ui_network_created=1
+  current_stage=ui_network_connect
   ui_docker network connect --alias database "$prefix-ui" "$prefix-database" > "$private/ui-network-connect.log" 2>&1
+  current_stage=ui_network_identity
   python3 - "$private" "$prefix-ui" <<'PYUI'
 import json,subprocess,sys
 from pathlib import Path
@@ -390,12 +395,17 @@ assert all(c in '0123456789.' for c in gateway)
 f=p/'ui/credentials.private.json';value=json.loads(f.read_text());value['socketBucketKeys']=['route:socket-token-ip:ip:'+gateway,'route:socket-token-ip:ip:::ffff:'+gateway];f.write_text(json.dumps(value)+'\n')
 PYUI
   local cache_image='valkey/valkey:8.1.10-alpine@sha256:081c2f5cb575efc901aa80ff9cdbd1ec6a301682fd35e1ebb4b0990a4a4a8507'
+  current_stage=ui_cache_pull
   ui_docker pull --platform linux/amd64 "$cache_image" > "$private/ui-cache-pull.log" 2>&1
+  current_stage=ui_cache_start
   containers+=("$prefix-ui-cache"); ui_cache_started=1
   ui_docker run -d --name "$prefix-ui-cache" --label "org.memlia.ci=$prefix" --network "$prefix-ui" --network-alias valkey --memory 128m --memory-swap 128m --cpus .5 --pids-limit 64 --read-only --tmpfs /data:rw,noexec,nosuid,nodev,size=64m --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges:true "$cache_image" valkey-server --save '' --appendonly no > "$private/ui-cache-start.log" 2> "$private/ui-cache-start-error.log"
+  current_stage=ui_cache_inspect
   ui_owns "$prefix-ui-cache"
   ui_inspect cache 134217728 500000000 64 1000:1000
+  current_stage=ui_realtime
   ui_service realtime 256m .5 96 /work/apps/realtime 3002 bun --no-env-file --tsconfig-override /work/apps/realtime/tsconfig.json src/index.ts
+  current_stage=ui_web
   ui_service web 5g 2 256 /scratch/ui-stage/apps/sim 3000 node server.js
   current_stage=ui_readiness
   local readiness_seconds
