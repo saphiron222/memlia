@@ -34,6 +34,7 @@ const {
   mockEnqueueWorkflowDeploymentPreparation,
   mockProcessWorkflowDeploymentOutboxEvent,
   mockNotifySocketDeploymentChanged,
+  mockCaptureWorkflowExcelDeploymentSnapshot,
   mockTx,
 } = vi.hoisted(() => ({
   mockValidateWorkflowSchedules: vi.fn(),
@@ -46,6 +47,7 @@ const {
   mockEnqueueWorkflowDeploymentPreparation: vi.fn(),
   mockProcessWorkflowDeploymentOutboxEvent: vi.fn(),
   mockNotifySocketDeploymentChanged: vi.fn(),
+  mockCaptureWorkflowExcelDeploymentSnapshot: vi.fn(),
   /**
    * Sentinel transaction handle the mocked prepare functions hand to the real
    * onPrepareTransaction callback, which only forwards it into the (mocked)
@@ -69,6 +71,11 @@ vi.mock('@/lib/workflows/persistence/deployment-operations', () => ({
   getDeploymentOperation: mockGetDeploymentOperation,
   prepareWorkflowDeployment: mockPrepareWorkflowDeployment,
   prepareWorkflowVersionActivation: mockPrepareWorkflowVersionActivation,
+  setDeploymentTxTimeouts: vi.fn().mockResolvedValue(undefined),
+}))
+
+vi.mock('@/lib/workflows/persistence/excel-deployment-snapshots', () => ({
+  captureWorkflowExcelDeploymentSnapshot: mockCaptureWorkflowExcelDeploymentSnapshot,
 }))
 
 vi.mock('@/lib/workspace-events/emitter', () => ({
@@ -207,6 +214,7 @@ describe('performRevertToVersion', () => {
 describe('performFullDeploy workspace event emission', () => {
   beforeEach(() => {
     resetDbChainMock()
+    mockCaptureWorkflowExcelDeploymentSnapshot.mockResolvedValue(null)
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status: 200 })))
     const now = new Date('2026-07-14T08:00:00.000Z')
     const operation = {
@@ -308,6 +316,79 @@ describe('performFullDeploy workspace event emission', () => {
       },
       warnings: [expect.stringContaining('historical')],
     })
+  })
+
+  it('publishes a fresh Excel draft through the native snapshot deployment and outbox', async () => {
+    const actual = await vi.importActual<
+      typeof import('@/lib/workflows/persistence/excel-deployment-snapshots')
+    >('@/lib/workflows/persistence/excel-deployment-snapshots')
+    mockCaptureWorkflowExcelDeploymentSnapshot.mockImplementationOnce(
+      actual.captureWorkflowExcelDeploymentSnapshot
+    )
+    const { plan } = excelDeploymentInput()
+    queueTableRows(schemaMock.workflow, [
+      { workspaceId: 'space', draftRevision: 7, variables: {}, archivedAt: null },
+    ])
+    queueTableRows(schemaMock.workflow, [{ workspaceId: 'space', draftRevision: 7 }])
+    queueTableRows(schemaMock.workspace, [{ organizationId: null, archivedAt: null }])
+    queueTableRows(schemaMock.workflowBlocks, [
+      { ...plan.workflowState.blocks.excel, positionX: 0, positionY: 0, height: 100 },
+    ])
+    queueTableRows(schemaMock.workflowEdges, [])
+    queueTableRows(schemaMock.workflowSubflows, [])
+
+    const result = await performFullDeploy({
+      workflowId: 'workflow-1',
+      userId: 'user-1',
+      actor: { kind: 'session', userId: 'author' },
+      assertedWorkspaceId: 'space',
+      idempotencyKey: 'publish-excel',
+      requestId: 'request-excel',
+    })
+
+    expect(result).toMatchObject({ success: true, deploymentVersionId: 'dv-1', version: 4 })
+    const admitted = mockPrepareWorkflowDeployment.mock.calls[0][0]
+    expect(admitted).toHaveProperty('excelProcedureSnapshot')
+    expect(readExcelProcedureSnapshotCapture(admitted.excelProcedureSnapshot)).toMatchObject({
+      scope: { organizationId: null, workspaceId: 'space', workflowId: 'workflow-1' },
+      expectedRevision: 7,
+    })
+    expect(mockLoadWorkflowDeploymentSnapshot).not.toHaveBeenCalled()
+    expect(mockProcessWorkflowDeploymentOutboxEvent).toHaveBeenCalledWith('prepare-event-default')
+  })
+
+  it('does not finish or process an Excel deployment refused by the native CAS', async () => {
+    const { args } = excelDeploymentInput()
+    mockCaptureWorkflowExcelDeploymentSnapshot.mockResolvedValueOnce({
+      workflowState: args.workflowState,
+      excelProcedureSnapshot: args.excelProcedureSnapshot,
+      workspaceId: 'space',
+    })
+    mockPrepareWorkflowDeployment.mockResolvedValueOnce({
+      success: false,
+      reason: 'invalid_request',
+      error: 'Excel deployment snapshot refused',
+    })
+    const result = await performFullDeploy({
+      workflowId: 'workflow-1',
+      userId: 'user-1',
+      actor: { kind: 'session', userId: 'author' },
+      assertedWorkspaceId: 'space',
+    })
+    expect(result).toMatchObject({ success: false, errorCode: 'validation' })
+    expect(mockLoadWorkflowDeploymentSnapshot).not.toHaveBeenCalled()
+    expect(mockProcessWorkflowDeploymentOutboxEvent).not.toHaveBeenCalled()
+    expect(mockEnqueueWorkflowDeploymentPreparation).not.toHaveBeenCalled()
+  })
+
+  it('refuses an Excel block added between non-Excel observation and the legacy loader', async () => {
+    mockLoadWorkflowDeploymentSnapshot.mockResolvedValueOnce(
+      excelDeploymentInput().args.workflowState
+    )
+    const result = await performFullDeploy({ workflowId: 'workflow-1', userId: 'user-1' })
+    expect(result).toMatchObject({ success: false, errorCode: 'validation' })
+    expect(mockPrepareWorkflowDeployment).not.toHaveBeenCalled()
+    expect(mockEnqueueWorkflowDeploymentPreparation).not.toHaveBeenCalled()
   })
 
   it('does not reuse a correlation request ID as an implicit idempotency key', async () => {

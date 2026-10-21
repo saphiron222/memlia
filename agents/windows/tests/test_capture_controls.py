@@ -17,6 +17,15 @@ OBSERVED = SessionObservation('S-1-5-21-111-222-333-1001', 1, 1)
 DIGEST = 'sha256:' + 'a' * 64
 
 
+class DialogFactoryTests(unittest.TestCase):
+    def test_default_factory_remains_the_exact_native_capture_dialog(self):
+        owner = object.__new__(controls._CaptureControls)
+        expected = object()
+        with patch.object(controls, '_TaskDialog', return_value=expected) as factory:
+            self.assertIs(owner._make_dialog(), expected)
+        factory.assert_called_once_with()
+
+
 class _Mutex:
     def release(self, handle):
         pass

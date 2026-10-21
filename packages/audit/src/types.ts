@@ -1,3 +1,4 @@
+// Modified by Memlia in 2026: add distinct desktop-agent enrollment audit actions.
 /**
  * All auditable actions in the platform, grouped by resource type.
  */
@@ -71,6 +72,10 @@ export const AuditAction = {
   /** A desktop's background executor taking, then reporting on, a chat's action on the machine. */
   DESKTOP_TOOL_CALL_CLAIMED: 'desktop_tool_call.claimed',
   DESKTOP_TOOL_CALL_COMPLETED: 'desktop_tool_call.completed',
+  DESKTOP_AGENT_ENROLLMENT_CREATED: 'desktop_agent_enrollment.created',
+  DESKTOP_AGENT_ENROLLMENT_REVOKED: 'desktop_agent_enrollment.revoked',
+  DESKTOP_AGENT_ENROLLMENT_ISSUED: 'desktop_agent_enrollment.issued',
+  DESKTOP_AGENT_ENROLLMENT_ISSUANCE_UNKNOWN: 'desktop_agent_enrollment.issuance_unknown',
 
   DOCUMENT_UPLOADED: 'document.uploaded',
   DOCUMENT_UPDATED: 'document.updated',

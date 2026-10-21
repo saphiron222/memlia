@@ -495,5 +495,332 @@ class OwnedJobTests(unittest.TestCase):
                 load.assert_not_called()
 
 
+
+
+class BoundedIOTests(unittest.TestCase):
+    module = OwnedJobTests.module
+    request = OwnedJobTests.request
+    """IO lifecycle is simulated; no Win32 pipe has been opened on this host."""
+    def test_io_configuration_is_finite_and_never_prints_input(self):
+        m = self.module()
+        for kwargs in ({'stdin': bytearray(b'x')}, {'stdin': b'x' * (262144 + 1)},
+                       {'stdout_limit': True}, {'stderr_limit': 0}, {'stdout_limit': 1048577}):
+            with self.subTest(kwargs=tuple(kwargs)):
+                with self.assertRaises(m.JobError):
+                    m.JobIO(**kwargs)
+        spec = m.JobIO(stdin=b'PRIVATE_INPUT', stdout_limit=20, stderr_limit=20)
+        self.assertNotIn('PRIVATE_INPUT', repr(spec))
+        with patch.object(m, '_Kernel') as kernel:
+            job = m.OwnedJob(**self.request(io=spec))
+            self.assertIsNotNone(job)
+            kernel.assert_not_called()
+
+    def test_real_io_state_machine_caps_cumulative_even_after_drain(self):
+        m = self.module()
+        io = m._PipeIO(m.JobIO(stdin=b'', stdout_limit=3, stderr_limit=3))
+        io._accept('stdout', b'ab')
+        self.assertEqual(io.take().stdout, b'ab')
+        io._accept('stdout', b'c')
+        with self.assertRaises(m._OutputLimit):
+            io._accept('stdout', b'd')
+        self.assertEqual(io.take().stdout, b'c')
+        self.assertEqual(io.counts['stdout'], 3)
+
+    def test_io_requires_drain_not_only_zero_exit_and_cleanup_cancels(self):
+        m, native = self.module(), _FakeKernel()
+        class Pipes:
+            done = False
+            def open(self): native.call('io_open')
+            def startup(self): native.call('io_startup'); return object()
+            def transferred(self): native.call('io_transferred')
+            def pump(self): native.call('io_pump')
+            def close(self, until): native.call('io_close'); return True
+            def take(self): return m.JobOutput(b'', b'', False, False, False)
+        pipes = Pipes()
+        def create(*args):
+            native.call('create_io_process')
+            return 12, 13, 77
+        native.create_process_io = create
+        with patch.object(m, '_Kernel', return_value=native), patch.object(m, '_PipeIO', return_value=pipes):
+            job = m.OwnedJob(**self.request(io=m.JobIO(stdin=b'x')))
+            job.start()
+            names = [x[0] for x in native.calls]
+            self.assertLess(names.index('io_transferred'), names.index('resume'))
+            self.assertLess(names.index('assign'), names.index('resume'))
+            native.active, native.root_done = 0, True
+            self.assertFalse(job.poll().io_complete)
+            pipes.done = True
+            self.assertTrue(job.poll().io_complete)
+            self.assertTrue(job.cleanup())
+            self.assertEqual(sum(x[0] == 'io_close' for x in native.calls), 1)
+
+    def test_overflow_interrupt_and_cancel_failure_never_become_complete(self):
+        m = self.module()
+        for error in (m._OutputLimit(), OSError('PRIVATE'), KeyboardInterrupt()):
+            native = _FakeKernel()
+            class Pipes:
+                done = False
+                def open(self): pass
+                def startup(self): return object()
+                def transferred(self): pass
+                def pump(self): raise error
+                def close(self, until): return False
+            native.create_process_io = lambda *args: (12, 13, 77)
+            with patch.object(m, '_Kernel', return_value=native), patch.object(m, '_PipeIO', return_value=Pipes()):
+                job = m.OwnedJob(**self.request(io=m.JobIO()))
+                job.start()
+                with self.assertRaises(KeyboardInterrupt if isinstance(error, KeyboardInterrupt) else m.JobError):
+                    job.poll()
+                self.assertFalse(job.cleanup())
+                self.assertEqual(job._phase, 'hold')
+                self.assertNotIn(('close_11', 11), native.calls)
+
+
+class PipeABITests(unittest.TestCase):
+    """Real ctypes facade/state machine against a deterministic fake DLL only."""
+    module = OwnedJobTests.module
+
+    def fixture(self, **spec):
+        m = self.module()
+        calls, error, handles = [], [0], [100]
+        def fn(name, body):
+            def call(*args):
+                calls.append((name, args))
+                return body(*args)
+            return call
+        def handle(*args):
+            handles[0] += 1
+            return handles[0]
+        def fail(code):
+            error[0] = code
+            return 0
+        def initialize(address, count, flags, size):
+            if address is None:
+                ctypes.cast(size, ctypes.POINTER(ctypes.c_size_t)).contents.value = 128
+                return fail(122)
+            return 1
+        def client(handle, pid):
+            ctypes.cast(pid, ctypes.POINTER(m._U32)).contents.value = m.os.getpid()
+            return 1
+        bodies = dict(CreateNamedPipeW=handle, CreateFileW=handle, CreateEventW=handle,
+            ConnectNamedPipe=lambda *a: fail(535), GetNamedPipeClientProcessId=client,
+            SetHandleInformation=lambda *a: 1, InitializeProcThreadAttributeList=initialize,
+            UpdateProcThreadAttribute=lambda *a: 1, DeleteProcThreadAttributeList=lambda *a: None,
+            ReadFile=lambda *a: fail(997), WriteFile=lambda *a: fail(997),
+            GetOverlappedResult=lambda *a: fail(996), CancelIoEx=lambda *a: 1,
+            CloseHandle=lambda *a: 1)
+        dll = SimpleNamespace(**{name: fn(name, body) for name, body in bodies.items()})
+        io = m._PipeIO(m.JobIO(**spec))
+        return m, io, dll, calls, error
+
+    def completed_result(self, m):
+        def result(handle, ov, count, wait):
+            self.assertIs(wait, False)
+            ctypes.cast(count, ctypes.POINTER(m._U32)).contents.value = ctypes.cast(
+                ov, ctypes.POINTER(m._Overlapped)).contents.InternalHigh
+            return 1
+        return result
+
+    def native(self, m, dll, error):
+        from contextlib import ExitStack
+        stack = ExitStack()
+        stack.enter_context(patch.object(m.ctypes, 'WinDLL', return_value=dll, create=True))
+        stack.enter_context(patch.object(m.ctypes, 'get_last_error', side_effect=lambda: error[0], create=True))
+        return stack
+
+    def test_three_local_pipes_and_exact_handle_list_with_extended_startup(self):
+        m, io, dll, calls, error = self.fixture(stdin=b'\x00x')
+        with self.native(m, dll, error):
+            io.open()
+            startup = io.startup()
+            creates = [args for name, args in calls if name == 'CreateNamedPipeW']
+            self.assertEqual(len({a[0] for a in creates}), 3)
+            for args, access in zip(creates, (2, 1, 1)):
+                self.assertTrue(args[0].startswith('\\\\.\\pipe\\MemliaJobIO-'))
+                self.assertEqual(args[1:], (0x40080000 | access, 8, 1, 16384, 16384, 0, None))
+            for name, args in calls:
+                if name == 'CreateFileW':
+                    self.assertIsNone(args[3])  # Initially non-inheritable.
+                    self.assertEqual(args[4:], (3, 0, None))
+            update = next(args for name, args in calls if name == 'UpdateProcThreadAttribute')
+            self.assertEqual((update[1], update[2], update[4]), (0, 0x20002, 24))
+            inherited = list(update[3])
+            self.assertEqual(inherited, [c['child'] for c in io.channels.values()])
+            self.assertTrue(set(inherited).isdisjoint({c['parent'] for c in io.channels.values()}))
+            self.assertTrue(set(inherited).isdisjoint({c['event'] for c in io.channels.values()}))
+            self.assertEqual(ctypes.sizeof(m._StartupEx), 112)
+            self.assertEqual(m._StartupEx.lpAttributeList.offset, 104)
+            self.assertEqual(ctypes.sizeof(m._Overlapped), 32)
+            self.assertEqual(m._Overlapped.hEvent.offset, 24)
+            self.assertEqual(startup.StartupInfo.cb, 112)
+            self.assertEqual(startup.StartupInfo.dwFlags, 0x100)
+            kernel = object.__new__(m._Kernel)
+            create_args = []
+            def create(*args):
+                create_args.append(args)
+                info = ctypes.cast(args[-1], ctypes.POINTER(m._ProcessInfo)).contents
+                info.hProcess, info.hThread, info.dwProcessId = 900, 901, 902
+                return 1
+            kernel._create = create
+            self.assertEqual(kernel.create_process_io('exe', 'command', 'cwd', 'env\0\0', startup),
+                             (900, 901, 902))
+            self.assertEqual(create_args[0][4:6], (True, 0x08080404))
+            actual = ctypes.cast(create_args[0][-2], ctypes.POINTER(m._StartupEx)).contents
+            self.assertEqual(actual.lpAttributeList, ctypes.addressof(io.attributes))
+            io.transferred()
+            self.assertEqual([a[0] for n, a in calls if n == 'CloseHandle'], inherited)
+            self.assertTrue(io.close(time.monotonic() + 1))
+
+    def test_pending_buffers_survive_cancel_request_until_observed_completion(self):
+        m, io, dll, calls, error = self.fixture(stdin=b'private')
+        with self.native(m, dll, error):
+            io.open(); io.startup(); io.transferred(); io.pump()
+            buffers = [c['buffer'] for c in io.channels.values()]
+            overlaps = [c['overlap'] for c in io.channels.values()]
+            close_before = sum(n == 'CloseHandle' for n, a in calls)
+            self.assertFalse(io.close(time.monotonic() - 1))
+            self.assertEqual(sum(n == 'CloseHandle' for n, a in calls), close_before)
+            self.assertTrue(all(c['pending'] for c in io.channels.values()))
+            self.assertEqual([c['buffer'] for c in io.channels.values()], buffers)
+            self.assertEqual([c['overlap'] for c in io.channels.values()], overlaps)
+            self.assertFalse(io.done)
+            def aborted(*args): error[0] = 995; return 0
+            io.GetOverlappedResult = aborted
+            self.assertTrue(io.close(time.monotonic() + 1))
+            self.assertTrue(all(c['parent'] is None and c['event'] is None for c in io.channels.values()))
+            self.assertFalse(io.done)  # Cancellation is not complete transport.
+
+    def test_query_failure_is_not_a_completion_and_cancel_not_found_is_not_proof(self):
+        m, io, dll, calls, error = self.fixture(stdin=b'x')
+        with self.native(m, dll, error):
+            io.open(); io.transferred(); io.pump()
+            buffer = io.channels['stdin']['buffer']
+            def bad_query(*a): error[0] = 6; return 0
+            def not_found(*a): error[0] = 1168; return 0
+            io.GetOverlappedResult, io.CancelIoEx = bad_query, not_found
+            with self.assertRaises(m._NativeRefused): io.close(time.monotonic() + 1)
+            self.assertIs(io.channels['stdin']['buffer'], buffer)
+            self.assertTrue(io.channels['stdin']['pending'])
+            self.assertIsNotNone(io.channels['stdin']['parent'])
+
+    def test_finite_stdin_partial_writes_binary_and_separate_incremental_streams(self):
+        m, io, dll, calls, error = self.fixture(stdin=b'a\0bc', stdout_limit=3, stderr_limit=3)
+        with self.native(m, dll, error):
+            io.open(); io.transferred()
+            written, queues = [], {}
+            queues[io.channels['stdout']['parent']] = [b'a', b'bc', None]
+            queues[io.channels['stderr']['parent']] = [b'err', None]
+            def write(h, buf, n, out, ov):
+                count = min(n, 2)
+                written.append(bytes(buf.raw[:count]))
+                self.assertIsNone(out)
+                ctypes.cast(ov, ctypes.POINTER(m._Overlapped)).contents.InternalHigh = count
+                return 1
+            def read(h, buf, n, out, ov):
+                data = queues[h].pop(0)
+                if data is None: error[0] = 109; return 0
+                self.assertLessEqual(len(data), n)
+                ctypes.memmove(buf, data, len(data))
+                self.assertIsNone(out)
+                ctypes.cast(ov, ctypes.POINTER(m._Overlapped)).contents.InternalHigh = len(data)
+                return 1
+            io.WriteFile, io.ReadFile = write, read
+            io.GetOverlappedResult = self.completed_result(m)
+            io.pump()
+            self.assertEqual((io.take().stdout, io.counts['stderr']), (b'a', 3))
+            io.pump(); io.pump()
+            self.assertEqual(b''.join(written), b'a\0bc')
+            self.assertEqual(io.take().stdout, b'bc')
+            self.assertTrue(io.done)
+            self.assertIsNone(io.channels['stdin']['parent'])
+            self.assertTrue(io.close(time.monotonic() + 1))
+
+    def test_child_stdin_closed_early_is_not_a_delivered_request(self):
+        m, io, dll, calls, error = self.fixture(stdin=b'private')
+        with self.native(m, dll, error):
+            io.open(); io.transferred()
+            def broken(*a): error[0] = 109; return 0
+            io.WriteFile = broken
+            with self.assertRaises(m._NativeRefused): io.pump()
+            self.assertEqual(io.sent, 0)
+            self.assertFalse(io.done)
+            self.assertTrue(io.close(time.monotonic() + 1))
+
+    def test_partial_acquisition_foreign_client_and_close_failure_keep_exact_ownership(self):
+        m, io, dll, calls, error = self.fixture()
+        def foreign(handle, pid):
+            ctypes.cast(pid, ctypes.POINTER(m._U32)).contents.value = m.os.getpid() + 1
+            return 1
+        dll.GetNamedPipeClientProcessId = foreign
+        with self.native(m, dll, error):
+            with self.assertRaises(m._NativeRefused): io.open()
+            owned = [v for ch in io.channels.values() for k,v in ch.items() if k in ('parent','child','event') and v]
+            original_close = io.CloseHandle
+            io.CloseHandle = lambda h: 0
+            with self.assertRaises(m._NativeRefused): io.close(time.monotonic()+1)
+            self.assertEqual(io.channels['stdin']['child'], owned[1])
+            io.CloseHandle = original_close
+            self.assertTrue(io.close(time.monotonic()+1))
+            self.assertEqual(sorted(a[0] for n,a in calls if n == 'CloseHandle'), sorted(owned))
+
+    def test_zero_byte_read_does_not_fabricate_eof_before_later_output(self):
+        m, io, dll, calls, error = self.fixture()
+        with self.native(m, dll, error):
+            io.open(); io.transferred()
+            def zero(h, buf, n, count, ov):
+                self.assertIsNone(count)
+                ctypes.cast(ov, ctypes.POINTER(m._Overlapped)).contents.InternalHigh = 0
+                return 1
+            io.ReadFile = zero
+            io.GetOverlappedResult = self.completed_result(m)
+            io.pump()
+            self.assertFalse(io.done)
+            self.assertFalse(io.take().stdout_eof)
+            def late(h, buf, n, count, ov):
+                ctypes.memmove(buf, b'x', 1)
+                self.assertIsNone(count)
+                ctypes.cast(ov, ctypes.POINTER(m._Overlapped)).contents.InternalHigh = 1
+                return 1
+            io.ReadFile = late
+            io.pump()
+            self.assertEqual(io.take().stdout, b'x')
+            self.assertTrue(io.close(time.monotonic() + 1))
+
+    def test_io_deadline_closes_job_then_waits_for_targeted_io_cancellation(self):
+        m, io, dll, calls, error = self.fixture(stdin=b'payload')
+        native = _FakeKernel()
+        native.create_process_io = lambda *a: (12, 13, 77)
+        cancelled = set()
+        def cancel(h, ov): cancelled.add(h); return 1
+        def result(h, ov, count, wait):
+            error[0] = 995 if h in cancelled else 996
+            return 0
+        dll.CancelIoEx, dll.GetOverlappedResult = cancel, result
+        with self.native(m, dll, error), patch.object(m, '_Kernel', return_value=native):
+            job = m.OwnedJob(**OwnedJobTests.request(self, io=io.spec))
+            job.start(); job.poll()
+            job._deadline = time.monotonic() - 1
+            with self.assertRaises(m.JobError) as caught: job.poll()
+            self.assertEqual(str(caught.exception), 'job_deadline_expired')
+            self.assertEqual(job._phase, 'closed')
+            self.assertTrue(job._io_failed)
+            self.assertEqual(len(cancelled), 3)
+            self.assertIn(('terminate_job', 11), native.calls)
+            self.assertTrue(job.cleanup())
+
+    def test_native_startup_failure_closes_only_acquired_io_and_never_creates_child(self):
+        m, io, dll, calls, error = self.fixture()
+        native = _FakeKernel()
+        native.create_process_io = lambda *a: self.fail('process must not be created')
+        dll.UpdateProcThreadAttribute = lambda *a: 0
+        with self.native(m, dll, error), patch.object(m, '_Kernel', return_value=native):
+            job = m.OwnedJob(**OwnedJobTests.request(self, io=io.spec))
+            with self.assertRaises(m.JobError) as caught: job.start()
+            self.assertEqual(str(caught.exception), 'job_start_refused')
+            self.assertEqual(job._phase, 'closed')
+            self.assertEqual(sum(n == 'CloseHandle' for n,a in calls), 9)
+            self.assertFalse(any(c[0] == 'resume' for c in native.calls))
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

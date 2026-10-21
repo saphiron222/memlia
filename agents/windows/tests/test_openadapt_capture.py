@@ -1,13 +1,22 @@
 # Copyright (c) 2026 Memlia. All rights reserved.
 """Inactive host boundaries; no synthetic local consent or desktop capture."""
 import importlib.util
+from contextlib import ExitStack
+import json
 import math
+from pathlib import Path
+import os
 import sys
 import threading
 import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+
+from memlia_agent.capture_input_filter import CaptureInputFactory
+from memlia_agent.owned_job import JobOutput, JobState
+from memlia_agent.capture_controls import CaptureUnavailable, _CaptureControls as NativeControls
+from memlia_agent.stop import StopRequested
 
 
 DIGEST = 'sha256:' + 'd' * 64
@@ -252,6 +261,164 @@ class CaptureHostContractTests(unittest.TestCase):
             self.assertIs(host._active, run)
         self.assertEqual(errors, ['capture_owner_mismatch'])
         self.assertEqual(trace, [])
+
+
+class CaptureCompositionTests(unittest.TestCase):
+    """Native UI/session/Job boundaries doubled; real host and filesystem lifecycle."""
+    def composed(self, *, forced=False, malformed=False, clean=True, revoke=False,
+                 consent=True, cancel=False, poll_error=False, partial_preparing=False):
+        host = __import__('memlia_agent.openadapt_capture', fromlist=['record_capture'])
+        trace, job_values, state = [], [], {'started': False, 'ready': False}
+        deadline = time.monotonic() + 30
+        class Reservation:
+            def close(self): trace.append('release')
+        class Stop:
+            def __init__(self, *args, **kwargs): pass
+            def _start(self): trace.append('stop_armed')
+            def request_stop(self): trace.append('stop_requested')
+            def close(self): trace.append('stop_closed')
+        class Controls:
+            def __init__(self, *args):
+                self._lock = threading.RLock()
+                self._work_pending = self._recording_started = self._recording_stopped = False
+            def _start(self):
+                if not consent: raise CaptureUnavailable('local_consent_unavailable')
+                trace.append('consented')
+            def checkpoint(self, **kwargs):
+                if cancel or partial_preparing and self._work_pending:
+                    raise StopRequested('stop_requested')
+                trace.append('indicator')
+            def recording_preparing(self, **kwargs):
+                trace.append('preparing')
+                if partial_preparing: return NativeControls.recording_preparing(self, **kwargs)
+            def recording_started(self, **kwargs):
+                state['ready'] = True
+                trace.append('started')
+            def finish_requested(self, **kwargs): return state['ready']
+            def recording_stopped(self, **kwargs):
+                trace.append('ack');self._work_pending = False
+            def close(self):
+                if self._work_pending: raise CaptureUnavailable('capture_cleanup_unverified')
+                trace.append('ui_closed')
+        class Job:
+            def __init__(self, **kwargs):
+                job_values.append(kwargs)
+                self.root = Path(kwargs['cwd'])
+            def start(self):
+                trace.append('job_start')
+                (self.root / 'ready').write_bytes((DIGEST + '\n').encode())
+            def poll(self):
+                if poll_error: raise OSError('PRIVATE_POLL_FAILURE')
+                if (self.root / 'finish').exists():
+                    trace.append('finish')
+                    for name in ('capture', 'recording'): (self.root / name).mkdir(exist_ok=True)
+                    (self.root / 'capture' / 'recording.db').write_bytes(b'fictitious-raw')
+                    (self.root / 'recording' / 'meta.json').write_bytes(b'{}')
+                    (self.root / 'recording' / 'events.jsonl').write_bytes(b'{}\n')
+                    return JobState(0, True, 0, forced, True)
+                return JobState(1, False, None, False, False)
+            def take_output(self):
+                trace.append('output_taken')
+                if poll_error:
+                    return JobOutput(b'partial-json', b'PRIVATE_NATIVE_DIAGNOSTIC', False, False, False)
+                payload = b'PRIVATE_CANARY' if malformed else json.dumps(
+                    {'status': 'recorded', 'operationDigest': DIGEST}).encode()
+                return JobOutput(payload, b'', True, True, True)
+            def cleanup(self): trace.append('job_closed');return clean
+        def authority():
+            trace.append('authority')
+            if revoke and state['ready']: raise OSError('PRIVATE_CANARY')
+        factory = CaptureInputFactory(1, 2, 3, 4, 'S-1-5-21-1', 1, DIGEST, deadline)
+        stack = ExitStack()
+        stack.enter_context(patch.dict(os.environ, {'SYSTEMROOT': 'C:\\Windows'}))
+        for name, value in {'_runtime_ready': lambda: None, 'reserve_desktop': Reservation,
+                            'LocalStop': Stop, '_CaptureControls': Controls, 'OwnedJob': Job}.items():
+            stack.enter_context(patch.object(host, name, value, create=True))
+        stack.enter_context(patch.object(host.sys, 'platform', 'win32'))
+        stack.enter_context(patch.object(host, '_active', None))
+        stack.enter_context(patch.object(CaptureInputFactory, 'from_controls', return_value=factory))
+        return host, stack, dict(operation_digest=DIGEST, deadline_monotonic=deadline,
+                                max_bytes=4096, revalidate=authority), trace, job_values
+
+    def test_composed_capture_delivers_bytes_only_after_normal_exit_and_every_cleanup(self):
+        host, stack, request, trace, jobs = self.composed()
+        with stack:
+            result = host.record_capture(**request)
+            self.assertIsNone(host._active)
+        self.assertEqual(dict(result.files), {'events.jsonl': b'{}\n', 'meta.json': b'{}'})
+        self.assertEqual(dict(result.raw_files), {'recording.db': b'fictitious-raw'})
+        self.assertEqual(result.operation_digest, DIGEST)
+        self.assertLess(trace.index('consented'), trace.index('job_start'))
+        self.assertLess(trace.index('preparing'), trace.index('job_start'))
+        self.assertLess(trace.index('started'), trace.index('finish'))
+        self.assertLess(trace.index('job_closed'), trace.index('ack'))
+        self.assertEqual([x for x in trace if x in ('ack','ui_closed','stop_closed','release')],
+                         ['ack','ui_closed','stop_closed','release'])
+        self.assertFalse(Path(jobs[0]['cwd']).exists())
+        self.assertEqual(jobs[0]['arguments'], ('-I','-m','memlia_agent.openadapt_capture_worker'))
+        self.assertNotIn('PYTHONPATH', jobs[0]['environment'])
+
+    def test_authority_lost_after_ready_never_requests_normal_finish(self):
+        host, stack, request, trace, jobs = self.composed(revoke=True)
+        with stack, self.assertRaises(host.CaptureError) as caught:
+            host.record_capture(**request)
+        self.assertEqual(caught.exception.code, 'capture_authority_unavailable')
+        self.assertNotIn('finish', trace)
+        self.assertIn('job_closed', trace)
+
+    def test_forced_exit_and_malformed_output_cannot_deliver_a_capture(self):
+        for options in ({'forced': True}, {'malformed': True}):
+            with self.subTest(options=options):
+                host, stack, request, trace, jobs = self.composed(**options)
+                with stack, self.assertRaises(host.CaptureError) as caught:
+                    host.record_capture(**request)
+                self.assertEqual(caught.exception.code, 'capture_worker_refused')
+                self.assertIsNone(caught.exception.__context__)
+
+    def test_unknown_cleanup_suppresses_valid_result_and_retains_owned_resources(self):
+        host, stack, request, trace, jobs = self.composed(clean=False)
+        with stack:
+            with self.assertRaises(host.CaptureError) as caught: host.record_capture(**request)
+            self.assertEqual(caught.exception.code, 'capture_hold')
+            self.assertIsNotNone(host._active)
+            self.assertTrue(Path(jobs[0]['cwd']).exists())
+            self.assertNotIn('ack', trace)
+            self.assertNotIn('release', trace)
+            # Test-only owned fixture cleanup, not a production retry.
+            host._active.temporary.cleanup()
+
+    def test_declined_consent_or_local_emergency_never_starts_a_worker(self):
+        for options, code in [({'consent': False}, 'capture_consent_unavailable'),
+                              ({'cancel': True}, 'capture_cancelled')]:
+            with self.subTest(options=options):
+                host, stack, request, trace, jobs = self.composed(**options)
+                with stack, self.assertRaises(host.CaptureError) as caught:
+                    host.record_capture(**request)
+                self.assertEqual(caught.exception.code, code)
+                self.assertNotIn('job_start', trace)
+                self.assertIn('release', trace)
+
+    def test_refused_poll_preserves_partial_native_diagnostics_after_owned_job_cleanup(self):
+        host, stack, request, trace, jobs = self.composed(poll_error=True)
+        with stack, self.assertRaises(host.CaptureError) as caught: host.record_capture(**request)
+        self.assertEqual(caught.exception.code, 'capture_failed')
+        self.assertNotIn('PRIVATE_', str(caught.exception))
+        self.assertIsNotNone(caught.exception.private_output)
+        output = caught.exception.private_output
+        self.assertEqual(output.stdout, b'partial-json')
+        self.assertEqual(output.stderr, b'PRIVATE_NATIVE_DIAGNOSTIC')
+        self.assertEqual((output.stdin_complete, output.stdout_eof, output.stderr_eof), (False,False,False))
+        self.assertLess(trace.index('job_closed'), trace.index('output_taken'))
+        self.assertEqual(trace.count('output_taken'), 1)
+        self.assertNotIn('finish', trace)
+
+    def test_cancellation_inside_native_preparing_still_acknowledges_known_empty_job(self):
+        host, stack, request, trace, jobs = self.composed(partial_preparing=True)
+        with stack, self.assertRaises(host.CaptureError) as caught: host.record_capture(**request)
+        self.assertEqual(caught.exception.code, 'capture_cancelled')
+        self.assertNotIn('job_start', trace)
+        self.assertEqual([x for x in trace if x in ('job_closed','ack','ui_closed','release')],
+                         ['job_closed','ack','ui_closed','release'])
 
 
 if __name__ == '__main__':

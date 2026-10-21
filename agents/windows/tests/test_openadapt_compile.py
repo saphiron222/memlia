@@ -108,6 +108,32 @@ class CompileTests(unittest.TestCase):
         self.assertNotIn('PRIVATE_CANARY', repr(caught.exception))
         return caught.exception
 
+    def test_windows_surface_is_native_bound_and_still_requires_test(self):
+        with patch.object(self, 'load_workflow', return_value=SimpleNamespace(
+                steps=[object()], surface='windows')):
+            result = self.run_compile(target_surface='windows')
+        native = next(call[1] for call in self.calls
+                      if type(call) is tuple and call[0] == 'compile')
+        self.assertEqual(native['target_surface'], 'windows')
+        self.assertEqual(result.status, 'to_test')
+        self.assertEqual(list(Path(self.root.name).iterdir()), [])
+
+    def test_requested_windows_surface_requires_matching_native_readback(self):
+        for surface in (None, 'web'):
+            with self.subTest(surface=surface), patch.object(module, '_claimed', False):
+                with patch.object(self, 'load_workflow', return_value=SimpleNamespace(
+                        steps=[object()], surface=surface)):
+                    self.refused(code='invalid_output', target_surface='windows')
+                self.assertEqual(list(Path(self.root.name).iterdir()), [])
+
+    def test_invalid_target_surface_refuses_before_io_or_runtime_claim(self):
+        for surface in ('web', '', True, 1, [], {'surface': 'windows'}):
+            with self.subTest(surface=surface):
+                self.refused(code='invalid_request', target_surface=surface)
+                self.assertEqual(self.calls, [])
+                self.assertFalse(module._claimed)
+                self.assertEqual(list(Path(self.root.name).iterdir()), [])
+
     def test_input_aliases_and_windows_names_refuse_before_io(self):
         paths = ('/absolute', '../parent', 'a/../b', 'a\\b', 'C:stream', 'file:stream',
                  'a//b', '.', 'a/.', 'x.', 'x ', 'NUL.txt', 'CON', 'COM1', 'LPT9.log',
@@ -239,9 +265,21 @@ class CompileTests(unittest.TestCase):
         self.engine = fail
         stdout, stderr = io.StringIO(), io.StringIO()
         with patch('sys.stdout', stdout), patch('sys.stderr', stderr):
-            self.refused(code='compile_failed')
+            error = self.refused(code='compile_failed')
         self.assertEqual(stdout.getvalue() + stderr.getvalue(), '')
+        self.assertIn(b'OSError: PRIVATE_CANARY', error.private_diagnostic)
+        self.assertIs(error.private_diagnostic_complete, True)
         self.assertEqual(list(Path(self.root.name).iterdir()), [])
+
+    def test_native_error_diagnostic_is_bounded_private_and_excludes_locals(self):
+        def fail(*_, **__):
+            local_only = 'LOCAL_ONLY_CANARY'
+            raise OSError('PRIVATE_CANARY' + 'x' * 100000)
+        self.engine = fail
+        error = self.refused(code='compile_failed')
+        self.assertEqual(len(error.private_diagnostic), 65536)
+        self.assertIs(error.private_diagnostic_complete, False)
+        self.assertNotIn(b'LOCAL_ONLY_CANARY', error.private_diagnostic)
 
     def check_logging_after_compile(self, fails):
         import logging

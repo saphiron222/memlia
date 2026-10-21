@@ -33,6 +33,8 @@ type Binding = {
   context: Record<string, unknown>
   document: Record<string, unknown>
   open: unknown
+  requirements: Record<string, unknown>
+  supports: unknown
 }
 const bindings = new WeakMap<OfficePreflight, Binding>()
 function record(value: unknown): value is Record<string, unknown> {
@@ -59,7 +61,14 @@ function inspect(sdk: Record<string, unknown>): Binding {
     if (context.requirements.isSetSupported(name, '1.1') !== true)
       throw new OfficePreflightError('office_requirement_missing')
   }
-  return { sdk, context, document: context.document, open: context.document.getFileAsync }
+  return {
+    sdk,
+    context,
+    document: context.document,
+    open: context.document.getFileAsync,
+    requirements: context.requirements,
+    supports: context.requirements.isSetSupported,
+  }
 }
 
 /** Observation of SDK availability only; this grants no document or server authority. */
@@ -120,23 +129,44 @@ export function preflightOffice(office: unknown, signal?: AbortSignal): Promise<
   })
 }
 
+function assertBinding(binding: Binding) {
+  const current = inspect(binding.sdk)
+  if (
+    current.context !== binding.context ||
+    current.document !== binding.document ||
+    current.open !== binding.open ||
+    current.requirements !== binding.requirements ||
+    current.supports !== binding.supports
+  ) {
+    throw new OfficePreflightError('office_scope_changed')
+  }
+}
+
 /** Internal seam: exact observation identity, never a serializable authorization token. */
 export function resolveOfficeDocument(scope: OfficePreflight) {
   try {
     const binding = bindings.get(scope)
     if (!binding) throw new OfficePreflightError('office_scope_changed')
-    const current = inspect(binding.sdk)
-    if (
-      current.context !== binding.context ||
-      current.document !== binding.document ||
-      current.open !== binding.open
-    ) {
-      throw new OfficePreflightError('office_scope_changed')
-    }
+    assertBinding(binding)
     const open = binding.open
     if (typeof open !== 'function') throw new OfficePreflightError('office_sdk_invalid')
     return {
       identity: binding.document,
+      requireRequirement(name: 'ExcelApi', version: '1.7' | '1.9' | '1.13'): void {
+        try {
+          assertBinding(binding)
+          if (name !== 'ExcelApi' || !['1.7', '1.9', '1.13'].includes(version))
+            throw new OfficePreflightError('office_sdk_invalid')
+          const supports = binding.supports
+          if (
+            typeof supports !== 'function' ||
+            Reflect.apply(supports, binding.requirements, [name, version]) !== true
+          )
+            throw new OfficePreflightError('office_requirement_missing')
+        } catch (error) {
+          throw failure(error)
+        }
+      },
       open(sliceSize: number, callback: (result: unknown) => void): void {
         Reflect.apply(open, binding.document, ['compressed', { sliceSize }, callback])
       },

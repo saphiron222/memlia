@@ -1,3 +1,4 @@
+// Modified by Memlia in 2026: keep private Office backups outside generic file delivery.
 import { db } from '@sim/db'
 import { document, knowledgeBase, workspaceFile } from '@sim/db/schema'
 import { createLogger } from '@sim/logger'
@@ -120,6 +121,7 @@ export async function verifyFileAccess(
 ): Promise<boolean> {
   /** Organization images require the Principal-aware Assistant application resolver. */
   if (
+    /^workspace\/[^/]+\/office-backups(?:\/|$)/.test(cloudKey) ||
     cloudKey.startsWith('assistant/') ||
     cloudKey.startsWith('chat-images/') ||
     cloudKey.startsWith('project/') ||
@@ -129,7 +131,12 @@ export async function verifyFileAccess(
   const requireWrite = options?.requireWrite ?? false
   try {
     const canonical = await getFileMetadataByKey(cloudKey, undefined, { includeDeleted: true })
-    if (canonical?.projectId != null || canonical?.context === 'project') return false
+    if (
+      canonical?.projectId != null ||
+      canonical?.context === 'project' ||
+      canonical?.context === 'office-backup'
+    )
+      return false
     if (canonical && isWorkspaceScopedContext(canonical.context)) {
       if (canonical.deletedAt || !canonical.workspaceId) return false
       const permission = await getUserEntityPermissions(userId, 'workspace', canonical.workspaceId)

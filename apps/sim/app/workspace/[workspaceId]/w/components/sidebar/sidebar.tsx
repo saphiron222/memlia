@@ -1,4 +1,3 @@
-// Modified by Memlia in 2026. Upstream Apache-2.0 license and notices retained.
 'use client'
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -828,6 +827,14 @@ export const Sidebar = memo(function Sidebar({ organizationHref, desktopExecutor
           href: `/workspace/${workspaceId}/files`,
           hidden: permissionConfig.hideFilesTab && !accessRequestsEnabled,
           restricted: permissionConfig.hideFilesTab,
+        },
+        // Modified by Memlia: Windows procedures remain inside the native workspace.
+        {
+          id: 'automations',
+          label: 'Automatiser un logiciel',
+          icon: ShieldCheck,
+          href: `/workspace/${workspaceId}/automations`,
+          restricted: false,
         },
         // Modified by Memlia: native Excel entry uses the existing Chat access policy.
         {

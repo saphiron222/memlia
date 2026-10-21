@@ -2,7 +2,40 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { allowedOrigin, finalReceipt, graphIds, responseAfterClick } from './linux-chat-browser.mjs'
+import { durableQueueReceipt, durableExecutionRequest, pageDurableWrite } from './linux-chat-browser.mjs'
 const origins = ['http://localhost:3000', 'http://localhost:3002']
+test('durable write retains bounded native HTTP refusals before JSON parsing, with overflow explicit', async () => {
+  const saved = globalThis.fetch
+  const calls: unknown[][] = []
+  try {
+    for (const [body, status, overflow] of [['PRIVATE_CANARY: not JSON', 503, false], ['x'.repeat(131073), 202, true]] as const) {
+      globalThis.fetch = async (...args) => { calls.push(args); return new Response(body, { status }) }
+      const result = await pageDurableWrite(durableExecutionRequest('owned-flow'))
+      assert.equal(result.status, status); assert.equal(result.overflow, overflow)
+      assert.equal(result.raw, body.slice(0, 131072))
+      assert.equal(calls.at(-1)[1].redirect, 'error')
+      assert.equal(calls.at(-1)[1].credentials, 'same-origin')
+    }
+  } finally { globalThis.fetch = saved }
+})
+test('durable submission uses the native session route without API keys or draft controls', () => {
+  const request = durableExecutionRequest('owned-flow')
+  assert.equal(request.path, '/api/workflows/owned-flow/execute')
+  assert.deepEqual(request.headers, { 'content-type': 'application/json', 'X-Execution-Mode': 'async' })
+  assert.deepEqual(JSON.parse(request.body), { input: {}, triggerType: 'manual' })
+  for (const id of ['', '../foreign', 'x'.repeat(129), 'owned-flow\n']) assert.throws(() => durableExecutionRequest(id))
+})
+test('durable receipt refuses sync inline, ambiguous acceptance and job/execution mismatch', () => {
+  const value = { success: true, async: true, executionId: 'owned-run',
+    jobId: 'workflow-execution:owned-run', message: 'Workflow execution queued',
+    statusUrl: origins[0] + '/api/jobs/workflow-execution:owned-run' }
+  assert.deepEqual(durableQueueReceipt(202, value), { executionId: 'owned-run', jobId: value.jobId })
+  for (const [status, body] of [[200, value], [503, value], [202, { ...value, async: false }],
+    [202, { ...value, success: 1 }], [202, { ...value, jobId: 'inline-job' }],
+    [202, { ...value, executionId: '../foreign' }], [202, { ...value, apiKey: 'PRIVATE_CANARY' }]] as const)
+    assert.throws(() => durableQueueReceipt(status, body))
+  assert.throws(() => durableQueueReceipt(202, { ...value, executionId: 'owned-run\n', jobId: 'workflow-execution:owned-run\n' }))
+})
 test('two exact loopback origins and their websocket equivalents only', () => {
   for (const url of [
     'http://localhost:3000/login',
@@ -98,8 +131,8 @@ test('a real matching response is returned only after native click completes', a
 // This imports only validation code; native PostgreSQL is never opened by these tests.
 import { validateTarget } from './linux-chat-fixture.ts'
 test('fixture role and database are exact; no existing or owner runtime target admitted', () => {
-  const n = 'a'.repeat(32),
-    web = `postgres://ui_web_${n}:fictitious@database:5432/memlia_ui_${n}`
+  const n = 'a'.repeat(32)
+  const web = `postgres://ui_web_${n}:fictitious@database:5432/memlia_ui_${n}`
   assert.equal(validateTarget(web, n, 'seed').username, 'ui_web_' + n)
   for (const raw of [
     web.replace('database:', 'localhost:'),
@@ -119,14 +152,14 @@ import { canvasVisible, readFixture } from './linux-chat-browser.mjs'
 test('owned fixture refuses symlink, public permissions and byte overflow', () => {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), 'memlia-ci-fixture-'))
   try {
-    const file = path.join(d, 'fixture.json'),
-      value = {
-        origin: origins[0],
-        realtimeOrigin: origins[1],
-        email: 'ci@example.invalid',
-        password: 'fictitious-password-only',
-        userId: 'a'.repeat(8) + '-aaaa-aaaa-aaaa-' + 'a'.repeat(12),
-      }
+    const file = path.join(d, 'fixture.json')
+    const value = {
+      origin: origins[0],
+      realtimeOrigin: origins[1],
+      email: 'ci@example.invalid',
+      password: 'fictitious-password-only',
+      userId: 'a'.repeat(8) + '-aaaa-aaaa-aaaa-' + 'a'.repeat(12),
+    }
     fs.writeFileSync(file, JSON.stringify(value), { mode: 0o600 })
     assert.equal(readFixture(file).userId, value.userId)
     fs.symlinkSync(file, path.join(d, 'link'))
@@ -146,11 +179,11 @@ test('canvas observation requires rendered native nodes, no spinner and nonzero 
     getComputedStyle: globalThis.getComputedStyle,
     CSS: globalThis.CSS,
   }
-  let spinner = false,
-    width = 30,
-    height = 30,
-    opacity = '1',
-    missing = false
+  let spinner = false
+  let width = 30
+  let height = 30
+  let opacity = '1'
+  let missing = false
   const node = { getBoundingClientRect: () => ({ width, height }) }
   const canvas = {
     getBoundingClientRect: () => ({ height }),
@@ -187,8 +220,8 @@ test('canvas observation requires rendered native nodes, no spinner and nonzero 
 import { EventEmitter } from 'node:events'
 import { observeSocket } from './linux-chat-browser.mjs'
 test('socket evidence belongs to an exact live connection, not an earlier closed socket', () => {
-  const page = new EventEmitter(),
-    connected = observeSocket(page, { origin: origins[0], realtimeOrigin: origins[1] })
+  const page = new EventEmitter()
+  const connected = observeSocket(page, { origin: origins[0], realtimeOrigin: origins[1] })
   const socket = new EventEmitter()
   socket.url = () => 'ws://localhost:3002/socket.io/'
   page.emit('websocket', socket)

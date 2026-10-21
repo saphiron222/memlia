@@ -171,6 +171,7 @@ describe('workflow deployment application use cases', () => {
       expect(mockDeploy).toHaveBeenCalledWith(
         expect.objectContaining({
           workflowId: 'workflow-1',
+          assertedWorkspaceId: 'workspace-1',
           userId: actorUserId,
           actorId: actorUserId,
           ...(principal.kind === 'delegated' ? { captureAnalytics: false } : {}),

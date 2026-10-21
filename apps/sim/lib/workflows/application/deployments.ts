@@ -165,6 +165,7 @@ export const deployWorkflow = defineAuthorizedWorkflowUseCase({
     })
     const result = await performFullDeploy({
       workflowId: context.workflowId,
+      assertedWorkspaceId: context.workspaceId,
       userId: attribution.attributedUserId,
       actorId: attribution.attributedUserId,
       actor: toPrincipalActor(principal),

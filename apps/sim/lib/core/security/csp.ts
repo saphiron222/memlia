@@ -1,5 +1,6 @@
-// Modified by Memlia in 2026. Upstream Apache-2.0 license and notices retained.
+// Modified by Memlia: scope the Office desktop SDK policy to its dedicated taskpane.
 import { CHANGELOG_MEDIA_ORIGIN } from '../../changelog/media'
+import { OFFICE_JS_ORIGIN } from '../../memlia/excel/office/constants'
 import { env, envBoolean, getEnv } from '../config/env'
 import { isDev, isHosted, isReactGrabEnabled } from '../config/env-flags'
 
@@ -314,6 +315,27 @@ export function generateRuntimeCSP(): string {
  */
 export function getMainCSPPolicy(): string {
   return buildCSPString(buildTimeCSPDirectives)
+}
+
+/** Desktop WebView only: no Office Web framing or unrelated external services. */
+export function getOfficeTaskpaneCSPPolicy(): string {
+  return buildCSPString({
+    'default-src': ["'self'"],
+    'script-src': [
+      "'self'",
+      "'unsafe-inline'",
+      ...(isDev ? ["'unsafe-eval'"] : []),
+      OFFICE_JS_ORIGIN,
+    ],
+    'style-src': ["'self'", "'unsafe-inline'"],
+    'img-src': ["'self'", 'data:'],
+    'font-src': ["'self'"],
+    'connect-src': ["'self'", OFFICE_JS_ORIGIN],
+    'frame-ancestors': ["'self'"],
+    'form-action': ["'self'"],
+    'base-uri': ["'self'"],
+    'object-src': ["'none'"],
+  })
 }
 
 /**

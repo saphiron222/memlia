@@ -2,6 +2,7 @@
 // Synthetic composition of real API handlers, not an HTTP/Next/browser qualification.
 import { createHash, randomUUID } from 'node:crypto'
 import { readFileSync, writeFileSync } from 'node:fs'
+import { setTimeout as delay } from 'node:timers/promises'
 
 const XLSX = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 const CHECKS = ['noKeyDenied', 'wrongKeyDenied', 'authenticated', 'webHasNoDdl', 'uploaded',
@@ -12,12 +13,24 @@ let stage = 'preflight'
 function assertRecipe(value: unknown): asserts value {
   if (!value) throw Error('excel_application_refused')
 }
+export function durableFixtureMode(value: string | undefined) {
+  assertRecipe(value === undefined || ['durable-prepare', 'durable-publish', 'durable-readback', 'durable-retire'].includes(value))
+  return value
+}
+export async function durableDraftFromProcedure(value: unknown) {
+  const { excelProcedureDraftSchema } = await import('../../apps/sim/lib/memlia/excel/procedure-capabilities')
+  assertRecipe(value !== null && typeof value === 'object' && !Array.isArray(value))
+  return excelProcedureDraftSchema.parse(Object.fromEntries(Object.entries(value)
+    .filter(([key]) => Object.hasOwn(excelProcedureDraftSchema.shape, key))))
+}
 
 async function main() {
+  const durableMode = durableFixtureMode(process.argv[2])
   // Refuse before importing any application module or opening its database pool.
   const nonce = process.env.RECIPE_NONCE ?? ''
   const url = new URL(process.env.DATABASE_URL ?? '')
-  assertRecipe(process.platform === 'linux' && process.getuid?.() === 1001 && process.cwd() === '/scratch/application')
+  assertRecipe(process.platform === 'linux' && process.getuid?.() === 1001 &&
+    process.cwd() === (durableMode ? '/app/apps/sim' : '/scratch/application'))
   assertRecipe(/^[a-f0-9]{32}$/.test(nonce) && url.protocol === 'postgres:' && url.hostname === 'database'
     && url.port === '5432' && url.pathname === '/memlia_ui_' + nonce && url.username === 'ui_web_' + nonce
     && !url.search && !url.hash && process.env.DISABLE_AUTH === 'false')
@@ -52,7 +65,18 @@ async function main() {
     const { performCreatePersonalApiKey, performCreateWorkspaceApiKey } = await import('../../apps/sim/lib/api-key/orchestration')
     stage = 'native_credential'
     // Fixture provisioning uses the native issuer, not a forged principal or session row.
-    const issued = await performCreatePersonalApiKey({ userId: fixture.userId, name: 'Excel CI ' + nonce,
+    const prepared = durableMode && durableMode !== 'durable-prepare'
+      ? JSON.parse(readFileSync('/scratch/durable-prepared.private.json', 'utf8')) : undefined
+    if (durableMode === 'durable-publish') {
+      const { enqueueOutboxProcessor } = await import('../../apps/sim/lib/core/outbox/enqueue')
+      const { pgBossClient } = await import('../../apps/sim/lib/core/async-jobs/backends/pg-boss-client')
+      try {
+        const published = await enqueueOutboxProcessor()
+        assertRecipe(published.triggered === true && published.backend === 'inline')
+      } finally { await pgBossClient.stop() }
+      return
+    }
+    const issued = prepared ? { success: true, key: { id: prepared.keyId, key: prepared.key } } : await performCreatePersonalApiKey({ userId: fixture.userId, name: 'Excel CI ' + nonce,
       source: 'synthetic-ci', actorEmail: fixture.email })
     assertRecipe(issued.success && issued.key?.key)
     const key = issued.key.key
@@ -72,14 +96,19 @@ async function main() {
         governingPermissionGroupOrganizationId: policy.governingPermissionGroupOrganizationId })
     }
     stage = 'workspace_preparation'
-    const own = await workspace('Excel API ' + nonce)
-    const other = await workspace('Other API ' + nonce)
-    const otherIssued = await performCreateWorkspaceApiKey({ userId: fixture.userId, workspaceId: other.id,
+    const own = prepared ? { id: prepared.workspaceId } : await workspace('Excel API ' + nonce)
+    const other = prepared ? { id: prepared.otherWorkspaceId } : await workspace('Other API ' + nonce)
+    const otherIssued = prepared ? { success: true, key: { key: prepared.otherKey } } : await performCreateWorkspaceApiKey({ userId: fixture.userId, workspaceId: other.id,
       name: 'Other Excel CI ' + nonce, actorEmail: fixture.email, captureAnalytics: false })
     assertRecipe(otherIssued.success && otherIssued.key?.key)
     const { NextRequest } = await import('next/server')
     const { dispatchInProcessV2Request } = await import('../../apps/sim/lib/api/server/routes/in-process-transport')
     const checks = Object.fromEntries(CHECKS.map(name => [name, false]))
+    if (prepared) {
+      assertRecipe(prepared.userId === userId && prepared.nonce === nonce && prepared.sourceSha256 === source.sha256)
+      for (const name of CHECKS) assertRecipe(typeof prepared.checks?.[name] === 'boolean')
+      Object.assign(checks, prepared.checks)
+    }
     checks.authenticated = checks.webHasNoDdl = true
     async function request(path: string, method = 'GET', body?: unknown, credential: string | null = key) {
       const response = await dispatchInProcessV2Request(new NextRequest('http://localhost:3000' + path, {
@@ -98,6 +127,10 @@ async function main() {
       assertRecipe(value && typeof value === 'object' && 'data' in value)
       return value.data
     }
+    let uploaded: { id: string; name: string }
+    let workflow: { id: string }
+    let start: string
+    if (!prepared) {
     stage = 'authentication_negatives'
     const unauthorizedInput = { workspaceId: own.id, name: 'unauthorized.xlsx', contentType: XLSX,
       content: source.contentBase64, encoding: 'base64' }
@@ -110,7 +143,7 @@ async function main() {
     assertRecipe(Array.isArray(otherFiles.data) && otherFiles.data.length === 0)
     checks.otherWorkspaceKeyAuthenticated = true
     stage = 'file_upload'
-    const uploaded = await data('/api/v2/files', 'POST', { workspaceId: own.id, name: 'input.xlsx',
+    uploaded = await data('/api/v2/files', 'POST', { workspaceId: own.id, name: 'input.xlsx',
       contentType: XLSX, content: source.contentBase64, encoding: 'base64' })
     assertRecipe(typeof uploaded.id === 'string' && uploaded.name === 'input.xlsx')
     checks.uploaded = true
@@ -118,11 +151,13 @@ async function main() {
       name: 'cross-workspace.xlsx', contentType: XLSX, content: source.contentBase64, encoding: 'base64' }, otherIssued.key.key)
     checks.crossWorkspaceDenied = refused.status === 403 || refused.status === 404
     stage = 'workflow_graph'
-    const workflow = await data('/api/v2/workflows', 'POST', { workspaceId: own.id, name: 'Excel file ' + nonce })
+    workflow = await data('/api/v2/workflows', 'POST', { workspaceId: own.id, name: 'Excel file ' + nonce })
     const state = await data('/api/v2/workflows/' + workflow.id + '/state')
-    const start = randomUUID(), transform = randomUUID()
-    const procedure = { ...wire.procedure, workspaceId: own.id, workflowId: workflow.id,
-      organizationId: null, ownerUserId: fixture.userId }
+    start = randomUUID()
+    const transform = randomUUID()
+    const procedure = durableMode ? await durableDraftFromProcedure(wire.procedure) :
+      { ...wire.procedure, workspaceId: own.id, workflowId: workflow.id,
+        organizationId: null, ownerUserId: fixture.userId }
     const operations = [
       ...Object.keys(state.blocks).map(block_id => ({ operation_type: 'delete', block_id })),
       { operation_type: 'add', block_id: start, params: { type: 'start_trigger', name: 'Start',
@@ -139,13 +174,47 @@ async function main() {
       && Object.keys(saved.blocks).length === 2 && saved.blocks[transform].type === 'memlia_excel'
       && saved.edges.length === 1 && saved.edges[0].source === start && saved.edges[0].target === transform)
     checks.graphSaved = true
+    if (durableMode === 'durable-prepare') {
+      writeFileSync('/scratch/durable-prepared.private.json', JSON.stringify({
+        nonce, userId, workflowId: workflow.id, workspaceId: own.id, otherWorkspaceId: other.id,
+        uploaded, start, keyId: issued.key.id, key, otherKey: otherIssued.key.key, checks, sourceSha256: source.sha256,
+      }) + '\n', { mode: 0o600, flag: 'wx' })
+      writeFileSync('/scratch/durable-browser.private.json', JSON.stringify({
+        workflowId: workflow.id, workspaceId: own.id,
+      }) + '\n', { mode: 0o600, flag: 'wx' })
+      return
+    }
+    } else {
+      uploaded = prepared.uploaded; workflow = { id: prepared.workflowId }; start = prepared.start
+    }
+    const submission = durableMode ? JSON.parse(readFileSync('/scratch/durable-submission.private.json', 'utf8')) : undefined
+    if (submission) {
+      assertRecipe(submission.status === 'passed' && submission.browserClosed === true && submission.queued === true
+        && submission.workflowId === workflow.id && submission.workspaceId === own.id
+        && submission.jobId === 'workflow-execution:' + submission.executionId)
+      if (durableMode === 'durable-retire') {
+        const result = JSON.parse(readFileSync('/scratch/application-result.private.json', 'utf8'))
+        assertRecipe(result.scope === 'native_durable_compose' && result.durable?.jobId === submission.jobId
+          && result.durable?.completed === true && result.durable?.transportAcked === true)
+        await retireOwnedRun(db, { runId: submission.executionId }, workflow, own, userId, submission.jobId)
+        writeFileSync('/scratch/durable-retired.private.json', JSON.stringify({ retired: true }) + '\n', { mode: 0o600, flag: 'wx' })
+        return
+      }
+    }
+    let run: { status: string; runId: string }
+    if (submission) {
+      stage = 'native_execution'
+      await observeDurableCompletion(db, submission, workflow.id, own.id, userId)
+      run = { status: 'completed', runId: submission.executionId }
+    } else {
     const { captureExcelToolWorkerRuntime, runWithExcelToolWorkerRuntime } = await import('../../apps/sim/lib/memlia/excel/execute-tool.server')
     const runtime = captureExcelToolWorkerRuntime(process.env.MEMLIA_EXCEL_HOST_SOCKET, process.env.MEMLIA_EXCEL_OPERATOR_UID)
     assertRecipe(runtime)
     // Fixed trusted process composition; user/API input never supplies an executor context.
     stage = 'native_execution'
-    const run = await runWithExcelToolWorkerRuntime(runtime, () => data('/api/v2/workflows/' + workflow.id + '/execute',
+    run = await runWithExcelToolWorkerRuntime(runtime, () => data('/api/v2/workflows/' + workflow.id + '/execute',
       'POST', { run: { source: 'manual', entry: { type: 'trigger', blockId: start } } }))
+    }
     assertRecipe(run.status === 'completed' && typeof run.runId === 'string')
     checks.nativeRunCompleted = true
     stage = 'native_recorded_file'
@@ -181,7 +250,40 @@ async function main() {
     // Retire only this completed synthetic run AFTER its real API/file assertions.
     // This is fixture cleanup, never production run creation/finalization or a global sweep.
     stage = 'owned_run_cleanup'
-    await db.$client.begin(async tx => {
+    if (!submission) await retireOwnedRun(db, run, workflow, own, userId)
+    checks.ownedRunFixtureRetired = !submission
+    assertRecipe(CHECKS.every(name => name === 'ownedRunFixtureRetired' && submission || checks[name] === true))
+    writeFileSync('/scratch/application-result.private.json', JSON.stringify({ status: 'passed',
+      scope: submission ? 'native_durable_compose' : 'native_api_in_process', checks,
+      ...(submission ? { durable: { jobId: submission.jobId, executionId: submission.executionId,
+        completed: true, attempts: 1, transportAcked: true, oneDelivery: true, oneExecutionLog: true } } : {}),
+      file: { contentBase64: file.base64, sha256: digest(content), size: content.length, contentType: XLSX },
+      download: { status: download.status, contentType: download.headers.get('content-type'),
+        contentLength: Number(download.headers.get('content-length')), contentBase64: content.toString('base64') },
+    }) + '\n', { mode: 0o600, flag: 'wx' })
+  } finally {
+    await closeApplicationConnections()
+  }
+}
+
+
+export async function retireOwnedRun(db: typeof import('../../packages/db/index').db, run: { runId: string },
+  workflow: { id: string }, own: { id: string }, userId: string, jobId?: string) {
+  assertRecipe(jobId === undefined || jobId === 'workflow-execution:' + run.runId)
+  await db.$client.begin(async tx => {
+      let jobRow: { id: string; version: string; digest: string; event_id: string; event_version: string; event_digest: string } | undefined
+      if (jobId) {
+        const rows = await tx<{ id: string; version: string; digest: string; event_id: string; event_version: string; event_digest: string }[]>`SELECT j.id,j.xmin::text AS version,md5(row_to_json(j)::text) AS digest,
+          e.id AS event_id,e.xmin::text AS event_version,md5(row_to_json(e)::text) AS event_digest
+          FROM async_jobs j JOIN outbox_event e ON e.payload->>'nativeJobId'=j.id
+          WHERE j.id=${jobId} AND j.type='workflow-execution' AND j.status='completed' AND j.attempts=1
+            AND j.payload->>'executionId'=${run.runId} AND j.payload->>'workflowId'=${workflow.id}
+            AND j.payload->>'workspaceId'=${own.id} AND j.payload->>'userId'=${userId}
+            AND j.output->>'success'='true' AND e.event_type='memlia.pg-boss.publish' AND e.status='completed'
+          LIMIT 2 FOR UPDATE OF j,e`
+        assertRecipe(rows.length === 1)
+        jobRow = rows[0]
+      }
       const owned = await tx`SELECT l.id AS log_id,l.xmin::text AS log_version,
           md5(row_to_json(l)::text) AS log_digest,s.id AS snapshot_id,
           s.xmin::text AS snapshot_version,md5(row_to_json(s)::text) AS snapshot_digest,
@@ -215,18 +317,64 @@ async function main() {
           AND NOT EXISTS (SELECT 1 FROM workflow_execution_logs l WHERE l.execution_id=${run.runId})
         RETURNING k.key`
       assertRecipe(claims.length === 1)
+      if (jobId && jobRow) {
+        assertRecipe((await tx`DELETE FROM outbox_event e WHERE e.id=${jobRow.event_id}
+          AND e.xmin::text=${jobRow.event_version} AND md5(row_to_json(e)::text)=${jobRow.event_digest}
+          AND e.payload->>'nativeJobId'=${jobId} AND e.status='completed' RETURNING e.id`).length === 1)
+        assertRecipe((await tx`DELETE FROM async_jobs j WHERE j.id=${jobId} AND j.xmin::text=${jobRow.version}
+          AND md5(row_to_json(j)::text)=${jobRow.digest} AND j.status='completed' RETURNING j.id`).length === 1)
+      }
     })
-    checks.ownedRunFixtureRetired = true
-    assertRecipe(CHECKS.every(name => checks[name] === true))
-    writeFileSync('/scratch/application-result.private.json', JSON.stringify({ status: 'passed',
-      scope: 'native_api_in_process', checks,
-      file: { contentBase64: file.base64, sha256: digest(content), size: content.length, contentType: XLSX },
-      download: { status: download.status, contentType: download.headers.get('content-type'),
-        contentLength: Number(download.headers.get('content-length')), contentBase64: content.toString('base64') },
-    }) + '\n', { mode: 0o600, flag: 'wx' })
-  } finally {
-    await closeApplicationConnections()
-  }
+}
+
+export async function verifyTransportIsolation(db: typeof import('../../packages/db/index').db,
+  queue: ReturnType<typeof import('postgres')>, expectedRole: string) {
+  // Resolving a qualified table name itself requires schema USAGE. The web
+  // role already possesses it; transport must test the OID without gaining it.
+  const rows = await db.$client<{ oid: string }[]>`SELECT c.oid::text AS oid FROM pg_catalog.pg_class c
+    JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+    WHERE n.nspname='public' AND c.relname='user' AND c.relkind='r' LIMIT 2`
+  assertRecipe(rows.length === 1 && typeof rows[0].oid === 'string' && /^[1-9][0-9]{0,9}$/.test(rows[0].oid))
+  const [privileges] = await queue`SELECT current_user AS role,
+    has_schema_privilege(current_user,'public','CREATE') AS ddl,
+    has_schema_privilege(current_user,'public','USAGE') AS business_usage,
+    has_table_privilege(current_user,${rows[0].oid}::oid,'SELECT') AS business_read`
+  assertRecipe(privileges?.role === expectedRole && privileges.ddl === false &&
+    privileges.business_usage === false && privileges.business_read === false)
+}
+
+async function observeDurableCompletion(db: typeof import('../../packages/db/index').db,
+  submission: { jobId: string; executionId: string }, workflowId: string, workspaceId: string, userId: string) {
+  const { default: postgres } = await import('postgres')
+  const queueUrl = new URL(process.env.MEMLIA_PG_BOSS_DATABASE_URL ?? '')
+  const webUrl = new URL(process.env.DATABASE_URL!)
+  assertRecipe(queueUrl.username === 'ui_transport_' + process.env.RECIPE_NONCE && queueUrl.hostname === webUrl.hostname
+    && queueUrl.pathname === webUrl.pathname && queueUrl.port === webUrl.port && !queueUrl.search && !queueUrl.hash)
+  const queue = postgres(queueUrl.href, { max: 1, connect_timeout: 3, idle_timeout: 1, onnotice: () => {} })
+  try {
+    await verifyTransportIsolation(db, queue, queueUrl.username)
+    const deadline = performance.now() + 90_000
+    while (performance.now() < deadline) {
+      const rows = await db.$client`SELECT id,status,attempts,payload,output FROM async_jobs WHERE id=${submission.jobId}`
+      assertRecipe(rows.length === 1)
+      const job = rows[0]
+      assertRecipe(job.payload.executionId === submission.executionId && job.payload.workflowId === workflowId
+        && job.payload.workspaceId === workspaceId && job.payload.userId === userId
+        && job.payload.principal?.principal?.kind === 'session')
+      const deliveries = await queue`SELECT id,state FROM memlia_jobs.job
+        WHERE name='memlia_native' AND data->>'nativeJobId'=${submission.jobId} LIMIT 2`
+      assertRecipe(deliveries.length <= 1 && !['failed', 'cancelled'].includes(job.status))
+      if (job.status === 'completed' && deliveries[0]?.state === 'completed') {
+        assertRecipe(job.attempts === 1 && job.output?.success === true)
+        const logs = await db.$client`SELECT execution_id,status FROM workflow_execution_logs
+          WHERE workflow_id=${workflowId} AND workspace_id=${workspaceId} LIMIT 2`
+        assertRecipe(logs.length === 1 && logs[0].execution_id === submission.executionId && logs[0].status === 'completed')
+        return
+      }
+      await delay(100)
+    }
+    throw Error('excel_durable_observation_deadline')
+  } finally { await queue.end({ timeout: 2 }) }
 }
 
 /** The isolated recipe process owns these imported channels and its database pool. */
@@ -246,7 +394,12 @@ export async function closeApplicationConnections() {
   }
 }
 
-if (import.meta.main) await main().catch(() => {
+if (import.meta.main) await main().catch((error) => {
+  try {
+    writeFileSync('/scratch/application-native-failure.private.txt',
+      Buffer.from(error instanceof Error ? error.stack || error.message : 'unknown_native_failure').subarray(0, 65536),
+      { mode: 0o600, flag: 'wx' })
+  } catch { /* A missing diagnostic remains unknown; no retry of the business effect. */ }
   // No credentials, raw errors, file bytes, request bodies or SQL in the public log.
   try {
     writeFileSync('/scratch/application-failure.private.json', JSON.stringify({

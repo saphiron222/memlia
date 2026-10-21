@@ -1,3 +1,4 @@
+// Modified by Memlia: verify the dedicated Office desktop SDK policy.
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 await vi.hoisted(async () => {
@@ -20,7 +21,13 @@ await vi.hoisted(async () => {
 })
 
 import { setEnv } from '@sim/testing/mocks/env.mock'
-import { buildCSPString, generateRuntimeCSP, getChatEmbedCSPPolicy, getMainCSPPolicy } from './csp'
+import {
+  buildCSPString,
+  generateRuntimeCSP,
+  getChatEmbedCSPPolicy,
+  getMainCSPPolicy,
+  getOfficeTaskpaneCSPPolicy,
+} from './csp'
 
 describe('buildCSPString', () => {
   it('drops empty directives and blank sources', () => {
@@ -39,6 +46,25 @@ function connectSources(policy: string): string[] {
   const directive = policy.split('; ').find((d) => d.startsWith('connect-src ')) ?? ''
   return directive.split(' ').slice(1)
 }
+
+describe('Office desktop taskpane policy', () => {
+  it('allows only the official SDK origin in addition to local resources', () => {
+    const policy = getOfficeTaskpaneCSPPolicy()
+    expect(connectSources(policy)).toEqual([
+      "'self'",
+      'https://officeapis.public.onecdn.static.microsoft',
+    ])
+    expect(policy).toContain('https://officeapis.public.onecdn.static.microsoft')
+    expect(policy).toContain("frame-ancestors 'self'")
+    expect(policy).toContain("object-src 'none'")
+    expect(policy).toContain("base-uri 'self'")
+    expect(policy).not.toContain('appsforoffice.microsoft.com')
+    expect(policy).not.toContain('sim.ai')
+    expect(policy).not.toContain('*')
+    expect(getMainCSPPolicy()).not.toContain('officeapis.public.onecdn.static.microsoft')
+    expect(generateRuntimeCSP()).not.toContain('officeapis.public.onecdn.static.microsoft')
+  })
+})
 
 describe('getMainCSPPolicy', () => {
   it('allows direct uploads to the build-time S3_ENDPOINT', () => {

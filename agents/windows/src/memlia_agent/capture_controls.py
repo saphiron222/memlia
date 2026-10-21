@@ -340,6 +340,9 @@ class _CaptureControls:
             self._fail('indicator_unavailable')
         return 0 if event == 5 else 1
 
+    def _make_dialog(self):
+        return _TaskDialog()
+
     def _show(self):
         stage = 'capture_session_unavailable'
         try:
@@ -348,7 +351,7 @@ class _CaptureControls:
             if self._signal.stopped or time.monotonic() >= self._signal._deadline:
                 return
             stage = 'dialog_unavailable'
-            self._api = _TaskDialog()
+            self._api = self._make_dialog()
             self._api.show(self)
         except BaseException:
             self._fail(stage)

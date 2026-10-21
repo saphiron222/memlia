@@ -16,6 +16,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 
 _FILES = 128
 _TOTAL = 32 * 1024 * 1024
@@ -35,7 +36,26 @@ class CompileError(RuntimeError):
 
     def __init__(self, code: str):
         self.code = code
+        self.private_diagnostic = None
+        self.private_diagnostic_complete = False
         super().__init__(code)
+
+
+def _private_traceback(error):
+    """Finite private diagnostic only; never keep exception frames or local values."""
+    captured = bytearray()
+    try:
+        frames = traceback.TracebackException.from_exception(
+            error, limit=12, lookup_lines=False, capture_locals=False)
+        for chunk in frames.format(chain=False):
+            data = chunk.encode('utf-8', errors='replace')
+            remaining = 65536 - len(captured)
+            captured.extend(data[:remaining])
+            if len(data) > remaining:
+                return bytes(captured), False
+        return bytes(captured), True
+    except Exception:
+        return bytes(captured), False
 
 
 @dataclass(frozen=True)
@@ -248,7 +268,8 @@ def _output(bundle: Path) -> tuple[tuple[str, bytes], ...]:
 
 def compile_raw_recording(files: dict[str, bytes], *, name: str,
                           deadline_monotonic: float,
-                          cancel: threading.Event | None = None) -> CompiledRecording:
+                          cancel: threading.Event | None = None,
+                          target_surface: str | None = None) -> CompiledRecording:
     """Run once in a fresh supervised worker. No authority, hard timeout or sandbox.
 
     The future launcher must supply a filtered environment and owned process
@@ -260,6 +281,7 @@ def compile_raw_recording(files: dict[str, bytes], *, name: str,
     old_mask = None
     old_logging = logging.root.manager.disable
     quiet_handler = None
+    diagnostic, diagnostic_complete = None, False
     try:
         captured = _snapshot(files)  # Exact dict/str/immutable bytes, before any IO.
         valid_deadline = False
@@ -271,6 +293,8 @@ def compile_raw_recording(files: dict[str, bytes], *, name: str,
         if (type(name) is not str or not 1 <= len(name) <= 120
                 or any(ord(c) < 32 or ord(c) == 127 or 0xD800 <= ord(c) <= 0xDFFF for c in name)
                 or not valid_deadline
+                or target_surface is not None and (
+                    type(target_surface) is not str or target_surface != 'windows')
                 or cancel is not None and type(cancel) is not threading.Event):
             raise CompileError('invalid_request')
         _checkpoint(deadline_monotonic, cancel)
@@ -300,8 +324,10 @@ def compile_raw_recording(files: dict[str, bytes], *, name: str,
                 with os.fdopen(descriptor, 'wb') as handle:
                     handle.write(content)
             _checkpoint(deadline_monotonic, cancel)
+            surface_options = {} if target_surface is None else {'target_surface': target_surface}
             workflow = compile_recording(recording, bundle, name=name, annotate=False,
-                                         mine_effects=False, admit_api_bindings=False)
+                                         mine_effects=False, admit_api_bindings=False,
+                                         **surface_options)
             _checkpoint(deadline_monotonic, cancel)
             output = _output(bundle)
             names = {path for path, _ in output}
@@ -312,6 +338,8 @@ def compile_raw_recording(files: dict[str, bytes], *, name: str,
                 if _path(path) not in names:
                     raise CompileError('invalid_output')
             loaded = workflow_type.load(bundle, validate=True, verify_integrity=True)
+            if target_surface is not None and getattr(loaded, 'surface', None) != target_surface:
+                raise CompileError('invalid_output')
             if _output(bundle) != output:
                 raise CompileError('invalid_output')
             if len(loaded.steps) > _LINES:
@@ -323,7 +351,8 @@ def compile_raw_recording(files: dict[str, bytes], *, name: str,
                 len(loaded.steps), tuple(sorted(_VERSIONS.items())))
     except CompileError as error:
         failure = error.code
-    except Exception:
+    except Exception as error:
+        diagnostic, diagnostic_complete = _private_traceback(error)
         failure = 'compile_failed'
     finally:
         if temporary is not None:
@@ -346,5 +375,8 @@ def compile_raw_recording(files: dict[str, bytes], *, name: str,
         except Exception:
             failure = 'compile_failed'
     if failure is not None:
-        raise CompileError(failure)
+        error = CompileError(failure)
+        error.private_diagnostic = diagnostic
+        error.private_diagnostic_complete = diagnostic_complete
+        raise error
     return result

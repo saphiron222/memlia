@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Memlia. All rights reserved.
 // Only the external Office SDK is doubled; this is not an Excel Desktop qualification.
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { preflightOffice } from './preflight'
+import { preflightOffice, resolveOfficeDocument } from './preflight'
 
 function office(host = 'Excel', platform = 'PC', mode = 'readWrite') {
   return {
@@ -190,3 +190,48 @@ describe('Office compressed-copy preflight at the external SDK boundary', () => 
     }
   })
 })
+
+describe('bound Excel range-read requirement', () => {
+  it('checks only the fixed ExcelApi1.7 profile on the original SDK binding', async () => {
+    const sdk = office()
+    const scope = await preflightOffice(sdk)
+    expect(() => resolveOfficeDocument(scope).requireRequirement('ExcelApi', '1.7')).toThrowError(
+      'office_requirement_missing'
+    )
+    const supported = office()
+    supported.context.requirements.isSetSupported = () => true
+    const actual = await preflightOffice(supported)
+    expect(() => resolveOfficeDocument(actual).requireRequirement('ExcelApi', '1.7')).not.toThrow()
+    expect(() =>
+      resolveOfficeDocument({ ...actual }).requireRequirement('ExcelApi', '1.7')
+    ).toThrowError('office_scope_changed')
+  })
+  it('normalizes SDK exceptions from the additional requirement without private messages', async () => {
+    const sdk = office()
+    sdk.context.requirements.isSetSupported = (name) => {
+      if (name === 'ExcelApi') throw new Error('PRIVATE_NATIVE_ERROR')
+      return true
+    }
+    const binding = resolveOfficeDocument(await preflightOffice(sdk))
+    expect(() => binding.requireRequirement('ExcelApi', '1.7')).toThrowError('office_sdk_failure')
+  })
+  it('revalidates a previously resolved accessor against a changed document binding', async () => {
+    const sdk = office()
+    sdk.context.requirements.isSetSupported = () => true
+    const binding = resolveOfficeDocument(await preflightOffice(sdk))
+    sdk.context.document = office().context.document
+    expect(() => binding.requireRequirement('ExcelApi', '1.7')).toThrowError('office_scope_changed')
+  })
+})
+
+it.each(['1.9', '1.13'] as const)(
+  'checks the exact ExcelApi %s editing capability',
+  async (version) => {
+    const sdk = office()
+    sdk.context.requirements.isSetSupported = (name, v) => name !== 'ExcelApi' || v === version
+    const scope = await preflightOffice(sdk)
+    expect(() => resolveOfficeDocument(scope).requireRequirement('ExcelApi', version)).not.toThrow()
+    sdk.context.requirements.isSetSupported = () => false
+    expect(() => resolveOfficeDocument(scope).requireRequirement('ExcelApi', version)).toThrow()
+  }
+)

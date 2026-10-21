@@ -1,7 +1,21 @@
+# Modified by Memlia, 2026: mandatory admitted source/lock build provenance.
 # ========================================
 # Base Stage: runtime-only dependencies (inherited by the final image)
 # ========================================
 FROM oven/bun:1.4.2-slim AS base
+ARG MEMLIA_SOURCE_COMMIT
+ARG MEMLIA_LOCK_SHA256
+COPY build-provenance /tmp/memlia-build
+COPY bun.lock /tmp/memlia-build/context-bun.lock
+# Verify admitted build provenance before installation.
+RUN set -eu; \
+    test "${#MEMLIA_SOURCE_COMMIT}" -eq 40; test "${#MEMLIA_LOCK_SHA256}" -eq 64; \
+    case "$MEMLIA_SOURCE_COMMIT$MEMLIA_LOCK_SHA256" in *[!0-9a-f]*) exit 1;; esac; \
+    test "$(cat /tmp/memlia-build/source)" = "$MEMLIA_SOURCE_COMMIT"; \
+    test "$(cat /tmp/memlia-build/lock)" = "$MEMLIA_LOCK_SHA256"; \
+    printf '%s  /tmp/memlia-build/bun.lock\n' "$MEMLIA_LOCK_SHA256" | sha256sum -c -; \
+    printf '%s  /tmp/memlia-build/context-bun.lock\n' "$MEMLIA_LOCK_SHA256" | sha256sum -c -
+# End build provenance.
 
 # Install Node.js 24 (Active LTS) and the runtime dependencies once in base.
 # Node runs the isolated-vm sandbox worker and the Oracle Database worker (the
@@ -138,6 +152,10 @@ RUN bun build apps/sim/bootstrap.ts --target=bun --outfile=apps/sim/bootstrap.js
 # ========================================
 
 FROM base AS runner
+ARG MEMLIA_SOURCE_COMMIT
+ARG MEMLIA_LOCK_SHA256
+LABEL org.memlia.source=$MEMLIA_SOURCE_COMMIT \
+      org.memlia.lock=$MEMLIA_LOCK_SHA256
 WORKDIR /app
 
 # Runtime flags override these image defaults; dev images opt into Plan.

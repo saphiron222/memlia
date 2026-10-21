@@ -3,6 +3,11 @@ name: Packaging Excel Linux — installation et procédure natives
 on:
   workflow_dispatch:
     inputs:
+      exercise_durable:
+        description: Construire les cinq images exactes et qualifier le parcours Compose durable (opérateur seulement)
+        required: false
+        default: false
+        type: boolean
       exercise_host:
         description: Qualifier le host et les UID sur la même image après les huit cas (opérateur seulement)
         required: false
@@ -32,7 +37,7 @@ concurrency:
 jobs:
   packaging:
     # Private-runner quotas must be approved before enabling metered minutes.
-    if: github.event.repository.private == false && github.repository == 'saphiron222/memlia'
+    if: github.event.repository.private == false && github.repository == 'saphiron222/memlia' && !inputs.exercise_durable
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     env:
@@ -172,3 +177,85 @@ jobs:
             --wheelhouse "$RUNNER_TEMP/memlia-excel-third-party" \
             --output "$RUNNER_TEMP/memlia-excel-linux-recipe" "${extra[@]}"
       # No artifacts: wheels, logs and fictitious workbooks remain on this ephemeral VM.
+
+  durable:
+    # Same public, standard runner. No external registry credentials or publication.
+    if: github.event_name == 'workflow_dispatch' && inputs.exercise_durable && github.event.repository.private == false && github.repository == 'saphiron222/memlia'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 170
+    env:
+      MEMLIA_PUBLIC_RUN: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+      PIP_CONFIG_FILE: /dev/null
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+      PIP_NO_CACHE_DIR: '1'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12.15'
+          architecture: x64
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24.22.0'
+      - name: Vérifier les seules nouvelles frontières de préparation
+        run: python3 -B scripts/ci/test-excel-durable-ci.py -v
+      - name: Préparer les roues verrouillées pour la recette native existante
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir "$RUNNER_TEMP/excel-durable-wheels"
+          python -I -B -m pip --isolated --disable-pip-version-check download \
+            --index-url https://pypi.org/simple --no-cache-dir --only-binary=:all: --no-deps --require-hashes \
+            --dest "$RUNNER_TEMP/excel-durable-wheels" -r runtimes/excel/requirements.lock \
+            > "$RUNNER_TEMP/excel-durable-wheels.private.log" 2>&1
+          python -I -B -m venv "$RUNNER_TEMP/excel-durable-python"
+          "$RUNNER_TEMP/excel-durable-python/bin/python" -I -B -m pip --isolated install \
+            --no-index --no-cache-dir --no-deps --require-hashes --find-links "$RUNNER_TEMP/excel-durable-wheels" \
+            -r runtimes/excel/requirements.lock > "$RUNNER_TEMP/excel-durable-install.private.log" 2>&1
+      - name: Construire les images et qualifier une seule fois Compose durable
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          # Dedicated ephemeral checkout, not a host credential or existing deployment.
+          sudo -n chown -R root:root "$GITHUB_WORKSPACE"
+          output="/var/lib/memlia-excel-ci-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          test ! -e "$output"
+          timeout --signal=TERM --kill-after=240s 155m sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_OS,MEMLIA_PUBLIC_RUN -- \
+            "$RUNNER_TEMP/excel-durable-python/bin/python" -B scripts/ci/excel-durable-ci.py \
+            --expected-commit "$GITHUB_SHA" --output "$output" --node "$(command -v node)" \
+            --wheelhouse "$RUNNER_TEMP/excel-durable-wheels" \
+            > "$RUNNER_TEMP/excel-durable-command.private.log" 2>&1
+      - name: Publier uniquement le verdict fermé, jamais les données de recette
+        if: always()
+        shell: bash
+        run: |
+          sudo -n python3 -B - "$GITHUB_WORKSPACE" "/var/lib/memlia-excel-ci-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" <<'PY'
+          import importlib.util,json,os,stat,sys
+          from pathlib import Path
+          spec=importlib.util.spec_from_file_location('ci',Path(sys.argv[1])/'scripts/ci/excel-durable-ci.py')
+          module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+          path=Path(sys.argv[2])/'summary.json'
+          if not path.exists():
+              print(json.dumps({'status':'failed','phase':'preflight','cleanup':False,'imagesBuilt':0,'durableQualified':False}))
+          else:
+              fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+              with os.fdopen(fd,'rb') as f:
+                  info=os.fstat(f.fileno());assert stat.S_ISREG(info.st_mode) and info.st_uid==0 and info.st_nlink==1
+                  raw=f.read(4097)
+              assert len(raw)<=4096
+              value=json.loads(raw);assert set(value)=={'status','phase','cleanup','imagesBuilt','durableQualified'}
+              assert value['status'] in ('passed','failed') and value['phase'] in module.PHASES
+              assert type(value['imagesBuilt']) is int and 0<=value['imagesBuilt']<=5
+              assert type(value['cleanup']) is bool and type(value['durableQualified']) is bool
+              if value['status']=='passed':
+                  assert value['phase']=='complete' and value['cleanup'] and value['imagesBuilt']==5 and value['durableQualified']
+              print(json.dumps(value,sort_keys=True))
+          PY
+      # No upload-artifact: private TLS keys, credentials, DB data, logs and XLSX
+      # remain only on this ephemeral runner. Unknown application cleanup is HOLD.

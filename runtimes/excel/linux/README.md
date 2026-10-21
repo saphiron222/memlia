@@ -1,4 +1,4 @@
-# Isolation Linux du processus Excel — préparation inactive
+# Isolation Linux du processus Excel — recette et admission opérateur
 
 Ce dossier ajoute une image et un superviseur **hôte**, hors application Next,
 pour le seul protocole `memlia.excel-process/v1`. Il réemploie le packager natif
@@ -6,13 +6,18 @@ et `memlia_excel.process` → `prepare_procedure`, sans autre moteur Excel,
 ordonnanceur, enregistrement de provider ni endpoint. Les interfaces sandbox Sim
 V8/code et remote E2B/Daytona ne sont pas détournées pour recevoir une commande.
 
-**L'entrée `supervisor.execute` refuse actuellement tous les appels.**
-`QUALIFIED_IMAGES` est vide. Aucun digest ne pourra y être admis avant une recette
-Linux réelle et une revue du profil effectif. Ni l'enveloppe, ni une variable
-publique, ni un booléen de demande ne peuvent activer le runtime. La primitive
-privée `_run_owned` sert à cette future recette et aux doubles de protocole ; elle
-n'est pas une autorisation de lancement. Les tests portables ne changent pas cette
-gate.
+`supervisor.execute` exige une admission opérateur capturée pour l'image exacte
+et le hash du superviseur. Le chemin natif est
+`admission.describe/capture → host.serve(--admission-file) → supervisor.execute(admission.permits)`.
+`QUALIFIED_IMAGES` reste une constante historique vide ; ce n'est pas la gate active.
+Ni l'enveloppe, ni une variable publique, ni un booléen de demande ne fournissent
+cette admission. La primitive privée `_run_owned` reste une frontière technique
+pour la recette et les doubles, sans autorité métier.
+
+Ce code fournit un mode explicite de promotion après qualification complète.
+Ce commit ne livre aucune image admise réelle : les tests portables Mac avec
+Docker et identité root doublés ne qualifient pas un moteur Linux, le noyau de
+déploiement, les licences des couches ou le worker durable.
 
 ## Image à préparer hors application
 
@@ -91,7 +96,7 @@ arguments, chemins de fichiers ou exception brute. Ce reçu n'est pas public.
 
 ## Frontière de résultat et tests
 
-`execute` retournerait `(wire, receipt)`. Les octets sont un **transport**, pas un
+`execute` retourne `(wire, receipt)` après admission et nettoyage vérifiés. Les octets sont un **transport**, pas un
 résultat autorisé/publié : l'appelant doit réemployer la revalidation complète du
 caller `excel-process.ts` avant de les remettre à une application. Cette tranche
 ne raccorde pas encore ce caller au superviseur ni la permission d'exécuter un job.
@@ -114,3 +119,73 @@ lors de rupture de canal et les descendants observés/non observés. Docker est 
 frontière à qualifier sur un hôte de confiance, pas une VM ni une preuve globale
 de sandbox. Linux/Windows, ABI image, sécurité OS et intégration Sim restent NON
 TESTÉS par les présents tests Mac/doubles.
+
+
+## Promotion explicite d'une image exacte
+
+Le comportement habituel de `qualification.py` reste éphémère : l'image possédée
+est retirée par son ID et son nonce, après la recette. `--exercise-host` et
+`--exercise-application` seuls conservent ce nettoyage. Aucun test réussi ne
+promeut automatiquement une image.
+
+Le seul opt-in `--operator-release DESTINATION` exige Linux x86_64, un opérateur
+root, les deux modes host/application et une destination absolue nouvelle. Ses
+parents doivent être de vrais répertoires protégés et possédés par l'opérateur
+ou root ; aucun lien, parent inscriptible par un tiers ou remplacement de dossier
+existant n'est permis. Préparer explicitement ce parent protégé avant la recette.
+
+L'option ne devient effective qu'après les huit cas d'isolation avec leur
+nettoyage, l'acceptation du pair UID1001 et le refus UID1002, l'arrêt propre du
+host, puis business/readback et nettoyage final applicatif tous réussis. Une
+ancienne preuve partielle ou un reçu avec `cleanupComplete:false` n'est jamais
+rechargé comme approbation. Le commit propre, le verrou, le manifeste de contexte,
+le superviseur et l'identité exacte image/nonce sont revérifiés avant export puis
+avant publication. Une annulation ou mesure disque inconnue refuse la promotion.
+
+Exemple **à réserver à un hôte Linux déjà préparé et à un candidat relu**, depuis
+le checkout admis, avec des chemins d'opérateur nouveaux et protégés :
+
+```sh
+/usr/bin/python3 -B runtimes/excel/linux/qualification.py \
+  --wheelhouse /var/lib/memlia/wheels \
+  --output /var/lib/memlia/qualification/run-IDENTIFIANT \
+  --exercise-host --exercise-application \
+  --operator-release /var/lib/memlia/operator-bundles/release-IDENTIFIANT
+```
+
+Le collecteur CLI existant exporte uniquement `docker image save IMAGE_ID` :
+stdout binaire vers un fichier neuf0400 en staging0700 privé, stderr borné au
+journal privé et refusé, environnement fermé, timeout/annulation/enfant possédé
+conservés. L'export est limité à2Gio, hashé en flux puis relu sous identité stable ;
+la réserve disque est observée avant, pendant et après le flux. Le plafond de2Gio
+est une limite de cette recette, pas une taille d'image qualifiée ni un quota client.
+
+Le bundle contient exactement `image.tar`, `proof.json`, `admission.json` et
+`release.json`, fichiers0400. Proof/admission réemploient les schémas et
+`admission.describe` existants. Le manifeste fermé lie image ID, commit, verrou,
+contexte, superviseur, hash des deux enregistrements et SHA256/taille de l'archive.
+La publication finale utilise l'opération Linux atomique `renameat2` avec
+`RENAME_NOREPLACE` ; si elle est indisponible ou si un autre opérateur a créé la
+destination, la promotion refuse. Aucun fallback qui écrase n'est utilisé.
+
+Après succès, **l'image exacte reste réellement présente dans le daemon**, avec
+son export ; `imageHeld:true` ne désigne jamais l'archive seule. `runtimeActivated`
+reste false : aucun service, socket ou worker n'est installé ou démarré. La
+configuration du host utilise toujours les fichiers opérateur0400 et le même
+code de superviseur. Le transport ultérieur de l'archive exige vérification de
+son hash puis de l'ID exact après chargement ; l'archive seule ne prouve pas qu'une
+image est chargée ailleurs.
+
+Sur refus, aucun chemin de bundle réussi n'est retourné. Une réponse de commit
+perdue ou une annulation déclenche la réconciliation seulement du dossier dont
+l'inode et les fichiers correspondent encore exactement au staging possédé ;
+une destination concurrente n'est pas retirée. Si cette propriété ou le nettoyage
+reste inconnu, le reçu reste failed/cleanup incomplet et les ressources ambiguës
+restent à réconcilier par l'opérateur, sans effacement forcé ni relance métier.
+
+La portée du manifeste est `native_api_in_process`. Il indique explicitement
+`durableWorkerQualified:false`, `deploymentKernelQualified:false` et
+`imageLicensesReviewed:false`. Les licences/SBOM des couches, la correspondance
+au noyau/cgroups cible, l'installation du host protégé et la qualification sous
+le vrai worker durable Compose restent des gates séparées à prouver avant
+utilisation cabinet. Ce mode de préparation ne constitue pas une release commerciale.

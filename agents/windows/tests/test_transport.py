@@ -25,8 +25,10 @@ except ImportError:
 
 class TlsServer:
     """One request per connection, no external network, bounded parser for fixtures."""
-    def __init__(self, context, handler):
+    def __init__(self, context, handler, *, max_request_body_bytes=0):
         self.context, self.handler = context, handler
+        self.max_request_body_bytes = max_request_body_bytes
+        self.request_bodies = []
         self.requests, self.tasks, self.writers = [], set(), set()
         self.connections = 0
 
@@ -45,9 +47,18 @@ class TlsServer:
         try:
             await writer.start_tls(self.context, ssl_handshake_timeout=1)
             headers = await asyncio.wait_for(reader.readuntil(b'\r\n\r\n'), 1)
+            lengths = [line.split(b':', 1)[1].strip() for line in headers.split(b'\r\n')
+                       if line.lower().startswith(b'content-length:')]
+            if len(lengths) > 1:
+                raise ValueError('duplicate fixture length')
+            length = int(lengths[0]) if lengths else 0
+            if not 0 <= length <= self.max_request_body_bytes:
+                raise ValueError('fixture request body limit')
+            body = await asyncio.wait_for(reader.readexactly(length), 1) if length else b''
+            self.request_bodies.append(body)
             self.requests.append(headers)
             await self.handler(writer, len(self.requests))
-        except (asyncio.TimeoutError, ConnectionError, asyncio.IncompleteReadError, ssl.SSLError):
+        except (asyncio.TimeoutError, ConnectionError, asyncio.IncompleteReadError, ssl.SSLError, ValueError):
             pass
         finally:
             writer.close()

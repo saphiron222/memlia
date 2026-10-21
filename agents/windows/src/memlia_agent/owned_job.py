@@ -1,9 +1,9 @@
 # Copyright (c) 2026 Memlia. All rights reserved.
-"""Internal handle-owned Windows Job port; no permission, supervisor or capture."""
+"""Internal handle-owned Windows Job port; optional finite IO, no permission."""
 from __future__ import annotations
 
 import ctypes
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 import os
 from pathlib import PureWindowsPath
@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 
 from .session import _function
 
@@ -74,6 +75,255 @@ class _ProcessInfo(ctypes.Structure):
 
 class _FileTime(ctypes.Structure):
     _fields_ = [('low', _U32), ('high', _U32)]
+
+
+class _StartupEx(ctypes.Structure):
+    _fields_ = [('StartupInfo', _Startup), ('lpAttributeList', _PTR)]
+
+
+class _Overlapped(ctypes.Structure):
+    _fields_ = [('Internal', ctypes.c_size_t), ('InternalHigh', ctypes.c_size_t),
+                ('Offset', _U32), ('OffsetHigh', _U32), ('hEvent', _PTR)]
+
+
+class _OutputLimit(_NativeRefused):
+    pass
+
+
+@dataclass(frozen=True)
+class JobIO:
+    """Finite private input and cumulative byte caps, not command authorization."""
+    stdin: bytes = field(default=b'', repr=False)
+    stdout_limit: int = 1048576
+    stderr_limit: int = 65536
+
+    def __post_init__(self):
+        if (type(self.stdin) is not bytes or len(self.stdin) > 262144
+                or any(type(n) is not int or not 1 <= n <= 1048576
+                       for n in (self.stdout_limit, self.stderr_limit))):
+            raise JobError('invalid_job_io')
+
+
+@dataclass(frozen=True)
+class JobOutput:
+    stdout: bytes = field(repr=False)
+    stderr: bytes = field(repr=False)
+    stdin_complete: bool
+    stdout_eof: bool
+    stderr_eof: bool
+
+
+class _PipeIO:
+    """Three local byte pipes. Owner retains pending buffers until completion.
+
+    Parent ends are overlapped/non-inheritable; only synchronous child ends enter
+    the explicit startup handle list. No blocking read/write worker thread.
+    """
+    def __init__(self, spec):
+        self.spec = spec
+        self.channels = {name: dict(parent=None, child=None, event=None,
+            pending=False, buffer=None, overlap=None, eof=False)
+            for name in ('stdin', 'stdout', 'stderr')}
+        self.counts = {'stdout': 0, 'stderr': 0}
+        self.buffers = {'stdout': bytearray(), 'stderr': bytearray()}
+        self.sent = 0
+        self.attributes = None
+        self.attributes_ready = False
+        self.handle_list = None
+        self.stopping = False
+        self.api = None
+
+    def open(self):
+        # Lazy bindings: legacy no-IO mode retains its original ABI and behavior.
+        self.api = ctypes.WinDLL('kernel32', use_last_error=True, winmode=0x800)
+        b, p, u = ctypes.c_int32, _PTR, _U32
+        signatures = {
+            'CreateNamedPipeW': (p, [ctypes.c_wchar_p,u,u,u,u,u,u,p]),
+            'CreateFileW': (p, [ctypes.c_wchar_p,u,u,p,u,u,p]),
+            'ConnectNamedPipe': (b, [p, ctypes.POINTER(_Overlapped)]),
+            'GetNamedPipeClientProcessId': (b, [p, ctypes.POINTER(u)]),
+            'CreateEventW': (p, [p,b,b,ctypes.c_wchar_p]),
+            'SetHandleInformation': (b, [p,u,u]),
+            'InitializeProcThreadAttributeList': (b, [p,u,u,ctypes.POINTER(ctypes.c_size_t)]),
+            'UpdateProcThreadAttribute': (b, [p,u,ctypes.c_size_t,p,ctypes.c_size_t,p,p]),
+            'DeleteProcThreadAttributeList': (None, [p]),
+            'ReadFile': (b, [p,p,u,ctypes.POINTER(u),ctypes.POINTER(_Overlapped)]),
+            'WriteFile': (b, [p,p,u,ctypes.POINTER(u),ctypes.POINTER(_Overlapped)]),
+            'GetOverlappedResult': (b, [p,ctypes.POINTER(_Overlapped),ctypes.POINTER(u),b]),
+            'CancelIoEx': (b, [p,ctypes.POINTER(_Overlapped)]),
+            'CloseHandle': (b, [p]),
+        }
+        for name, (result, args) in signatures.items():
+            setattr(self, name, _function(self.api, name, result, args))
+        for name, ch in self.channels.items():
+            pipe = '\\\\.\\pipe\\MemliaJobIO-' + uuid.uuid4().hex
+            # FIRST_PIPE_INSTANCE + OVERLAPPED; local-only, one instance, byte mode.
+            ch['parent'] = self._handle(self.CreateNamedPipeW(pipe,
+                0x40080000 | (2 if name == 'stdin' else 1), 8, 1, 16384, 16384, 0, None))
+            ch['event'] = self._handle(self.CreateEventW(None, True, False, None))
+            ch['overlap'] = _Overlapped(hEvent=ch['event'])
+            ch['child'] = self._handle(self.CreateFileW(pipe,
+                0x80000000 if name == 'stdin' else 0x40000000, 0, None, 3, 0, None))
+            # Client is already connected. Retain OVERLAPPED if any unexpected pending call.
+            ch['pending'] = True
+            ok = self.ConnectNamedPipe(ch['parent'], ctypes.byref(ch['overlap']))
+            error = 0 if ok else ctypes.get_last_error()
+            if ok or error == 535:  # ERROR_PIPE_CONNECTED, normal pre-connected client.
+                ch['pending'] = False
+            else:
+                if error != 997:
+                    ch['pending'] = False
+                raise _NativeRefused()
+            pid = _U32()
+            self._require(self.GetNamedPipeClientProcessId(ch['parent'], ctypes.byref(pid)))
+            self._require(pid.value == os.getpid())
+
+    @staticmethod
+    def _require(value):
+        if not value:
+            raise _NativeRefused()
+
+    @staticmethod
+    def _handle(value):
+        if value in (None, 0, ctypes.c_void_p(-1).value):
+            raise _NativeRefused()
+        return int(value)
+
+    def startup(self):
+        size = ctypes.c_size_t()
+        ok = self.InitializeProcThreadAttributeList(None, 1, 0, ctypes.byref(size))
+        self._require(not ok and ctypes.get_last_error() == 122 and 0 < size.value <= 65536)
+        self.attributes = ctypes.create_string_buffer(size.value)
+        self._require(self.InitializeProcThreadAttributeList(self.attributes, 1, 0, ctypes.byref(size)))
+        self.attributes_ready = True
+        handles = [ch['child'] for ch in self.channels.values()]
+        self.handle_list = (_PTR * 3)(*handles)
+        for handle in handles:
+            self._require(self.SetHandleInformation(handle, 1, 1))
+        self._require(self.UpdateProcThreadAttribute(self.attributes, 0, 0x20002,
+            self.handle_list, ctypes.sizeof(self.handle_list), None, None))
+        startup = _StartupEx()
+        startup.StartupInfo.cb = ctypes.sizeof(startup)
+        startup.StartupInfo.dwFlags = 0x100  # STARTF_USESTDHANDLES.
+        startup.StartupInfo.hStdInput, startup.StartupInfo.hStdOutput, startup.StartupInfo.hStdError = handles
+        startup.lpAttributeList = ctypes.addressof(self.attributes)
+        return startup
+
+    def _close(self, ch, name):
+        if ch[name] is not None:
+            self._require(self.CloseHandle(ch[name]))
+            ch[name] = None
+
+    def transferred(self):
+        # Close parent copies before resume, so EOF is tied to actual child handles.
+        for ch in self.channels.values():
+            if ch['child'] is not None:
+                self._require(self.SetHandleInformation(ch['child'], 1, 0))
+                self._close(ch, 'child')
+        if self.attributes_ready:
+            self.DeleteProcThreadAttributeList(self.attributes)
+            self.attributes_ready = False
+        self.attributes = self.handle_list = None
+
+    def _accept(self, name, data):
+        if self.counts[name] + len(data) > getattr(self.spec, name + '_limit'):
+            raise _OutputLimit()
+        self.counts[name] += len(data)
+        self.buffers[name].extend(data)
+
+    def _complete(self, name, ch, count, error):
+        ch['pending'] = False  # Native completion observed; buffer can now be reused.
+        if self.stopping:
+            ch['buffer'] = None
+            return
+        if error:
+            if name != 'stdin' and error == 109:  # ERROR_BROKEN_PIPE = reader EOF.
+                ch['eof'] = True
+                ch['buffer'] = None
+                return
+            raise _NativeRefused()
+        self._require(ch['buffer'] is not None and 0 <= count <= len(ch['buffer']))
+        if name == 'stdin':
+            self._require(count > 0)
+            self.sent += count
+        else:
+            # A successful zero-byte read is not a broken pipe/EOF certificate.
+            if count:
+                self._accept(name, ch['buffer'].raw[:count])
+        ch['buffer'] = None
+
+    def _observe(self, name, ch):
+        count = _U32()
+        ok = self.GetOverlappedResult(ch['parent'], ctypes.byref(ch['overlap']), ctypes.byref(count), False)
+        error = 0 if ok else ctypes.get_last_error()
+        if error == 996:  # ERROR_IO_INCOMPLETE; retain all buffers/OVERLAPPED.
+            return False
+        # A failed query (e.g. invalid handle) is NOT proof that IO completed.
+        self._require(error in (0, 109, 995))
+        self._complete(name, ch, count.value, error)
+        return True
+
+    def pump(self):
+        self._require(not self.stopping)
+        for name, ch in self.channels.items():
+            if ch['pending']:
+                self._observe(name, ch)
+                continue  # At most one completion/submission per stream per checkpoint.
+            if ch['eof']:
+                continue
+            if name == 'stdin' and self.sent == len(self.spec.stdin):
+                self._close(ch, 'parent')  # EOF, never FlushFileBuffers (could block).
+                ch['eof'] = True
+                continue
+            size = min(16384, len(self.spec.stdin) - self.sent) if name == 'stdin' else min(
+                16384, getattr(self.spec, name + '_limit') - self.counts[name] + 1)
+            ch['buffer'] = (ctypes.create_string_buffer(self.spec.stdin[self.sent:self.sent + size], size)
+                            if name == 'stdin' else ctypes.create_string_buffer(size))
+            ch['overlap'] = _Overlapped(hEvent=ch['event'])
+            ch['pending'] = True  # Preserve storage even if a Python interruption crosses the call.
+            fn = self.WriteFile if name == 'stdin' else self.ReadFile
+            ok = fn(ch['parent'], ch['buffer'], size, None, ctypes.byref(ch['overlap']))
+            error = 0 if ok else ctypes.get_last_error()
+            if ok:
+                self._observe(name, ch)  # Async counts come only from GetOverlappedResult.
+            elif error != 997:  # ERROR_IO_PENDING.
+                self._complete(name, ch, 0, error)
+
+    @property
+    def done(self):
+        return not self.stopping and all(ch['eof'] for ch in self.channels.values())
+
+    def take(self):
+        result = JobOutput(bytes(self.buffers['stdout']), bytes(self.buffers['stderr']),
+            self.channels['stdin']['eof'], self.channels['stdout']['eof'], self.channels['stderr']['eof'])
+        self.buffers['stdout'].clear()
+        self.buffers['stderr'].clear()
+        return result
+
+    def close(self, until):
+        self.stopping = True
+        # No storage/handle freed until every in-flight call is known completed.
+        for ch in self.channels.values():
+            if ch['pending']:
+                ok = self.CancelIoEx(ch['parent'], ctypes.byref(ch['overlap']))
+                self._require(ok or ctypes.get_last_error() == 1168)  # Already completed is a race, not proof.
+        while any(ch['pending'] for ch in self.channels.values()):
+            for name, ch in self.channels.items():
+                if ch['pending']:
+                    self._observe(name, ch)
+            if not any(ch['pending'] for ch in self.channels.values()):
+                break
+            if time.monotonic() >= until:
+                return False
+            time.sleep(.01)
+        if self.attributes_ready:
+            self.DeleteProcThreadAttributeList(self.attributes)
+            self.attributes_ready = False
+        self.attributes = self.handle_list = None
+        for ch in self.channels.values():
+            for name in ('child', 'parent', 'event'):
+                self._close(ch, name)
+        return True
 
 
 class _Kernel:
@@ -140,6 +390,15 @@ class _Kernel:
             raise _CreateRefused()
         return int(info.hProcess or 0), int(info.hThread or 0), int(info.dwProcessId)
 
+    def create_process_io(self, executable, command, cwd, environment, startup):
+        info = _ProcessInfo()
+        mutable, block = ctypes.create_unicode_buffer(command), ctypes.create_unicode_buffer(environment)
+        # Extended startup is the ONLY opt-in inheritance path, with exactly 3 handles.
+        if not self._create(executable, mutable, None, None, True, 0x08080404,
+                block, cwd, ctypes.cast(ctypes.byref(startup), ctypes.POINTER(_Startup)), ctypes.byref(info)):
+            raise _CreateRefused()
+        return int(info.hProcess or 0), int(info.hThread or 0), int(info.dwProcessId)
+
     def assign(self, job, process):
         self._require(self._assign(job, process))
 
@@ -185,6 +444,7 @@ class JobState:
     root_finished: bool
     root_exit_code: int | None
     forced: bool
+    io_complete: bool | None = None
 
 
 def _text(value, maximum):
@@ -210,9 +470,11 @@ class OwnedJob:
     Methods are cooperative kernel checkpoints, not a hard syscall timeout.
     Caller owns authority/lease/consent and must keep polling/hold this owner.
     """
-    def __init__(self, *, executable, arguments, cwd, environment, deadline_monotonic):
+    def __init__(self, *, executable, arguments, cwd, environment, deadline_monotonic, io=None):
         failed = False
         try:
+            if io is not None and type(io) is not JobIO:
+                raise ValueError()
             _absolute(executable)
             _absolute(cwd)
             if (type(arguments) is not tuple or len(arguments) > 64 or type(environment) is not dict
@@ -250,6 +512,8 @@ class OwnedJob:
         self._created = self._creating = self._assigned = self._called = self._forced = False
         self._identity = None
         self._phase = 'new'
+        self._io_spec, self._io = io, None
+        self._io_failed = False
 
     def _require_owner(self):
         if (self._owner is not threading.current_thread() or not self._owner.is_alive()
@@ -298,16 +562,25 @@ class OwnedJob:
             if self._api.limits(self._job) != _KILL_ON_CLOSE:
                 raise _NativeRefused()
             self._checkpoint()
+            startup = None
+            if self._io_spec is not None:
+                self._io = _PipeIO(self._io_spec)  # Attach BEFORE acquiring any handles.
+                self._io.open()
+                startup = self._io.startup()
+                self._checkpoint()
             self._creating = True
             try:
-                self._process, self._thread, pid = self._api.create_process(
-                    self._executable, self._command, self._cwd, self._environment)
+                args = (self._executable, self._command, self._cwd, self._environment)
+                self._process, self._thread, pid = (self._api.create_process(*args) if startup is None
+                    else self._api.create_process_io(*args, startup))
             except _CreateRefused:
                 self._creating = False  # Native FALSE proves no returned process.
                 raise
             self._creating, self._created = False, True
             if any(type(value) is not int or value <= 0 for value in (self._process, self._thread, pid)):
                 raise _NativeRefused()
+            if self._io is not None:
+                self._io.transferred()
             self._checkpoint()
             self._api.assign(self._job, self._process)
             if self._api.contains(self._process, self._job) is not True:
@@ -343,6 +616,8 @@ class OwnedJob:
         failed = False
         try:
             self._disk()
+            if self._io is not None:
+                self._io.pump()
             active = self._active()
             finished = self._finished()
             if active == 0 and not finished:
@@ -351,17 +626,37 @@ class OwnedJob:
             if code is not None and (type(code) is not int or not 0 <= code < 2**32):
                 raise _NativeRefused()
             expired = time.monotonic() >= self._deadline
+        except _OutputLimit:
+            self._io_failed = True
+            self.cleanup()
+            failed = 'job_output_limit'
         except Exception:
-            failed = True
+            failed = 'job_observation_refused'
+            if self._io is not None:
+                self._io_failed = True
+                self.cleanup()
+        except BaseException:
+            if self._io is not None:
+                self._io_failed = True
+                self.cleanup()
+            raise
         if failed:
-            self._phase = 'hold'
-            raise JobError('job_observation_refused')
+            if self._phase != 'closed':
+                self._phase = 'hold'
+            raise JobError(failed)
         if expired:
             self.cleanup()
             raise JobError('job_deadline_expired')
-        if active == 0:
+        io_complete = None if self._io is None else (self._io.done and not self._io_failed)
+        if active == 0 and io_complete is not False:
             self._phase = 'finished'
-        return JobState(active, finished, code, self._forced)
+        return JobState(active, finished, code, self._forced, io_complete)
+
+    def take_output(self):
+        self._require_owner()
+        if self._io is None:
+            raise JobError('job_state_refused')
+        return self._io.take()
 
     def cleanup(self):
         self._require_owner()
@@ -392,6 +687,11 @@ class OwnedJob:
                     time.sleep(.05)
                     active = self._active()
                 if self._process is not None and not self._finished():
+                    raise _NativeRefused()
+            if self._io is not None:
+                if not self._io.done:
+                    self._io_failed = True
+                if self._io.close(until) is not True:
                     raise _NativeRefused()
             for name in ('_thread', '_process', '_job'):
                 handle = getattr(self, name)

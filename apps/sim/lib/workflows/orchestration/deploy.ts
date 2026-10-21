@@ -10,7 +10,7 @@ import { generateId } from '@sim/utils/id'
 import { and, eq } from 'drizzle-orm'
 import type { NextRequest } from 'next/server'
 import { env } from '@/lib/core/config/env'
-import type { OrchestrationErrorCode } from '@/lib/core/orchestration/types'
+import { OrchestrationError, type OrchestrationErrorCode } from '@/lib/core/orchestration/types'
 import { stringifyBoundedJson } from '@/lib/core/utils/bounded-json'
 import { generateRequestId } from '@/lib/core/utils/request'
 import { getSocketServerUrl } from '@/lib/core/utils/urls'
@@ -42,6 +42,7 @@ import {
   type WorkflowDeploymentOperation,
   type WorkflowDeploymentStatus,
 } from '@/lib/workflows/persistence/deployment-operations'
+import { captureWorkflowExcelDeploymentSnapshot } from '@/lib/workflows/persistence/excel-deployment-snapshots'
 import {
   loadWorkflowDeploymentSnapshot,
   saveWorkflowToNormalizedTables,
@@ -86,6 +87,8 @@ export interface DeploymentAttemptResult {
 
 export interface PerformFullDeployParams {
   workflowId: string
+  /** Canonical authorized workspace, required for Excel publication. Not a client assertion. */
+  assertedWorkspaceId?: string
   userId: string
   /**
    * Optional summary of what changed, stored on the created deployment version.
@@ -148,6 +151,7 @@ export interface PerformFullDeployResult {
 export async function performFullDeploy(
   params: PerformFullDeployParams
 ): Promise<PerformFullDeployResult> {
+  params = { ...params, actor: params.actor && { ...params.actor } }
   const { workflowId, userId } = params
   const actorId = params.actorId ?? userId
   const requestId = params.requestId ?? generateRequestId()
@@ -180,7 +184,7 @@ export async function performFullDeploy(
     return {
       success: false,
       error: getErrorMessage(error, 'Failed to prepare workflow deployment'),
-      errorCode: 'internal',
+      errorCode: error instanceof OrchestrationError ? error.code : 'internal',
     }
   }
 }
@@ -295,7 +299,14 @@ async function performStableFullDeploy(params: {
   requestId: string
   idempotencyKey: string
 }): Promise<PerformFullDeployResult> {
-  const workflowState = await loadWorkflowDeploymentSnapshot(params.params.workflowId)
+  const excel = await captureWorkflowExcelDeploymentSnapshot({
+    workflowId: params.params.workflowId,
+    assertedWorkspaceId: params.params.assertedWorkspaceId,
+    actor: params.params.actor,
+    idempotencyKey: params.idempotencyKey,
+  })
+  const workflowState =
+    excel?.workflowState ?? (await loadWorkflowDeploymentSnapshot(params.params.workflowId))
   if (!workflowState) {
     return {
       success: false,
@@ -303,8 +314,24 @@ async function performStableFullDeploy(params: {
       errorCode: 'validation',
     }
   }
+  // A concurrent edit after the non-Excel observation must not publish Excel through the
+  // legacy loader without a server capture, named author and native draft CAS.
+  if (
+    !excel &&
+    Object.values(workflowState.blocks).some((block) => block.type === 'memlia_excel')
+  ) {
+    return {
+      success: false,
+      error: 'Excel deployment snapshot refused',
+      errorCode: 'validation',
+    }
+  }
 
-  const prepared = await prepareWorkflowSnapshotDeployment({ ...params, workflowState })
+  const prepared = await prepareWorkflowSnapshotDeployment({
+    ...params,
+    workflowState,
+    ...(excel ? { excelProcedureSnapshot: excel.excelProcedureSnapshot } : {}),
+  })
   if (!prepared.success) return prepared
   return finishPreparedWorkflowDeployment(prepared, params.requestId)
 }

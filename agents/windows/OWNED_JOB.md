@@ -27,8 +27,8 @@ binaires/cwd possédés restent au futur host, hors de toute entrée réseau.
 
 L'exécutable est explicite ; `subprocess.list2cmdline` construit la ligne mutable
 de `CreateProcessW`, sans shell intermédiaire. Le bloc d'environnement Unicode
-capturé reste limité à 16 Kio. Le Job est anonyme et non héritable ; aucun handle
-du parent n'est hérité. Le worker devra ouvrir ses propres artefacts possédés.
+capturé reste limité à 16 Kio. Le Job est anonyme et non héritable ; sans l'option
+IO décrite plus bas, aucun handle du parent n'est hérité. Le worker devra ouvrir ses propres artefacts possédés.
 
 Après contrôle de disque libre d'au moins 40 Gio et d'échéance, l'ordre est :
 
@@ -110,3 +110,69 @@ entiers Win32 à largeur fixe et des pointeurs, sans dépendre de `c_long` du Ma
   : flags et arrêt par handle possédé.
 
 Code Memlia sous droits réservés ; pas de nouvelle dépendance redistribuée.
+
+## Option d'entrées et sorties bornées
+
+`OwnedJob(..., io=JobIO(stdin=b'...', stdout_limit=..., stderr_limit=...))`
+active un transport facultatif. Sans cette option, les flags, l'ABI et l'absence
+complète d'héritage du chemin historique sont conservés. `JobIO` capture des
+bytes immuables, au plus 256 Kio en entrée. Chaque plafond de sortie est un
+entier de 1 à 1 Mio (défauts : stdout 1 Mio, stderr 64 Kio). Les caps sont
+**cumulatifs**, même après lecture des fragments. L'entrée et les sorties ne
+figurent pas dans les repr ; elles restent privées et le caller décide de leur
+projection. Ce transport n'accorde aucune autorité à leur contenu.
+
+Trois pipes nommés locaux et uniques remplacent les std handles : extrémités
+parent non héritables et overlapped, extrémités enfant synchrones. Le premier
+serveur exclusivement créé refuse les clients distants et vérifie que le client
+connecté appartient au PID courant. `STARTUPINFOEX` désigne **exactement les trois
+handles enfant** dans `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`, sans handle du Job,
+processus, événement, pipe parent ou autre handle ambiant. Le parent ferme ses
+copies des extrémités enfant avant assignation/reprise. Le lancement reste
+suspendu → assigné/confirmé → repris une fois.
+
+Windows exige que ces trois handles soient brièvement héritables. Le host doit
+continuer à interdire les créations concurrentes à héritage ambiant dans son
+propre processus : une liste explicite protège notre enfant, pas un autre
+launcher non conforme. Le nom aléatoire/local et le contrôle PID sont une
+frontière de possession, pas une isolation d'un compte compromis.
+
+Chaque `poll()` fait au plus une soumission ou observation par flux, par blocs
+de 16 Kio au maximum. Les écritures partielles conservent les octets restants ;
+le pipe stdin est fermé après leur transfert complet. Aucun `FlushFileBuffers`,
+thread de lecture bloquant, shell ou voie subprocess de lancement n'est ajouté.
+`take_output()` rend les nouveaux fragments en `JobOutput`, avec les états
+stdin/EOF observés, puis vide leurs buffers de livraison. Un read réussi de zéro
+octet n'est pas traité comme EOF : seule la rupture du pipe l'atteste.
+
+`JobState.io_complete` vaut `None` sans IO ; avec IO, il ne vaut `True` qu'après
+entrée transférée/fermée et deux EOF observés sans défaut. Le caller doit exiger
+**Job vide, tête terminée, code attendu et io_complete**, puis fermeture possédée,
+avant de qualifier le transport. Ni ces états ni les bytes n'attestent réussite
+métier, sauvegarde Excel ou fermeture d'un service lancé hors du Job.
+
+L'arrêt explicite reste `cleanup()` depuis le propriétaire ; délai, dépassement
+ou interruption pendant IO tentent aussi cette fermeture. Toute annulation ou
+abandon d'un flux incomplet invalide sa complétude. La fermeture termine d'abord
+les processus possédés comme auparavant, demande ensuite l'annulation de chaque
+requête par son `OVERLAPPED`, et conserve buffers, événements et handles tant que
+la fin n'est pas observée. `CancelIoEx` réussi ou `ERROR_NOT_FOUND` seul n'est pas
+une preuve de fin. Une requête encore en vol ou une erreur de lecture d'état
+conserve HOLD après le budget de réconciliation existant de 5 s. Le propriétaire
+et sa réservation doivent alors rester retenus. Pas de retry d'une commande.
+
+Les tests supplémentaires exercent ce vrai chemin ctypes avec DLL simulée et
+états d'IO contrôlés : liste exacte, entrées binaires/partielles, sorties séparées,
+caps cumulatifs, EOF, refus et annulation non encore complétée. **Aucun test
+Windows, pipe natif, COM ou Desktop n'est qualifié par ces tests Mac.** La future
+qualification doit aussi mesurer stdin non consommé, saturation simultanée des
+deux sorties, enfant conservant un std handle, annulation et absence d'héritage
+d'un handle témoin étranger. Les syscalls de préparation restent coopératifs,
+sans promesse de préemption d'un appel noyau bloqué.
+
+Sources Microsoft du contrat d'IO :
+
+- [Handle list et héritage explicite](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute).
+- [Serveur de pipes overlapped](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-server-using-overlapped-i-o).
+- [Observation sans attente](https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-getoverlappedresult).
+- [Annulation et durée de vie des buffers](https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-cancelioex).

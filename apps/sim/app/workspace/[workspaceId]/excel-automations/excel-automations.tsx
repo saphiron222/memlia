@@ -118,6 +118,22 @@ function ExcelAutomationsContent({ workspaceId, userId }: Props) {
             travail.
           </p>
         </header>
+        <section aria-labelledby='excel-desktop-pane' className='space-y-3'>
+          <h2 id='excel-desktop-pane' className='font-medium text-lg'>
+            Votre classeur ouvert dans Excel
+          </h2>
+          <p className='text-[var(--text-secondary)]'>
+            Le volet Memlia pour Excel de bureau sur Windows permet de sauvegarder une copie privée
+            du classeur sur le serveur du cabinet. Il ne modifie pas vos cellules.
+          </p>
+          <a
+            href='/excel-addin/manifest.xml'
+            download='memlia-excel.xml'
+            className={`${focus} inline-block rounded-sm py-1 underline underline-offset-4`}
+          >
+            Télécharger le fichier d’installation du volet Excel
+          </a>
+        </section>
         <form
           className='space-y-4'
           onSubmit={(event) => {

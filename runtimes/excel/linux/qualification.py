@@ -3,6 +3,7 @@
 import argparse
 import ast
 import base64
+import ctypes
 from hashlib import sha256
 from io import BytesIO
 import json
@@ -19,6 +20,7 @@ import threading
 import time
 import uuid
 import struct
+import stat
 
 import prepare_context
 import supervisor as s
@@ -29,6 +31,7 @@ PYTHON_CONFIG = 'sha256:4f228bc1cbcfc794e4878312cfc241d368eff55a21c08d1e2bb26311
 ROOT = Path(__file__).resolve().parents[3]
 DOCKER = ['/usr/bin/docker', '--host', 'unix:///var/run/docker.sock']
 MAX_BUILD_LOG = 8*1024**2
+MAX_EXPORT_BYTES = 2*1024**3
 MIN_FREE_DISK = 6*1024**3
 PROBES = {
     'boundary': ('nonRoot', 'rootReadOnly', 'tmpWritable', 'networkDenied', 'noNewPrivileges'),
@@ -194,28 +197,59 @@ def verify_answer(raw):
     finally: book.close()
 
 
-def build_command(args, work, deadline, cancel):
-    """Build/pull only: bound merged log privately, no output printed/uploaded."""
+def build_command(args, work, deadline, cancel, *, artifact=None, receipt=None):
+    """Bound owned CLI streams; image-save stdout alone may become a private binary export."""
     child = None
+    exported = None
+    size, content_hash = 0, sha256()
     log_path = work/'build.private.log'
     total = log_path.stat().st_size if log_path.exists() else 0
     try:
         require(total <= MAX_BUILD_LOG, 'recipe_build_log_limit')
         require(time.monotonic() < deadline and not cancel.is_set(), 'recipe_build_interrupted')
+        if artifact is not None:
+            require(len(args) == 3 and args[:2] == ['image', 'save'] and s.IMAGE.fullmatch(args[2])
+                    and type(receipt) is dict, 'recipe_export_refused')
+            check_disk(artifact.parent, receipt, 'operator_export_start')
+            fd = os.open(artifact, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o400)
+            exported = os.fdopen(fd, 'wb')
+            identity = s.admission._view(os.fstat(exported.fileno()))[:6]
+        next_disk = time.monotonic()+2
         child = subprocess.Popen([*DOCKER,*args],cwd=work,env={'PATH':'/usr/bin:/bin','HOME':str(work),
             'DOCKER_CONFIG':str(work),'LANG':'C.UTF-8','DOCKER_BUILDKIT':'1'},stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+            stdout=subprocess.PIPE,stderr=subprocess.STDOUT if artifact is None else subprocess.PIPE)
         with (work/'build.private.log').open('ab') as log, selectors.DefaultSelector() as poll:
             os.set_blocking(child.stdout.fileno(),False)
-            poll.register(child.stdout,selectors.EVENT_READ)
+            poll.register(child.stdout,selectors.EVENT_READ, 'log' if artifact is None else 'artifact')
+            if artifact is not None:
+                os.set_blocking(child.stderr.fileno(),False)
+                poll.register(child.stderr,selectors.EVENT_READ,'log')
             while poll.get_map():
                 require(time.monotonic()<deadline and not cancel.is_set(),'recipe_build_interrupted')
+                if artifact is not None and time.monotonic() >= next_disk:
+                    check_disk(artifact.parent, receipt, 'operator_export_stream')
+                    next_disk = time.monotonic()+2
                 for key,_ in poll.select(.05):
                     data=os.read(key.fileobj.fileno(),65536)
                     if not data: poll.unregister(key.fileobj)
+                    elif key.data == 'artifact':
+                        size += len(data)
+                        require(size <= MAX_EXPORT_BYTES, 'recipe_export_limit')
+                        exported.write(data);content_hash.update(data)
                     else:
-                        total+=len(data); require(total<=MAX_BUILD_LOG,'recipe_build_log_limit'); log.write(data)
+                        total+=len(data); require(total<=MAX_BUILD_LOG,'recipe_build_log_limit'); log.write(data);log.flush()
+                        require(artifact is None, 'recipe_export_stderr')
             require(child.wait(timeout=max(.01,deadline-time.monotonic()))==0,'recipe_build_failed')
+        if artifact is not None:
+            require(size > 0, 'recipe_export_refused')
+            exported.flush();os.fsync(exported.fileno())
+            info = os.fstat(exported.fileno())
+            require(s.admission._view(info)[:6] == identity and info.st_size == size
+                    and stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+                    and stat.S_IMODE(info.st_mode) == 0o400
+                    and s.admission._view(artifact.lstat()) == s.admission._view(info))
+            check_disk(artifact.parent, receipt, 'operator_export_end')
+            return {'sha256':content_hash.hexdigest(), 'size':size}
     finally:
         if child is not None:
             if child.poll() is None:
@@ -223,6 +257,8 @@ def build_command(args, work, deadline, cancel):
                 try: child.wait(timeout=2)
                 except subprocess.TimeoutExpired: child.kill(); child.wait(timeout=2)
             child.stdout.close()
+            if child.stderr is not None: child.stderr.close()
+        if exported is not None: exported.close()
 
 
 def run_case(docker, image, wire, probe, cancel, cases):
@@ -271,7 +307,7 @@ def qualification_proof(receipt):
     return s.admission.validate_proof(proof)
 
 
-def consume_through_host(proof, wire, deadline, cancel, record, *, application_work=None):
+def consume_through_host(proof, wire, deadline, cancel, record, *, application_work=None, durable_config=None):
     """Explicit root-owned CI consumer; real Unix peer + public execute, no Sim authority."""
     require(os.getuid() == 0 and time.monotonic() < deadline and not cancel.is_set())
     s.admission.validate_proof(proof)
@@ -337,10 +373,16 @@ def consume_through_host(proof, wire, deadline, cancel, record, *, application_w
         record.update(peerAccepted=True, otherUidRefused=True, sameQualifiedImage=True)
         if application_work is not None:
             import application_qualification
-            record['stage']='native_application'
-            record['application']={}
-            application_qualification.consume(socket_path,wire,deadline,cancel,
-                                              application_work,record['application'])
+            if durable_config is None:
+                record['stage']='native_application'
+                record['application']={}
+                application_qualification.consume(socket_path,wire,deadline,cancel,
+                                                  application_work,record['application'])
+            else:
+                record['stage']='durable_application'
+                record['durableApplication']={}
+                application_qualification.consume_durable(socket_path,wire,deadline,cancel,
+                    application_work.with_name('durable-application'),record['durableApplication'],durable_config)
     finally:
         closed = process is None
         if process is not None:
@@ -368,10 +410,140 @@ def consume_through_host(proof, wire, deadline, cancel, record, *, application_w
     record.update(passed=True,stage='complete')
 
 
-def run(wheelhouse, output, *, exercise_host=False, exercise_application=False):
+def release_destination(path):
+    require(isinstance(path, Path) and path.is_absolute() and str(path) == os.path.normpath(path)
+            and len(os.fsencode(path)) <= 4096 and not path.exists() and not path.is_symlink(),
+            'operator_release_destination_refused')
+    return s.admission._parents(path, os.getuid())
+
+
+def publish_release(staging, destination):
+    """Linux atomic no-replace commit; an unavailable primitive never falls back to overwrite."""
+    rename = ctypes.CDLL(None, use_errno=True).renameat2
+    rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    rename.restype = ctypes.c_int
+    fd = os.open(staging, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try: os.fsync(fd)
+    finally: os.close(fd)
+    if rename(-100, os.fsencode(staging), -100, os.fsencode(destination), 1) != 0:
+        raise OSError(ctypes.get_errno(), 'operator_release_commit_refused')
+    fd = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try: os.fsync(fd)
+    finally: os.close(fd)
+
+
+def discard_release(staging, identity, expected=None):
+    info = staging.lstat()
+    require((info.st_dev, info.st_ino) == identity and stat.S_ISDIR(info.st_mode)
+            and stat.S_IMODE(info.st_mode) == 0o700, 'operator_release_cleanup_refused')
+    files = list(staging.iterdir())
+    require({p.name for p in files} <= {'image.tar', 'proof.json', 'admission.json', 'release.json'})
+    if expected is not None:
+        require({p.name: s.admission._view(p.lstat()) for p in files} == expected)
+    observed = []
+    for path in files:
+        entry = path.lstat()
+        require(stat.S_ISREG(entry.st_mode) and entry.st_nlink == 1
+                and entry.st_uid == info.st_uid and stat.S_IMODE(entry.st_mode) == 0o400)
+        observed.append((path, s.admission._view(entry)))
+    for path, before in observed:
+        require(s.admission._view(path.lstat()) == before)
+        path.unlink()
+    require((staging.lstat().st_dev, staging.lstat().st_ino) == identity)
+    staging.rmdir()
+
+
+def hold_image(docker, image, nonce, deadline):
+    held = s._one(docker(['image', 'inspect', image], deadline=deadline))
+    require(held['Id'] == image and held['Os'] == 'linux' and held['Architecture'] == 'amd64'
+            and held['Config']['Labels']['org.memlia.excel.recipe'] == nonce,
+            'operator_release_image_refused')
+
+
+def remove_recipe_image(docker, image, nonce):
+    row = s._one(docker(['image', 'inspect', image], deadline=time.monotonic()+10))
+    require(row['Id'] == image and row['Config']['Labels']['org.memlia.excel.recipe'] == nonce)
+    docker(['image', 'rm', image], deadline=time.monotonic()+10)
+    remaining = docker(['image', 'ls', '--no-trunc', '--quiet', '--filter',
+                        'label=org.memlia.excel.recipe='+nonce], deadline=time.monotonic()+10)
+    require(not remaining.strip())
+
+
+def prepare_release(receipt, destination, docker, image, nonce, output, deadline, cancel):
+    host = receipt.get('hostConsumer', {})
+    application = host.get('application', {})
+    require(all(host.get(key) is True for key in
+                ('passed', 'cleanupComplete', 'peerAccepted', 'otherUidRefused', 'sameQualifiedImage', 'hostStopped'))
+            and host.get('resourcesRetained') is False and host.get('hostExitCode') == 0
+            and host.get('expectedPeerUid') == 1001 and host.get('expectedRefusedUid') == 1002
+            and all(application.get(key) is True for key in
+                    ('passed', 'businessPassed', 'readbackPassed', 'cleanupComplete'))
+            and application.get('resourcesRetained') is False
+            and not cancel.is_set(), 'operator_release_evidence_refused')
+    proof = qualification_proof(receipt)
+    release_destination(destination)
+    hold_image(docker, image, nonce, deadline)
+    staging = Path(tempfile.mkdtemp(prefix='.'+destination.name+'.', dir=destination.parent))
+    info = staging.lstat()
+    identity = (info.st_dev, info.st_ino)
+    record = receipt['operatorRelease']
+    record.update(status='staging', cleanupComplete=False)
+    try:
+        artifact = build_command(['image', 'save', image], output, deadline, cancel,
+                                 artifact=staging/'image.tar', receipt=receipt)
+        image_info = (staging/'image.tar').lstat()
+        require(stat.S_ISREG(image_info.st_mode) and image_info.st_nlink == 1
+                and stat.S_IMODE(image_info.st_mode) == 0o400
+                and 0 < image_info.st_size <= MAX_EXPORT_BYTES)
+        observed = sha256()
+        fd = os.open(staging/'image.tar', os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        with os.fdopen(fd, 'rb') as source:
+            require(s.admission._view(os.fstat(source.fileno())) == s.admission._view(image_info))
+            while chunk := source.read(65536):
+                require(time.monotonic() < deadline and not cancel.is_set())
+                observed.update(chunk)
+            require(s.admission._view(os.fstat(source.fileno())) == s.admission._view(image_info))
+        require(s.admission._view((staging/'image.tar').lstat()) == s.admission._view(image_info)
+                and artifact == {'sha256': observed.hexdigest(), 'size': image_info.st_size})
+        raw = json.dumps(proof, separators=(',', ':')).encode()
+        admission = s.admission.describe(raw)
+        admission_raw = json.dumps(admission, separators=(',', ':')).encode()
+        manifest = {'schemaVersion': 'memlia.excel-operator-release/v1',
+                    **{key: proof[key] for key in s.admission.IDENTITIES}, 'imageHeld': True,
+                    'proofSha256': sha256(raw).hexdigest(),
+                    'admissionSha256': sha256(admission_raw).hexdigest(),
+                    'artifact': {'file': 'image.tar', **artifact},
+                    'qualificationScope': 'native_api_in_process', 'durableWorkerQualified': False,
+                    'deploymentKernelQualified': False, 'imageLicensesReviewed': False}
+        for name, data in (('proof.json', raw), ('admission.json', admission_raw),
+                           ('release.json', json.dumps(manifest, separators=(',', ':')).encode())):
+            require(len(data) <= 16384)
+            fd = os.open(staging/name, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o400)
+            with os.fdopen(fd, 'wb') as stream:
+                stream.write(data); stream.flush(); os.fsync(stream.fileno())
+        views = {p.name: s.admission._view(p.lstat()) for p in staging.iterdir()}
+        require(set(views) == {'image.tar', 'proof.json', 'admission.json', 'release.json'})
+        return {'path': staging, 'identity': identity, 'views': views, 'manifest': manifest}
+    except Exception:
+        try:
+            discard_release(staging, identity)
+            record.update(status='failed', cleanupComplete=True)
+        except Exception:
+            record.update(status='failed', cleanupComplete=False, resourcesRetained=True)
+        raise
+
+
+def run(wheelhouse, output, *, exercise_host=False, exercise_application=False, operator_release=None, durable_config=None):
     require_linux()
     require(not exercise_application or exercise_host, 'application_host_required')
     require(not exercise_host or os.getuid()==0, 'host_operator_required')
+    if durable_config is not None:
+        require(exercise_host and exercise_application and os.getuid()==0 and operator_release is None,
+                'durable_mode_required')
+    if operator_release is not None:
+        require(exercise_host and exercise_application and os.getuid() == 0,
+                'operator_release_mode_required')
+        release_destination(operator_release)
     require(not output.exists() and not output.is_symlink())
     output.mkdir(mode=0o700)
     cancel = threading.Event()
@@ -380,9 +552,13 @@ def run(wheelhouse, output, *, exercise_host=False, exercise_application=False):
                'linuxRecipeCompleted': False, 'cases': {}, 'cleanupComplete': False, 'diskObservations': [],
                'buildCacheRemoved': False, 'hostDescendantsQualified': False, 'pythonBase': PYTHON_BASE}
     image, build_attempted = None, False
+    staged = None
+    if operator_release is not None:
+        receipt['operatorRelease'] = {'status': 'not_promoted', 'imageHeld': False,
+                                      'cleanupComplete': True, 'resourcesRetained': False}
     nonce = uuid.uuid4().hex
     tag = 'memlia-excel-recipe:'+nonce
-    deadline = global_deadline = time.monotonic()+600
+    deadline = global_deadline = time.monotonic()+(1800 if durable_config is not None else 600)
     def docker(args, payload=b'', *, deadline, cancel=None, limit=1024**2):
         # Clamp operations, not native cleanup, to the recipe's global deadline.
         cleanup = args[:2] in (['container','inspect'], ['container','stop'], ['container','rm'],
@@ -393,6 +569,13 @@ def run(wheelhouse, output, *, exercise_host=False, exercise_application=False):
         # Per-command trust for the admitted checkout under the explicit root CI mode.
         trust = ['-c','safe.directory='+str(ROOT)] if exercise_host else []
         return subprocess.check_output(['/usr/bin/git', *trust, *args], cwd=ROOT, timeout=5, stderr=subprocess.DEVNULL).decode().strip()
+    def verify_release_sources():
+        require(not git('status', '--porcelain', '--untracked-files=no')
+                and git('rev-parse', 'HEAD') == receipt['sourceCommit']
+                and sha256((ROOT/'runtimes/excel/requirements.lock').read_bytes()).hexdigest() == receipt['lockSha256']
+                and sha256((output/'context/context.json').read_bytes()).hexdigest() == receipt['contextSha256']
+                and sha256(Path(s.__file__).read_bytes()).hexdigest() == s.SOURCE_SHA256,
+                'operator_release_provenance_refused')
     try:
         check_disk(output, receipt, 'context')
         require(s.QUALIFIED_IMAGES == frozenset())
@@ -432,10 +615,16 @@ def run(wheelhouse, output, *, exercise_host=False, exercise_application=False):
             held=s._one(docker(['image','inspect',image],deadline=deadline))
             require(held['Id']==image and held['Config']['Labels']['org.memlia.excel.recipe']==nonce)
             if exercise_application:
+                extra={} if durable_config is None else {'durable_config':durable_config}
                 consume_through_host(qualification_proof(receipt),wire,deadline,cancel,
-                                     receipt['hostConsumer'],application_work=output/'application')
+                                     receipt['hostConsumer'],application_work=output/'application',**extra)
             else:
                 consume_through_host(qualification_proof(receipt),wire,deadline,cancel,receipt['hostConsumer'])
+        if operator_release is not None:
+            receipt['phase'] = 'operator_export'
+            verify_release_sources()
+            check_disk(output, receipt, receipt['phase'])
+            staged = prepare_release(receipt, operator_release, docker, image, nonce, output, deadline, cancel)
         receipt['status'] = 'passed'
         receipt['linuxRecipeCompleted'] = True
     except Exception:
@@ -451,10 +640,8 @@ def run(wheelhouse, output, *, exercise_host=False, exercise_application=False):
                 require(s.IMAGE.fullmatch(image))
                 row = s._one(docker(['image', 'inspect', image], deadline=time.monotonic()+10))
                 require(row['Id'] == image and row['Config']['Labels']['org.memlia.excel.recipe'] == nonce)
-                docker(['image', 'rm', image], deadline=time.monotonic()+10)
-                remaining = docker(['image', 'ls', '--no-trunc', '--quiet', '--filter',
-                    'label=org.memlia.excel.recipe='+nonce], deadline=time.monotonic()+10)
-                require(not remaining.strip())
+                if staged is None:
+                    remove_recipe_image(docker, image, nonce)
                 image_clean = True
         except Exception:
             image_clean = False
@@ -465,13 +652,49 @@ def run(wheelhouse, output, *, exercise_host=False, exercise_application=False):
         application = receipt.get('hostConsumer',{}).get('application')
         if application is not None:
             host_clean = host_clean and application.get('cleanupComplete') is True
+        durable = receipt.get('hostConsumer',{}).get('durableApplication')
+        if durable is not None:
+            host_clean = host_clean and durable.get('passed') is True and durable.get('cleanupComplete') is True
         receipt['cleanupComplete'] = image_clean and host_clean and all(c['cleanupComplete'] for c in receipt['cases'].values())
         if not receipt['cleanupComplete']:
             receipt.update(status='failed', linuxRecipeCompleted=False, code='recipe_cleanup_refused')
-        for n, handler in old.items():
-            signal.signal(n, handler)
         if cancel.is_set():
             receipt.update(status='failed', linuxRecipeCompleted=False, code='recipe_interrupted')
+        if staged is not None:
+            receipt['phase'] = 'operator_commit'
+            record = receipt['operatorRelease']
+            try:
+                require(receipt['status'] == 'passed' and receipt['cleanupComplete']
+                        and not cancel.is_set(), 'operator_release_evidence_refused')
+                verify_release_sources()
+                hold_image(docker, image, nonce, deadline)
+                release_destination(operator_release)
+                require((staged['path'].lstat().st_dev, staged['path'].lstat().st_ino) == staged['identity']
+                        and {p.name: s.admission._view(p.lstat()) for p in staged['path'].iterdir()} == staged['views'])
+                publish_release(staged['path'], operator_release)
+                require(not cancel.is_set(), 'recipe_interrupted')
+                record.update(status='promoted', imageHeld=True, cleanupComplete=True,
+                              resourcesRetained=True, bundleDirectory=str(operator_release),
+                              artifact=staged['manifest']['artifact'])
+            except Exception:
+                cleaned = False
+                try:
+                    owned = staged['path'] if staged['path'].exists() or staged['path'].is_symlink() else operator_release
+                    discard_release(owned, staged['identity'], staged['views'])
+                    remove_recipe_image(docker, image, nonce)
+                    cleaned = True
+                except Exception:
+                    pass
+                record.update(status='failed', imageHeld=False if cleaned else None, cleanupComplete=cleaned,
+                              resourcesRetained=not cleaned)
+                receipt.update(status='failed', linuxRecipeCompleted=False,
+                               cleanupComplete=receipt['cleanupComplete'] and cleaned,
+                               code='operator_release_refused')
+        elif operator_release is not None and not receipt['operatorRelease']['cleanupComplete']:
+            receipt.update(status='failed', linuxRecipeCompleted=False, cleanupComplete=False,
+                           code='operator_release_cleanup_refused')
+        for n, handler in old.items():
+            signal.signal(n, handler)
         # Closed receipt only. No logs, workbooks, arbitrary errors or inspect JSON.
         (output/'receipt.json').write_text(json.dumps(receipt, indent=2)+'\n')
         print(json.dumps(receipt, separators=(',', ':')))
@@ -487,8 +710,13 @@ if __name__ == '__main__':
                         help='Explicit operator CI mode: same-image host/UID qualification before cleanup')
     parser.add_argument('--exercise-application',action='store_true',
                         help='Manual native API/file composition using that same host; requires --exercise-host')
+    parser.add_argument('--operator-release', type=Path,
+                        help='Explicit root/Linux promotion: fresh protected bundle; keep exact image and bounded export')
+    parser.add_argument('--durable-compose-config',type=Path,
+                        help='Explicit root/Linux native Compose campaign; requires host/application, cannot promote image')
     options=parser.parse_args()
     try: result=run(options.wheelhouse,options.output,exercise_host=options.exercise_host,
-                   exercise_application=options.exercise_application)
+                   exercise_application=options.exercise_application,operator_release=options.operator_release,
+                   durable_config=options.durable_compose_config)
     except Exception: print('{"status":"failed","code":"linux_recipe_unavailable"}');result=1
     raise SystemExit(result)

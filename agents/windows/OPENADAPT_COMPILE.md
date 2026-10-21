@@ -70,6 +70,16 @@ peut être passé par l'appelant. L'OCR reste nécessaire : RapidOCR construit s
 trois sessions ONNX avec les poids embarqués. Ce pin ne télécharge pas les poids
 dans le chemin lu, mais l'absence de tout réseau natif n'est pas qualifiée.
 
+Le worker neuf chargé des captures Windows transmet aussi le paramètre natif
+`target_surface='windows'`. Le compilateur Flow résout la surface et le mode
+d'exécution, et refuse lui-même une surface contradictoire dans le recording.
+Memlia ne réécrit ni `meta.json` ni `backend_hints`. Le loader natif doit relire
+`surface == 'windows'` dans le bundle, sinon aucun résultat n'est livré.
+Le port générique conserve `target_surface=None` par défaut (kwarg omis) ; seul
+`None` ou la chaîne exacte `windows` est accepté avant IO. Cette liaison indique
+la surface d'exécution ; le statut reste `to_test`, sans qualification ni accord
+de replay de production.
+
 Le staging appartient au worker, racine/répertoires0700 et fichiers0600 sur POSIX ;
 umask077 temporaire restauré. **Une ACL Windows n'est pas qualifiée par chmod** :
 le répertoire utilisateur/temp et l'installateur devront être qualifiés sur cet

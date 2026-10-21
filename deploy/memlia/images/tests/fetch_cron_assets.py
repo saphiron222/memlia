@@ -25,7 +25,7 @@ PINNED = {
 
 
 def download(url):
-    return subprocess.run(['curl', '--fail', '--location', '--silent', '--show-error', '--max-time', '90', url], capture_output=True, check=True).stdout
+    return subprocess.run(['curl', '--fail', '--location', '--silent', '--show-error', '--max-time', '90', '--max-filesize', '67108864', url], capture_output=True, check=True).stdout
 
 
 def sha256(data):
@@ -37,7 +37,23 @@ def go_zip_hash(archive):
     return 'h1:' + base64.b64encode(hashlib.sha256(lines.encode()).digest()).decode()
 
 
-def fetch(output):
+def asset_pins(architecture):
+    if architecture not in ('arm64','amd64'):
+        raise ValueError('Unsupported cron architecture')
+    pins=dict(PINNED)
+    if architecture=='amd64':
+        pins['supercronic']=('https://github.com/aptible/supercronic/releases/download/v0.2.33/supercronic-linux-amd64',
+            'feefa310da569c81b99e1027b86b27b51e6ee9ab647747b49099645120cfc671')
+    lock='cron-apk.sha256' if architecture=='arm64' else 'cron-apk-amd64.sha256'
+    platform='aarch64' if architecture=='arm64' else 'x86_64'
+    for line in Path(__file__).with_name(lock).read_text().splitlines():
+        digest,name=line.split('  ',1)
+        pins['apk/'+name]=('https://dl-cdn.alpinelinux.org/alpine/v3.24/main/'+platform+'/'+name,digest)
+    return pins
+
+
+def fetch(output, architecture):
+    pins=asset_pins(architecture)
     output = Path(output)
     if output.exists():
         raise FileExistsError(output)
@@ -45,10 +61,6 @@ def fetch(output):
     with tempfile.TemporaryDirectory(dir=output.parent, prefix='.assets-') as temporary:
         staging = Path(temporary) / 'assets'
         staging.mkdir()
-        pins = dict(PINNED)
-        for line in Path(__file__).with_name('cron-apk.sha256').read_text().splitlines():
-            digest, name = line.split('  ', 1)
-            pins['apk/' + name] = ('https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/' + name, digest)
         receipts = {}
         for name, (url, expected) in pins.items():
             data = download(url)
@@ -93,4 +105,6 @@ def fetch(output):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('output', type=Path)
-    fetch(parser.parse_args().output)
+    parser.add_argument('--architecture',choices=['arm64','amd64'],required=True)
+    args=parser.parse_args()
+    fetch(args.output,args.architecture)

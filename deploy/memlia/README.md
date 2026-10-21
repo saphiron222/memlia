@@ -32,6 +32,11 @@ du laboratoire. Aucun déploiement client n'a été effectué.
    pas leurs droits. Ne pas utiliser le compte administrateur pour les apps.
    `POSTGRES_PASSWORD` initialise seulement le volume neuf ; le changer dans
    `.env` ne change pas le mot de passe d'une base existante.
+   Le parcours initial à cinq rôles du profil Excel dispose maintenant du CLI
+   produit [`database-bootstrap.ts`](database-bootstrap.ts) dans l’image
+   migrations : suivre [`DATABASE_BOOTSTRAP.md`](DATABASE_BOOTSTRAP.md), puis
+   le runner natif et les contrôles de droits effectifs. Cela ne dispense pas
+   de qualifier les images et la composition complète.
 4. Préparer `/app/apps/sim/uploads` dans l'image avec propriétaire `1001:1001`,
    avant `USER nextjs`, puis tester création/lecture/restauration en UID 1001.
    Le provider local utilise `process.cwd()/uploads` ; Next standalone change

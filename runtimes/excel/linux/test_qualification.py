@@ -262,6 +262,69 @@ class ReceiptAndImageTests(unittest.TestCase):
 
 
 class BuildPipeTests(unittest.TestCase):
+    def test_export_keeps_bounded_binary_out_of_logs_in_new_readonly_file(self):
+        import hashlib,tempfile,threading,time,sys,stat
+        value=b'\x00owned-image-fixture\xff'
+        source="import os; assert 'MEMLIA_RECIPE_CANARY' not in os.environ; os.write(1,"+repr(value)+")"
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.dict(q.os.environ,{'MEMLIA_RECIPE_CANARY':'fixture'}), mock.patch.object(q,'DOCKER',[sys.executable,'-I','-B','-c',source]):
+            work=Path(temporary);target=work/'image.tar'
+            try:
+                exported=q.build_command(['image','save',IMAGE],work,time.monotonic()+2,threading.Event(),
+                                         artifact=target,receipt={'diskObservations':[]})
+            except TypeError as error:
+                self.fail('bounded native export unavailable: '+str(error))
+            self.assertEqual(target.read_bytes(),value)
+            self.assertEqual(exported,{'sha256':hashlib.sha256(value).hexdigest(),'size':len(value)})
+            self.assertEqual(stat.S_IMODE(target.stat().st_mode),0o400)
+            self.assertEqual((work/'build.private.log').read_bytes(),b'')
+
+    def test_export_refuses_overflow_stderr_nonzero_and_empty_output(self):
+        import tempfile,threading,time,sys
+        cases=[("import os; os.write(1,b'12345')",4,'recipe_export_limit'),
+               ("import os; os.write(2,b'PRIVATE_CANARY')",32,'recipe_export_stderr'),
+               ('raise SystemExit(3)',32,'recipe_build_failed'),
+               ('pass',32,'recipe_export_refused')]
+        for source,limit,code in cases:
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as temporary, mock.patch.object(q,'MAX_EXPORT_BYTES',limit), mock.patch.object(q,'DOCKER',[sys.executable,'-I','-B','-c',source]):
+                work=Path(temporary)
+                with self.assertRaisesRegex(ValueError,'^'+code+'$'):
+                    q.build_command(['image','save',IMAGE],work,time.monotonic()+2,threading.Event(),
+                                    artifact=work/'image.tar',receipt={'diskObservations':[]})
+                self.assertLessEqual((work/'image.tar').stat().st_size,limit)
+                if code=='recipe_export_stderr':
+                    self.assertEqual((work/'build.private.log').read_bytes(),b'PRIVATE_CANARY')
+
+    def test_export_never_replaces_existing_or_symlink_file(self):
+        import tempfile,threading,time
+        for symlink in (False,True):
+            with self.subTest(symlink=symlink), tempfile.TemporaryDirectory() as temporary, mock.patch.object(q.subprocess,'Popen') as process:
+                work=Path(temporary);foreign=work/'foreign';foreign.write_bytes(b'foreign')
+                target=work/'image.tar'
+                if symlink: target.symlink_to(foreign)
+                else: target.write_bytes(b'prior')
+                with self.assertRaises(OSError):
+                    q.build_command(['image','save',IMAGE],work,time.monotonic()+2,threading.Event(),
+                                    artifact=target,receipt={'diskObservations':[]})
+                process.assert_not_called()
+                self.assertEqual(foreign.read_bytes(),b'foreign')
+                self.assertEqual(target.read_bytes(),b'foreign' if symlink else b'prior')
+
+    def test_export_timeout_and_cancel_wait_for_exact_owned_child(self):
+        import tempfile,threading,time,sys,os
+        for cancellation in (False,True):
+            with self.subTest(cancel=cancellation), tempfile.TemporaryDirectory() as temporary:
+                work=Path(temporary);cancel=threading.Event()
+                source="import os,time;open('child.pid','w').write(str(os.getpid()));time.sleep(10)"
+                timer=threading.Timer(.2,cancel.set) if cancellation else None
+                if timer: timer.start()
+                try:
+                    with mock.patch.object(q,'DOCKER',[sys.executable,'-I','-B','-c',source]), self.assertRaises(ValueError):
+                        q.build_command(['image','save',IMAGE],work,time.monotonic()+(2 if cancellation else .2),cancel,
+                                        artifact=work/'image.tar',receipt={'diskObservations':[]})
+                finally:
+                    if timer: timer.cancel();timer.join()
+                with self.assertRaises(ProcessLookupError): os.kill(int((work/'child.pid').read_text()),0)
+
     def test_real_build_child_has_closed_env_and_private_bounded_output(self):
         import tempfile,threading,time,sys,os
         code="import os,sys; assert 'MEMLIA_RECIPE_CANARY' not in os.environ; print('fixed-progress', file=sys.stderr)"
@@ -338,6 +401,33 @@ class DiskBudgetTests(unittest.TestCase):
 
 
 class OperatorConsumptionTests(unittest.TestCase):
+    def test_atomic_publish_uses_no_replace_and_refuses_unavailable_primitive(self):
+        import ctypes,errno,os,tempfile
+        from types import SimpleNamespace
+        class Rename:
+            def __call__(self,source_fd,source,target_fd,target,flags):
+                self_test.assertEqual((source_fd,target_fd,flags),(-100,-100,1))
+                source,target=Path(os.fsdecode(source)),Path(os.fsdecode(target))
+                if target.exists():
+                    ctypes.set_errno(errno.EEXIST)
+                    return -1
+                source.rename(target)
+                return 0
+        self_test=self
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);source=root/'staging';target=root/'final'
+            source.mkdir();(source/'owned').write_bytes(b'owned')
+            with mock.patch.object(q.ctypes,'CDLL',return_value=SimpleNamespace(renameat2=Rename())):
+                q.publish_release(source,target)
+                self.assertEqual((target/'owned').read_bytes(),b'owned')
+                source.mkdir();(source/'owned').write_bytes(b'another')
+                with self.assertRaises(OSError):q.publish_release(source,target)
+                self.assertEqual((source/'owned').read_bytes(),b'another')
+                self.assertEqual((target/'owned').read_bytes(),b'owned')
+            with mock.patch.object(q.ctypes,'CDLL',return_value=SimpleNamespace()), self.assertRaises(AttributeError):
+                q.publish_release(source,root/'unavailable')
+            self.assertTrue(source.is_dir());self.assertFalse((root/'unavailable').exists())
+
     def test_application_mode_never_creates_resources_without_explicit_host(self):
         import tempfile
         with tempfile.TemporaryDirectory() as folder, mock.patch.object(q,'require_linux'):
@@ -369,53 +459,173 @@ class OperatorConsumptionTests(unittest.TestCase):
             with self.assertRaises(ValueError):q.run(Path(folder),output,exercise_host=True)
             self.assertFalse(output.exists())
 
-    def lifecycle(self, exercise, fail=False, application=False, application_clean=True):
+    def lifecycle(self, exercise, fail=False, application=False, application_clean=True, release=False, change=None):
         import tempfile,hashlib
         from types import SimpleNamespace
-        observed=[];label=None
+        observed=[];label=None;recipe_cancel=None
+        self.bundle = None
+        self.foreign_preserved = False
         def context(source,wheels,output,base):
             output.mkdir();(output/'context.json').write_bytes(b'{}')
-            return {'lockSha256':hashlib.sha256((q.ROOT/'runtimes/excel/requirements.lock').read_bytes()).hexdigest()}
-        def build(args,work,deadline,cancel):
+            return {'lockSha256':'f'*64 if change=='lock' else hashlib.sha256((q.ROOT/'runtimes/excel/requirements.lock').read_bytes()).hexdigest()}
+        def build(args,work,deadline,cancel,**options):
             nonlocal label
             if args[0]=='build':
                 label=args[args.index('--label')+1].split('=',1)[1]
                 (work/'image.id').write_text(IMAGE)
+            if args[:2] == ['image','save']:
+                self.assertEqual(args,['image','save',IMAGE])
+                self.assertEqual(observed,['host_consumed','application_consumed'])
+                options['artifact'].write_bytes(b'owned-export-fixture')
+                options['artifact'].chmod(0o400)
+                observed.append('image_exported')
+                if change == 'cancel': cancel.set()
+                if change == 'extra': (options['artifact'].parent/'foreign').write_bytes(b'foreign')
+                if change == 'context': (work/'context/context.json').write_bytes(b'changed-context')
+                if change == 'export': return {'sha256':'f'*64,'size':20}
+                return {'sha256':hashlib.sha256(b'owned-export-fixture').hexdigest(),'size':20}
         def docker(argv,payload,deadline,cancel,cwd,limit):
             args=argv[len(q.DOCKER):]
             if args[:2]==['image','inspect']:
+                if change == 'image' and 'image_exported' in observed:
+                    return json.dumps([{'Id':'sha256:'+'f'*64,'Config':{'Labels':{'org.memlia.excel.recipe':'foreign'}}}]).encode()
                 return json.dumps([{'Id':q.PYTHON_CONFIG if args[2]==q.PYTHON_BASE else IMAGE,
                    'Os':'linux','Architecture':'amd64','Config':{'Labels':{'org.memlia.excel.recipe':label}}}]).encode()
             if args[:2]==['image','rm']:observed.append('image_removed');return b''
             if args[:2]==['image','ls']:return b''
             raise AssertionError('unexpected fixture transport')
         def run_case(docker,image,wire,probe,cancel,cases):
-            cases[probe or 'worker']={'passed':True,'cleanupComplete':True}
+            cases[probe or 'worker']={'passed':not(change == 'case' and probe == 'cpu'),'cleanupComplete':True}
         def consume(proof,wire,deadline,cancel,record,**options):
+            nonlocal recipe_cancel
+            recipe_cancel=cancel
             self.assertNotIn('image_removed',observed)
             self.assertEqual(set(proof['cases']),set(q.s.admission.CASES))
             self.assertEqual(proof['imageId'],IMAGE);observed.append('host_consumed')
             if application:
                 self.assertEqual(options,{'application_work':output/'application'})
-                record['application']={'passed':True,'cleanupComplete':application_clean}
+                record['application']={'passed':True,'businessPassed':True,'readbackPassed':True,
+                                       'cleanupComplete':application_clean,'resourcesRetained':not application_clean}
                 observed.append('application_consumed')
             else:self.assertEqual(options,{})
             if fail:
                 record.update(cleanupComplete=fail!='unknown',resourcesRetained=fail=='unknown')
                 raise ValueError('fixture_consumer_refused')
-            record.update(passed=True,cleanupComplete=True)
-        with tempfile.TemporaryDirectory() as folder:
+            record.update(passed=True,cleanupComplete=True,resourcesRetained=False,
+                          expectedPeerUid=1001,expectedRefusedUid=1002,peerAccepted=True,
+                          otherUidRefused=True,sameQualifiedImage=True,hostStopped=True,hostExitCode=0)
+        def publish(staging,destination):
+            self.assertFalse(destination.exists())
+            if change == 'collision':
+                destination.mkdir();(destination/'foreign').write_bytes(b'foreign')
+                raise FileExistsError('fixture-concurrent-operator')
+            staging.rename(destination)
+            observed.append('bundle_published')
+            if change == 'commit_cancel': recipe_cancel.set()
+            if change == 'commit_unknown': raise OSError('fixture-lost-reply')
+        native_uid = q.os.getuid()
+        native_parents = q.s.admission._parents
+        def disk(_path):
+            return SimpleNamespace(free=None if change=='disk' and 'image_exported' in observed else 10*1024**3)
+        def revision(argv,**_options):
+            if argv[-2:]==['rev-parse','HEAD']:
+                return (b'f' if change=='source' and 'image_exported' in observed else b'c')*40
+            return b''
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent if release else None) as folder:
             output=Path(folder)/'owned'
-            with mock.patch.object(q,'require_linux'), mock.patch.object(q.os,'getuid',return_value=0), mock.patch.object(q.shutil,'disk_usage',return_value=SimpleNamespace(free=10*1024**3)), mock.patch.object(q.subprocess,'check_output',side_effect=lambda argv,**kw: b'c'*40 if argv[-2:]==['rev-parse','HEAD'] else b''), mock.patch.object(q.prepare_context,'prepare',side_effect=context), mock.patch.object(q,'build_command',side_effect=build), mock.patch.object(q.s,'_command',side_effect=docker), mock.patch.object(q,'fixture_wire',return_value=b'fixture'), mock.patch.object(q,'run_case',side_effect=run_case), mock.patch.object(q,'consume_through_host',side_effect=consume), mock.patch('builtins.print'):
-                result=q.run(Path(folder)/'wheels',output,exercise_host=exercise,
-                             exercise_application=application)
+            destination=Path(folder)/'operator-release'
+            with mock.patch.object(q,'require_linux'), mock.patch.object(q.os,'getuid',return_value=0), mock.patch.object(q.shutil,'disk_usage',side_effect=disk), mock.patch.object(q.subprocess,'check_output',side_effect=revision), mock.patch.object(q.prepare_context,'prepare',side_effect=context), mock.patch.object(q,'build_command',side_effect=build), mock.patch.object(q.s,'_command',side_effect=docker), mock.patch.object(q,'fixture_wire',return_value=b'fixture'), mock.patch.object(q,'run_case',side_effect=run_case), mock.patch.object(q,'consume_through_host',side_effect=consume), mock.patch.object(q.s.admission,'_parents',side_effect=lambda path,owner: native_parents(path,native_uid)), mock.patch.object(q,'publish_release',side_effect=publish,create=True), mock.patch.object(q.s,'SOURCE_SHA256','f'*64 if change=='supervisor' else q.s.SOURCE_SHA256), mock.patch('builtins.print'):
+                try:
+                    result=q.run(Path(folder)/'wheels',output,exercise_host=exercise,
+                                 exercise_application=application,
+                                 **({'operator_release':destination} if release else {}))
+                except TypeError as error:
+                    self.fail('operator release invocation unavailable: '+str(error))
             receipt=json.loads((output/'receipt.json').read_bytes())
+            if destination.exists() and (destination/'release.json').is_file():
+                self.bundle = {'names':{p.name for p in destination.iterdir()},
+                               'image':(destination/'image.tar').read_bytes(),
+                               'manifest':json.loads((destination/'release.json').read_bytes()),
+                               'admission':q.s.admission.capture(str(destination/'admission.json'),IMAGE,q.s.SOURCE_SHA256)}
+            if destination.exists() and (destination/'foreign').is_file():
+                self.foreign_preserved=(destination/'foreign').read_bytes()==b'foreign'
         return result,receipt,observed
 
     def test_default_does_not_admit_or_consume_an_image(self):
         result,receipt,observed=self.lifecycle(False)
         self.assertEqual(result,0);self.assertNotIn('hostConsumer',receipt)
         self.assertEqual(observed,['image_removed']);self.assertFalse(receipt['runtimeActivated'])
+
+    def test_explicit_operator_release_holds_and_exports_exact_image_after_complete_cleanup(self):
+        import hashlib
+        result,receipt,observed=self.lifecycle(True,application=True,release=True)
+        self.assertEqual(result,0)
+        self.assertEqual(observed,['host_consumed','application_consumed','image_exported','bundle_published'])
+        self.assertTrue(receipt['cleanupComplete'])
+        self.assertFalse(receipt['runtimeActivated'])
+        self.assertEqual(receipt['operatorRelease']['status'],'promoted')
+        self.assertTrue(receipt['operatorRelease']['imageHeld'])
+        self.assertEqual(self.bundle['image'],b'owned-export-fixture')
+        self.assertEqual(self.bundle['manifest']['artifact'],
+                         {'file':'image.tar','sha256':hashlib.sha256(b'owned-export-fixture').hexdigest(),'size':20})
+        self.assertTrue(q.s.admission.permits(self.bundle['admission'],IMAGE,q.s.SOURCE_SHA256))
+
+    def test_cancel_during_commit_or_lost_commit_reply_never_leaves_a_published_admission(self):
+        for change in ('commit_cancel','commit_unknown'):
+            with self.subTest(change=change):
+                result,receipt,_=self.lifecycle(True,application=True,release=True,change=change)
+                self.assertEqual(result,1)
+                self.assertNotEqual(receipt['operatorRelease']['status'],'promoted')
+                self.assertIsNone(self.bundle)
+
+    def test_unexpected_export_entry_never_becomes_an_operator_bundle(self):
+        result,receipt,_=self.lifecycle(True,application=True,release=True,change='extra')
+        self.assertEqual(result,1)
+        self.assertFalse(receipt['cleanupComplete'])
+        self.assertIsNone(self.bundle)
+
+    def test_release_requires_all_cases_provenance_image_export_and_observed_disk(self):
+        for change in ('case','source','lock','context','supervisor','image','export','cancel','disk'):
+            with self.subTest(change=change):
+                result,receipt,observed=self.lifecycle(True,application=True,release=True,change=change)
+                self.assertEqual(result,1)
+                self.assertNotEqual(receipt['operatorRelease']['status'],'promoted')
+                self.assertNotIn('bundleDirectory',receipt['operatorRelease'])
+                self.assertIsNone(self.bundle)
+                if change=='image': self.assertNotIn('image_removed',observed)
+
+    def test_incomplete_application_or_unknown_host_cleanup_never_export(self):
+        for options in ({'application_clean':False},{'fail':'unknown'}):
+            with self.subTest(options=options):
+                result,receipt,observed=self.lifecycle(True,application=True,release=True,**options)
+                self.assertEqual(result,1)
+                self.assertFalse(receipt['cleanupComplete'])
+                self.assertNotIn('image_exported',observed)
+                self.assertIsNone(self.bundle)
+
+    def test_concurrent_operator_destination_is_never_replaced(self):
+        result,receipt,_=self.lifecycle(True,application=True,release=True,change='collision')
+        self.assertEqual(result,1)
+        self.assertTrue(self.foreign_preserved)
+        self.assertIsNone(self.bundle)
+
+    def test_release_requires_explicit_host_application_and_fresh_nonsymlink_destination(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder, mock.patch.object(q,'require_linux'), mock.patch.object(q.os,'getuid',return_value=0):
+            root=Path(folder);output=root/'absent';destination=root/'destination'
+            for host,application in ((False,False),(True,False)):
+                with self.subTest(host=host,application=application), self.assertRaises(ValueError):
+                    q.run(root,output,exercise_host=host,exercise_application=application,operator_release=destination)
+                self.assertFalse(output.exists())
+            foreign=root/'foreign';foreign.write_bytes(b'foreign')
+            for symlink in (False,True):
+                if symlink: destination.symlink_to(foreign)
+                else: destination.mkdir()
+                with self.subTest(symlink=symlink), self.assertRaises(ValueError):
+                    q.run(root,output,exercise_host=True,exercise_application=True,operator_release=destination)
+                self.assertFalse(output.exists());self.assertEqual(foreign.read_bytes(),b'foreign')
+                if symlink: destination.unlink()
+                else: destination.rmdir()
 
     def test_consumer_uses_same_image_after_eight_cases_before_exact_removal(self):
         result,receipt,observed=self.lifecycle(True)

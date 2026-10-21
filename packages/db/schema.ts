@@ -8634,3 +8634,4 @@ export const copilotServiceUsage = pgTable(
 
 // Memlia additions remain separate from the Apache upstream schema definitions.
 export { memliaWorkflowCopy } from './memlia-schema'
+export { memliaDesktopAgentEnrollment, memliaDesktopAgentCertificate } from './memlia-agent-schema'
