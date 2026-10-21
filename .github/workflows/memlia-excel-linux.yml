@@ -8,6 +8,11 @@ on:
         required: false
         default: false
         type: boolean
+      check_web_context:
+        description: Contrôler seulement le frontend du Dockerfile web exact, sans build ni qualification (exclusif du parcours durable)
+        required: false
+        default: false
+        type: boolean
       exercise_host:
         description: Qualifier le host et les UID sur la même image après les huit cas (opérateur seulement)
         required: false
@@ -37,7 +42,7 @@ concurrency:
 jobs:
   packaging:
     # Private-runner quotas must be approved before enabling metered minutes.
-    if: github.event.repository.private == false && github.repository == 'saphiron222/memlia' && !inputs.exercise_durable
+    if: github.event.repository.private == false && github.repository == 'saphiron222/memlia' && !inputs.exercise_durable && !inputs.check_web_context
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     env:
@@ -180,7 +185,8 @@ jobs:
 
   durable:
     # Same public, standard runner. No external registry credentials or publication.
-    if: github.event_name == 'workflow_dispatch' && inputs.exercise_durable && github.event.repository.private == false && github.repository == 'saphiron222/memlia'
+    name: ${{ inputs.check_web_context && 'Contexte web — frontend seulement' || 'Compose durable — cinq images et parcours' }}
+    if: github.event_name == 'workflow_dispatch' && (inputs.exercise_durable || inputs.check_web_context) && github.event.repository.private == false && github.repository == 'saphiron222/memlia'
     runs-on: ubuntu-24.04
     timeout-minutes: 170
     env:
@@ -190,6 +196,12 @@ jobs:
       PIP_DISABLE_PIP_VERSION_CHECK: '1'
       PIP_NO_CACHE_DIR: '1'
     steps:
+      - name: Refuser deux parcours simultanés
+        shell: bash
+        env:
+          MEMLIA_EXERCISE_DURABLE: ${{ inputs.exercise_durable && '1' || '0' }}
+          MEMLIA_CHECK_WEB_CONTEXT: ${{ inputs.check_web_context && '1' || '0' }}
+        run: test "$MEMLIA_EXERCISE_DURABLE$MEMLIA_CHECK_WEB_CONTEXT" != 11
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.sha }}
@@ -199,11 +211,13 @@ jobs:
           python-version: '3.12.15'
           architecture: x64
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        if: inputs.exercise_durable && !inputs.check_web_context
         with:
           node-version: '24.22.0'
       - name: Vérifier les seules nouvelles frontières de préparation
         run: python3 -B scripts/ci/test-excel-durable-ci.py -v
       - name: Préparer les roues verrouillées pour la recette native existante
+        if: inputs.exercise_durable && !inputs.check_web_context
         shell: bash
         run: |
           set -euo pipefail
@@ -217,8 +231,10 @@ jobs:
           "$RUNNER_TEMP/excel-durable-python/bin/python" -I -B -m pip --isolated install \
             --no-index --no-cache-dir --no-deps --require-hashes --find-links "$RUNNER_TEMP/excel-durable-wheels" \
             -r runtimes/excel/requirements.lock > "$RUNNER_TEMP/excel-durable-install.private.log" 2>&1
-      - name: Construire les images et qualifier une seule fois Compose durable
+      - name: Exécuter uniquement le parcours manuel sélectionné
         shell: bash
+        env:
+          MEMLIA_CHECK_WEB_CONTEXT: ${{ inputs.check_web_context && '1' || '0' }}
         run: |
           set -euo pipefail
           umask 077
@@ -226,16 +242,24 @@ jobs:
           sudo -n chown -R root:root "$GITHUB_WORKSPACE"
           output="/var/lib/memlia-excel-ci-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           test ! -e "$output"
-          timeout --signal=TERM --kill-after=240s 155m sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_OS,MEMLIA_PUBLIC_RUN -- \
-            "$RUNNER_TEMP/excel-durable-python/bin/python" -B scripts/ci/excel-durable-ci.py \
-            --expected-commit "$GITHUB_SHA" --output "$output" --node "$(command -v node)" \
-            --wheelhouse "$RUNNER_TEMP/excel-durable-wheels" \
+          if [[ "$MEMLIA_CHECK_WEB_CONTEXT" == 1 ]]; then
+            runner=("$(command -v python3)"); extra=(--check-web-context); duration=15m
+          else
+            runner=("$RUNNER_TEMP/excel-durable-python/bin/python")
+            extra=(--exercise-durable --node "$(command -v node)" --wheelhouse "$RUNNER_TEMP/excel-durable-wheels")
+            duration=155m
+          fi
+          timeout --signal=TERM --kill-after=240s "$duration" sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_OS,MEMLIA_PUBLIC_RUN -- \
+            "${runner[@]}" -B scripts/ci/excel-durable-ci.py \
+            --expected-commit "$GITHUB_SHA" --output "$output" "${extra[@]}" \
             > "$RUNNER_TEMP/excel-durable-command.private.log" 2>&1
       - name: Publier uniquement le verdict fermé, jamais les données de recette
         if: always()
         shell: bash
+        env:
+          MEMLIA_CHECK_WEB_CONTEXT: ${{ inputs.check_web_context && '1' || '0' }}
         run: |
-          sudo -n python3 -B - "$GITHUB_WORKSPACE" "/var/lib/memlia-excel-ci-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" <<'PY'
+          sudo -n --preserve-env=MEMLIA_CHECK_WEB_CONTEXT python3 -B - "$GITHUB_WORKSPACE" "/var/lib/memlia-excel-ci-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" <<'PY'
           import importlib.util,json,os,stat,sys
           from pathlib import Path
           spec=importlib.util.spec_from_file_location('ci',Path(sys.argv[1])/'scripts/ci/excel-durable-ci.py')
@@ -256,8 +280,16 @@ jobs:
               assert (value['errorCode']=='none') == (value['status']=='passed')
               assert type(value['imagesBuilt']) is int and 0<=value['imagesBuilt']<=5
               assert type(value['cleanup']) is bool and type(value['durableQualified']) is bool
+              mode=os.environ.get('MEMLIA_CHECK_WEB_CONTEXT','0');assert mode in ('0','1')
+              if mode=='1':
+                  assert value['imagesBuilt']==0 and value['durableQualified'] is False and value['phase']!='complete'
+              else:
+                  assert value['phase']!='web-check'
+              if value['phase']=='web-check':
+                  assert value['imagesBuilt']==0 and value['durableQualified'] is False
               if value['status']=='passed':
-                  assert value['phase']=='complete' and value['cleanup'] and value['imagesBuilt']==5 and value['durableQualified']
+                  assert value['cleanup']
+                  assert value['phase']=='web-check' or (value['phase']=='complete' and value['imagesBuilt']==5 and value['durableQualified'])
               print(json.dumps(value,sort_keys=True))
           PY
       # No upload-artifact: private TLS keys, credentials, DB data, logs and XLSX

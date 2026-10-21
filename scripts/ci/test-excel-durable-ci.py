@@ -89,7 +89,7 @@ class Preparation(unittest.TestCase):
             # Execute the actual ordering fragment, with native context/Git verification;
             # only Next generation is doubled, no Docker or full application build.
             tree=ast.parse(Path(ci.__file__).read_text());run=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='run')
-            body=next(n for n in run.body if isinstance(n,ast.Try)).body
+            body=next(n for n in ast.walk(run) if isinstance(n,ast.If) and ast.unparse(n.test)=="mode == 'web-check'" and any(isinstance(c,ast.Name) and c.id=='check_web_context' for c in ast.walk(n))).orelse
             selected=[n for n in body if (isinstance(n,ast.Expr) and isinstance(n.value,ast.Call) and isinstance(n.value.func,ast.Name) and n.value.func.id=='check_types') or (isinstance(n,ast.For) and isinstance(n.iter,ast.Name) and n.iter.id=='APPS' and any(isinstance(c,ast.Call) and isinstance(c.func,ast.Attribute) and isinstance(c.func.value,ast.Name) and c.func.value.id=='prepare' for c in ast.walk(n)))]
             self.assertEqual(len(selected),2)
             scope={'check_types':ci.check_types,'type_phase':execute,'APPS':('web',), 'prepare':helper,
@@ -151,6 +151,16 @@ class Preparation(unittest.TestCase):
                     path.write_text(json.dumps(value));output=io.StringIO()
                     with contextlib.redirect_stdout(output):exec(code,{})
                     self.assertEqual(json.loads(output.getvalue()),value)
+                short=good|{'status':'passed','phase':'web-check','step':'web-check','errorCode':'none'}
+                path.write_text(json.dumps(short));output=io.StringIO()
+                with patch.dict(os.environ,{'MEMLIA_CHECK_WEB_CONTEXT':'1'}),contextlib.redirect_stdout(output):exec(code,{})
+                self.assertEqual(json.loads(output.getvalue()),short)
+                for change in ({'imagesBuilt':1},{'durableQualified':True},{'cleanup':False},
+                               {'phase':'complete','step':'complete'},
+                               {'phase':'complete','step':'complete','imagesBuilt':5,'durableQualified':True},{'step':'image-web-build'}):
+                    path.write_text(json.dumps(short|change));output=io.StringIO()
+                    with patch.dict(os.environ,{'MEMLIA_CHECK_WEB_CONTEXT':'1'}),contextlib.redirect_stdout(output),self.assertRaises(AssertionError):exec(code,{})
+                    self.assertEqual(output.getvalue(),'')
                 for change in ({'errorCode':'PRIVATE_CANARY'},{'step':'PRIVATE_CANARY'},
                                {'phase':'images','step':'context-web'},{'phase':'contexts','step':'image-web-build'},
                                {'extra':'PRIVATE_CANARY'},{'errorCode':'none'}):
@@ -213,11 +223,16 @@ class ImageDiagnostics(unittest.TestCase):
                 self.assertNotIn('PRIVATE_CANARY',got);self.assertIn(got,ci.ERROR_CODES)
 
     def test_arbitrary_substrings_ansi_splices_contradictions_and_bounds_remain_unknown(self):
-        for raw in [b'PRIVATE_CANARY unknown flag: --cgroup-parent',b'RUN echo "no space left on device"',b'unknown flag: --PRIVATE_CANARY',b'unknown flag: --cgroup-parent;PRIVATE_CANARY',b'unkno\x1b[31mwn flag: --cgroup-parent\n',b'\xffunknown flag: --cgroup-parent',b'\x00unknown flag: --cgroup-parent',b'PRIVATE_CANARY\vunknown flag: --cgroup-parent',b'unknown flag: --cgroup-parent\vPRIVATE_CANARY',b'PRIVATE_CANARY\xe2\x80\xa8unknown flag: --cgroup-parent',b'unknown flag: --cgroup-parent\nERROR: failed to build: no space left on device\n']:
-            with self.subTest(raw=raw):self.assertEqual(ci.classify_command_output(raw),'diagnostic_unknown')
+        for raw,reason in [(b'PRIVATE_CANARY unknown flag: --cgroup-parent','no_marker'),(b'RUN echo "no space left on device"','no_marker'),
+                           (b'unknown flag: --PRIVATE_CANARY','no_marker'),(b'unknown flag: --cgroup-parent;PRIVATE_CANARY','no_marker'),
+                           (b'unkno\x1b[31mwn flag: --cgroup-parent\n','control'),(b'\xffunknown flag: --cgroup-parent','utf8'),
+                           (b'\x00unknown flag: --cgroup-parent','control'),(b'PRIVATE_CANARY\vunknown flag: --cgroup-parent','control'),
+                           (b'unknown flag: --cgroup-parent\vPRIVATE_CANARY','control'),(b'PRIVATE_CANARY\xe2\x80\xa8unknown flag: --cgroup-parent','no_marker'),
+                           (b'unknown flag: --cgroup-parent\nERROR: failed to build: no space left on device\n','ambiguous')]:
+            with self.subTest(reason=reason):self.assertEqual(ci.classify_command_output(raw),'diagnostic_unknown_'+reason)
         self.assertEqual(ci.classify_command_output(b'\x1b[31munknown flag: --cgroup-parent\x1b[0m\n'),'observed_cli_flag_refused')
         self.assertEqual(ci.classify_command_output(b'x'*(ci.DIAGNOSTIC_BYTES+1)),'diagnostic_truncated')
-        self.assertEqual(ci.classify_command_output(b'x'*8193),'diagnostic_unknown')
+        self.assertEqual(ci.classify_command_output(b'x'*8193),'diagnostic_unknown_bounds')
 
     def test_private_log_requires_closed_owner_exact_file_and_full_capture(self):
         import os
@@ -296,5 +311,112 @@ class ImageDiagnostics(unittest.TestCase):
             self.assertEqual(receipt['failureCode'],'observed_cli_flag_refused')
             self.assertTrue(receipt['waited']);self.assertTrue(receipt['groupClosed'])
             self.assertIn(b'PRIVATE_CANARY',(work/'build.private.log').read_bytes())
+
+class WebContextCheck(unittest.TestCase):
+    def test_check_arguments_preserve_exact_inputs_without_build_outputs(self):
+        args=ci.web_check_arguments('owned',Path('/context'),'a'*40,'b'*64,'c'*32)
+        self.assertEqual(args[:2],['buildx','build']);self.assertIn('--call=check',args)
+        self.assertIn('--cgroup-parent=/',args);self.assertIn('NEXT_PUBLIC_APP_URL='+ci.ORIGIN,args)
+        self.assertIn('MEMLIA_SOURCE_COMMIT='+'a'*40,args);self.assertIn('MEMLIA_LOCK_SHA256='+'b'*64,args)
+        self.assertEqual(args[-3:],['--file','/context/Dockerfile','/context'])
+        for word in ('--load','--push','--tag','--output','RUN'):
+            self.assertNotIn(word,args)
+
+    def test_web_check_uses_real_git_context_and_only_frontend_command(self):
+        import os,subprocess
+        helper=ci.load(ci.ROOT/'deploy/memlia/images/tests/prepare_context.py','web_check_context_fixture')
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d)/'source';root.mkdir();private=Path(d)/'private';private.mkdir();seen=[];commands=[]
+            files={'docker/app.Dockerfile':'FROM scratch\n','bun.lock':'fixture lock\n','package.json':'{}',
+                   'bunfig.toml':'','turbo.json':'{}','patches/f.patch':'fixture','packages/example/a.ts':'export {}',
+                   'apps/sim/page.tsx':'export {}','compliance/upstream/sim/LICENSE':'fixture license'}
+            for name,value in files.items():
+                p=root/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_text(value)
+            def git(*args):return subprocess.check_output(['git','-C',str(root),*args],stderr=subprocess.PIPE,timeout=10,
+                env={'PATH':os.environ['PATH'],'HOME':os.environ['HOME'],'GIT_CONFIG_NOSYSTEM':'1'})
+            git('init','-q');git('add','.');git('-c','user.name=Fixture','-c','user.email=fixture@example.invalid','-c','commit.gpgsign=false','commit','-qm','fixture')
+            source=git('rev-parse','HEAD').decode().strip();lock=__import__('hashlib').sha256((root/'bun.lock').read_bytes()).hexdigest()
+            record={'status':'failed','phase':'tools','cleanup':False,'images':{}}
+            def start():seen.append('builder');return lambda:seen.append('guard')
+            def docker(args,**kw):commands.append((args,kw));seen.append('check')
+            ci.check_web_context(helper,root,private,source,lock,'c'*32,'owned',docker=docker,start_builder=start,
+                                 source=lambda:seen.append('source'),disk=lambda:seen.append('disk'),record=record)
+            self.assertTrue((private/'web/Dockerfile').is_file());self.assertFalse((private/'assets').exists())
+            self.assertEqual(len(commands),1);self.assertEqual(commands[0][1],{'seconds':180})
+            self.assertIn('--call=check',commands[0][0]);self.assertEqual(seen,['source','disk','source','builder','check','guard','source'])
+            self.assertEqual(record['phase'],'web-check');self.assertEqual(record['step'],'web-check')
+            self.assertEqual(record['status'],'passed');self.assertFalse(record['durableQualified']);self.assertEqual(record['images'],{})
+            # This helper stops at a command failure: no retry, typegen or image side effect.
+            record.update(status='failed');calls=[]
+            def refuse(*args,**kwargs):calls.append(1);raise ValueError('native_check_failed')
+            with self.assertRaisesRegex(ValueError,'native_check_failed'):
+                ci.check_web_context(helper,root,private/'second',source,lock,'c'*32,'owned',docker=refuse,
+                    start_builder=start,source=lambda:None,disk=lambda:None,record=record)
+            self.assertEqual(calls,[1]);self.assertEqual(record['status'],'failed')
+
+    def test_call_option_must_be_announced_by_real_help(self):
+        version=b'github.com/docker/buildx v0.29.1 '+b'a'*40+b'\n'
+        help_text=b'Usage:  docker buildx build [OPTIONS] PATH | URL | -\n      --cgroup-parent string Parent\n'
+        for option,code in [(b'      --call string Set frontend method\n',None),
+                            (b'', 'cli_call_unavailable'),(b'      --call-fake string PRIVATE_CANARY\n','cli_call_unavailable'),
+                            (b'      --call string one\n      --call string two\n','diagnostic_unknown')]:
+            calls=[]
+            def execute(args,**kw):calls.append(args);return version if len(calls)==1 else help_text+option
+            if code is None:self.assertTrue(ci.probe_buildx(execute,lambda _:None,require_call=True)['callListed'])
+            else:
+                with self.assertRaises(ValueError) as caught:ci.probe_buildx(execute,lambda _:None,require_call=True)
+                self.assertEqual(ci.error_code(caught.exception),code)
+            self.assertEqual(len(calls),2)
+
+    def test_short_success_never_projects_as_durable_or_emits_extra_data(self):
+        good={'status':'passed','phase':'web-check','step':'web-check','cleanup':True,'images':{},'durableQualified':False,'stderr':'PRIVATE_CANARY'}
+        projected=ci.project(good)
+        self.assertEqual(len(projected),7);self.assertEqual(projected['imagesBuilt'],0);self.assertFalse(projected['durableQualified'])
+        self.assertNotIn('PRIVATE_CANARY',json.dumps(projected))
+        for change in ({'images':{'web':{}}},{'durableQualified':True},{'cleanup':False},{'step':'image-web-build'},
+                       {'phase':'complete','step':'complete'},{'errorCode':'diagnostic_unknown_no_marker'}):
+            with self.subTest(change=change),self.assertRaises(ValueError):ci.project(good|change)
+        with self.assertRaises(ValueError):ci.project(good|{'mode':'web-check','phase':'complete','step':'complete','images':dict.fromkeys(ci.APPS,{}),'durableQualified':True})
+
+    def test_unknown_reasons_are_closed_and_do_not_weaken_recognition(self):
+        cases=[(b'PRIVATE_CANARY', 'diagnostic_unknown_no_marker'),(b'','diagnostic_unknown_bounds'),
+               (b'\xffPRIVATE_CANARY','diagnostic_unknown_utf8'),(b'PRIVATE_CANARY\x00','diagnostic_unknown_control'),
+               (b'unkno\x1b[31mwn flag: --cgroup-parent','diagnostic_unknown_control'),
+               (b'x'*8193,'diagnostic_unknown_bounds'),(b'\n'*65537,'diagnostic_unknown_bounds'),
+               (b'unknown flag: --cgroup-parent\nerror: lockfile had changes, but lockfile is frozen\n','diagnostic_unknown_ambiguous'),
+               (b'ERROR: failed to build: failed to solve: process "x" did not complete successfully: exit code: 1\nERROR: failed to build: failed to solve: process "x" did not complete successfully: exit code: 137\n','diagnostic_unknown_ambiguous')]
+        for raw,expected in cases:
+            with self.subTest(expected=expected):
+                value=ci.classify_command_output(raw);self.assertEqual(value,expected);self.assertIn(value,ci.ERROR_CODES)
+                self.assertNotIn('PRIVATE_CANARY',value)
+        self.assertEqual(ci.classify_command_output(b'unknown flag: --cgroup-parent;PRIVATE_CANARY'),'diagnostic_unknown_no_marker')
+        self.assertEqual(ci.classify_command_output(b'\x1b[31munknown flag: --cgroup-parent\x1b[0m\n'),'observed_cli_flag_refused')
+
+    def test_short_mode_is_explicit_and_skips_installs_types_registry_and_qualification(self):
+        import ast
+        args=ci.arguments(['--check-web-context','--expected-commit','a'*40,'--output','/var/lib/memlia-excel-ci-fixture'])
+        self.assertEqual(args.mode,'web-check');self.assertIsNone(args.node);self.assertIsNone(args.wheelhouse)
+        with self.assertRaises(SystemExit):ci.arguments(['--check-web-context','--exercise-durable','--expected-commit','a'*40,'--output','/tmp/x'])
+        tree=ast.parse(Path(ci.__file__).read_text());run=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='run')
+        branch=next(n for n in ast.walk(run) if isinstance(n,ast.If) and ast.unparse(n.test)=="mode == 'web-check'" and any(isinstance(c,ast.Name) and c.id=='check_web_context' for c in ast.walk(n)))
+        calls=[n.func.id if isinstance(n.func,ast.Name) else '' for n in ast.walk(ast.Module(body=branch.body,type_ignores=[])) if isinstance(n,ast.Call)]
+        self.assertEqual(calls,['check_web_context'])
+        self.assertIn('check_types',[n.func.id for n in ast.walk(ast.Module(body=branch.orelse,type_ignores=[])) if isinstance(n,ast.Call) and isinstance(n.func,ast.Name)])
+        self.assertEqual(sum(isinstance(n,ast.FunctionDef) and n.name=='start_builder' for n in ast.walk(run)),1)
+        workflow=(ci.ROOT/'.github/workflows/memlia-excel-linux.yml').read_text()
+        self.assertIn('check_web_context:',workflow);self.assertIn('!inputs.check_web_context',workflow)
+        self.assertIn("inputs.exercise_durable || inputs.check_web_context",workflow)
+        self.assertIn('MEMLIA_CHECK_WEB_CONTEXT',workflow);self.assertIn('--check-web-context',workflow)
+
+    def test_workflow_refuses_conflicting_modes_before_checkout(self):
+        import os,subprocess
+        workflow=(ci.ROOT/'.github/workflows/memlia-excel-linux.yml').read_text()
+        job=workflow.split('  durable:\n',1)[1]
+        line=next(line.strip().removeprefix('run: ') for line in job.splitlines() if line.strip().startswith('run: test '))
+        self.assertLess(job.index('run: test '),job.index('actions/checkout@'))
+        for durable,check,expected in [('0','0',0),('1','0',0),('0','1',0),('1','1',1)]:
+            result=subprocess.run(['/bin/bash','-c',line],env=os.environ|{'MEMLIA_EXERCISE_DURABLE':durable,'MEMLIA_CHECK_WEB_CONTEXT':check},
+                                  capture_output=True,timeout=2)
+            self.assertEqual(result.returncode,expected);self.assertEqual(result.stdout+result.stderr,b'')
 
 if __name__=='__main__':unittest.main()
