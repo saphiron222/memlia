@@ -201,6 +201,10 @@ ui_docker() {
   case "$1 $2" in
     'network create') step network_create; printf networkid;;
     'network connect') step network_connect;;
+    'network inspect')
+      [[ "$#" == 4 && "$3" == "$prefix-ui" && "$4" == "$prefix-ui-front" ]] || return 91
+      printf '%s\n' "$3" "$4" > "$metrics/network-inspect-targets"
+      printf '[]';;
     'pull --platform') step cache_pull;;
     'run -d') step cache_start; printf '%064d\n' 0;;
     *) return 91;;
@@ -220,6 +224,11 @@ ui_close() { current_stage=phase_ui-readback; return 0; }
                 self.assertEqual(receipt['stage'],expected)
                 self.assertEqual(receipt['exitCode'],17)
                 self.assertEqual(receipt['status'],'failed')
+                targets=p/'metrics/network-inspect-targets'
+                if failure in ('network_create','network_connect'):
+                    self.assertFalse(targets.exists())
+                else:
+                    self.assertEqual(targets.read_text().splitlines(),['owned-ui','owned-ui-front'])
 
 class UIReadinessDiagnostics(unittest.TestCase):
     def readiness(self, statuses, error=None):
