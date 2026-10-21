@@ -1,3 +1,5 @@
+// Modified by Memlia: register the worker-only Excel internal operation.
+import { memliaExcelTransformTool } from '@/tools/memlia_excel/transform'
 import {
   a2aCancelTaskTool,
   a2aGetAgentCardTool,
@@ -6397,6 +6399,7 @@ import {
 
 // Registry of all available tools
 export const tools: Record<string, ExecutableToolConfig> = {
+  memlia_excel_transform: memliaExcelTransformTool,
   a2a_cancel_task: a2aCancelTaskTool,
   a2a_get_agent_card: a2aGetAgentCardTool,
   a2a_get_task: a2aGetTaskTool,

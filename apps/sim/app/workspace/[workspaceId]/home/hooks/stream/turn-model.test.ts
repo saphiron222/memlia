@@ -1,3 +1,4 @@
+// Modified by Memlia: display and preserve limited Chat response notices.
 import { describe, expect, it } from 'vitest'
 import type { PersistedStreamEventEnvelope } from '@/lib/mothership/request/session/contract'
 import {
@@ -376,5 +377,89 @@ describe('reduceEvent — span end settles stale lane tools', () => {
     if (click?.kind !== 'tool') throw new Error('expected tool node')
     expect(click.status).toBe('error')
     expect(click.result?.error).toBe('nope')
+  })
+})
+
+describe('limited model response notice', () => {
+  it('shows a limited response separately from an applied edit without failing that edit', () => {
+    const model = apply([
+      envelope(1, 'text', { channel: 'assistant', text: 'Réponse partielle.' }),
+      toolCall(2, 'edit', 'propose_workflow_operations'),
+      toolResult(3, 'edit', true),
+      envelope(4, 'complete', {
+        status: 'complete',
+        response: {
+          modelTurn: { finishReason: 'max_tokens' },
+          workflow: {
+            version: 1,
+            provenance: 'native_port_results',
+            stage: 'applied',
+            previews: { evaluated: 1, refused: 0 },
+            proposals: { created: 1, applied: 1, skipped: 0 },
+            latestAppliedRevision: { baseRevision: 4, draftRevision: 5 },
+            workflowExecutionByThisChatBackend: 'not_performed',
+          },
+        },
+      }),
+    ])
+    const text = [...model.nodes.values()]
+      .flatMap((n) => (n.kind === 'text' ? [n.text] : []))
+      .join('')
+    expect(text).toContain('Réponse limitée')
+    expect(text).toContain('modification du workflow est signalée comme appliquée')
+    expect(text).toContain('Aucune exécution du workflow par ce Chat')
+    expect(model.status).toBe('complete')
+    expect(tool(model, 'edit').status).toBe('success')
+    expect(tool(model, 'edit').result).toEqual({ success: true })
+  })
+})
+
+describe('completion notice replay and legacy guards', () => {
+  const payload = {
+    status: 'complete',
+    response: {
+      modelTurn: { finishReason: 'max_tokens' },
+      workflow: {
+        version: 1,
+        provenance: 'native_port_results',
+        stage: 'no_preparation',
+        previews: { evaluated: 0, refused: 0 },
+        proposals: { created: 0, applied: 0, skipped: 0 },
+        workflowExecutionByThisChatBackend: 'not_performed',
+      },
+    },
+  }
+
+  it('shows an empty limited reply once under duplicate complete envelopes', () => {
+    const model = createTurnModel()
+    reduceEvent(model, envelope(1, 'complete', payload))
+    reduceEvent(model, envelope(1, 'complete', payload))
+    reduceEvent(model, envelope(2, 'complete', payload))
+    expect([...model.nodes.values()].filter((n) => n.kind === 'text')).toHaveLength(1)
+    expect(model.status).toBe('complete')
+  })
+
+  it('does not deduplicate matching model-authored prose', () => {
+    const model = apply([
+      envelope(1, 'text', { channel: 'assistant', text: 'Réponse limitée' }),
+      envelope(2, 'complete', payload),
+    ])
+    const texts = [...model.nodes.values()].flatMap((n) => (n.kind === 'text' ? [n.text] : []))
+    expect(texts).toHaveLength(2)
+    expect(texts[0]).toBe('Réponse limitée')
+    expect(texts[1]).toContain('Le modèle a atteint sa limite')
+  })
+
+  it.each([
+    { status: 'complete' },
+    { ...payload, response: { ...payload.response, async_pause: {} } },
+    { ...payload, response: { ...payload.response, modelTurn: { finishReason: 'end_turn' } } },
+    { ...payload, response: { ...payload.response, raw: '<script>raw</script>' } },
+  ])('does not inject notice text into legacy/paused/invalid completion %#', (value) => {
+    const model = apply([envelope(1, 'complete', value)])
+    expect([...model.nodes.values()]).toEqual([])
+    expect(model.status).toBe(
+      'response' in value && 'async_pause' in value.response ? 'streaming' : 'complete'
+    )
   })
 })

@@ -1,4 +1,6 @@
 // Modified by Memlia: qualify optional envelope and expiry fence on native decisions.
+
+import { db } from '@sim/db'
 import {
   copilotAsyncToolCalls,
   copilotChats,
@@ -29,6 +31,7 @@ import {
   requestRunStop,
   settleSimSandboxProcess,
   settleSimToolExecution,
+  stopLiveRunsTx,
   updateRunStatus,
   upsertAsyncToolCall,
 } from '@/lib/mothership/async-runs/repository'
@@ -712,4 +715,36 @@ describe('proposal decision lock boundary (database doubled)', () => {
     expect(dbChainMockFns.for).not.toHaveBeenCalled()
     expect(dbChainMockFns.set.mock.calls[0][0].permissionDecidedAt).toBeInstanceOf(Date)
   })
+})
+
+describe('local engine survives the native deletion Stop projection', () => {
+  beforeEach(resetDbChainMock)
+  it.each([
+    [{ localExecution: { kind: 'memlia_local_chat', version: 1, recovery: 'none' } }, 'local'],
+    [{ localExecution: null }, 'unavailable'],
+    [{}, 'worker'],
+  ])(
+    'returns the canonical engine before the run can be deleted',
+    async (requestContext, expected) => {
+      queueTableRows(copilotRuns, [
+        {
+          id: 'run',
+          streamId: 'stream',
+          userId: 'user',
+          chatId: 'chat',
+          workspaceId: 'workspace',
+          organizationId: null,
+          desktopDeviceId: null,
+          requestContext,
+        },
+      ])
+      const stopped = await db.transaction((tx) => stopLiveRunsTx(tx, { userId: 'user' }))
+      expect(stopped).toHaveLength(1)
+      expect(stopped[0].executionKind).toBe(expected)
+      expect(dbChainMockFns.select.mock.calls[0][0]).toHaveProperty(
+        'requestContext',
+        copilotRuns.requestContext
+      )
+    }
+  )
 })

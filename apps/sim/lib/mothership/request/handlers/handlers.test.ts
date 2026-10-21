@@ -1,3 +1,4 @@
+// Modified by Memlia: display and preserve limited Chat response notices.
 import { createDeferred } from '@sim/testing/helpers/deferred'
 import {
   mothershipAsyncRunsMock,
@@ -11,6 +12,11 @@ import { sleep } from '@sim/utils/helpers'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { AsyncToolCallOwnershipError } from '@/lib/mothership/async-runs/errors'
 import { restoreStreamingContext } from '@/lib/mothership/request/context/restore'
+import {
+  buildPersistedAssistantMessage,
+  normalizeMessage,
+} from '@/lib/mothership/chat/persisted-message'
+import { toDisplayMessage } from '@/lib/mothership/chat/display-message'
 import { TraceCollector } from '@/lib/mothership/request/trace'
 
 const { isSimExecuted, executeTool, ensureHandlersRegistered, toolRequiresApproval } = vi.hoisted(
@@ -2293,5 +2299,49 @@ describe('sse-handlers tool lifecycle', () => {
     expect(context.completionStatus).toBe(MothershipStreamV1CompletionStatus.complete)
     expect(context.streamComplete).toBe(true)
     expect(context.errors).toEqual(['subagent build failed'])
+  })
+
+  it('persists one limited response notice through the native assistant message projection', async () => {
+    context.accumulatedContent = 'Texte du modèle.'
+    context.finalAssistantContent = 'Texte du modèle.'
+    context.contentBlocks.push({ type: 'text', content: 'Texte du modèle.' })
+    const event: StreamEvent = {
+      type: 'complete',
+      payload: {
+        status: 'complete',
+        response: {
+          modelTurn: { finishReason: 'max_tokens' },
+          workflow: {
+            version: 1,
+            provenance: 'native_port_results',
+            stage: 'no_preparation',
+            previews: { evaluated: 0, refused: 0 },
+            proposals: { created: 0, applied: 0, skipped: 0 },
+            workflowExecutionByThisChatBackend: 'not_performed',
+          },
+        },
+      },
+    }
+    await sseHandlers.complete(event, context, execContext, { interactive: false, timeout: 1000 })
+    await sseHandlers.complete(event, context, execContext, { interactive: false, timeout: 1000 })
+    expect(
+      context.contentBlocks.filter((b) => b.content?.includes('Réponse limitée'))
+    ).toHaveLength(1)
+    expect(context.finalAssistantContent).toBe('Texte du modèle.')
+    expect(context.accumulatedContent).toBe(context.finalAssistantContent)
+    expect(context.completionStatus).toBe('complete')
+    expect(context.errors).toEqual([])
+    const saved = buildPersistedAssistantMessage({
+      success: true,
+      content: context.finalAssistantContent,
+      contentBlocks: context.contentBlocks,
+      toolCalls: [],
+    })
+    const reloaded = toDisplayMessage(normalizeMessage(JSON.parse(JSON.stringify(saved))))
+    expect(reloaded.content).toBe('Texte du modèle.')
+    expect(
+      reloaded.contentBlocks?.filter((b) => b.content?.includes('Réponse limitée'))
+    ).toHaveLength(1)
+    expect(reloaded.content).not.toContain('finishReason')
   })
 })

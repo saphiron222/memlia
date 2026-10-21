@@ -1,3 +1,4 @@
+// Modified by Memlia: qualify persistent local engine boundaries.
 import { dbChainMockFns, queueTableRows, resetDbChainMock, schemaMock } from '@sim/testing'
 import { createSessionPrincipal } from '@sim/testing/factories/principal.factory'
 import { authBanMock } from '@sim/testing/mocks/auth-ban.mock'
@@ -13,6 +14,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const hoisted = vi.hoisted(() => ({
   signal: vi.fn(),
+  steer: vi.fn(),
 }))
 vi.mock('@/lib/mothership/async-runs/repository', () => mothershipAsyncRunsMock)
 vi.mock('@/lib/mothership/request/session/explicit-abort', () => ({
@@ -26,7 +28,9 @@ vi.mock('@/lib/mothership/request/session', () => ({
 vi.mock('@/lib/permission-groups/resolve.server', () => permissionGroupsResolveMock)
 vi.mock('@/lib/auth/ban', () => authBanMock)
 
-import { abortRun } from '@/lib/mothership/request/application/controls'
+vi.mock('@/lib/mothership/request/session/steer', () => ({ requestStreamSteering: hoisted.steer }))
+
+import { abortRun, steerRun } from '@/lib/mothership/request/application/controls'
 
 const mocks = {
   ...hoisted,
@@ -88,6 +92,48 @@ describe('abort authorization before service signaling', () => {
       timeoutMs: 6000,
     })
     expect(mocks.permissions).not.toHaveBeenCalled()
+  })
+
+  it('keeps local Stop durable without worker ACK or a missing-controller success', async () => {
+    queueTableRows(schemaMock.copilotChats, [ownedChat])
+    queueTableRows(schemaMock.copilotChats, [ownedChat])
+    queueTableRows(schemaMock.member, [{ role: 'member' }])
+    mocks.stop.mockResolvedValue({
+      chatId: 'chat',
+      workspaceId: null,
+      organizationId: 'organization',
+      requestContext: {
+        localExecution: { kind: 'memlia_local_chat', version: 1, recovery: 'none' },
+      },
+    })
+    await expect(abortRun.execute({ principal, input })).resolves.toEqual({
+      aborted: true,
+      settled: false,
+    })
+    expect(mocks.stop).toHaveBeenCalledOnce()
+    expect(mocks.signal).not.toHaveBeenCalled()
+  })
+  it('refuses local steering before worker contact or transcript write', async () => {
+    mocks.permissions.mockResolvedValue(null)
+    mocks.latest.mockResolvedValue({
+      chatId: 'chat',
+      workspaceId: null,
+      organizationId: 'organization',
+      requestContext: {
+        localExecution: { kind: 'memlia_local_chat', version: 1, recovery: 'none' },
+      },
+    })
+    queueTableRows(schemaMock.copilotChats, [ownedChat])
+    queueTableRows(schemaMock.member, [{ role: 'member' }])
+    hoisted.steer.mockResolvedValue({ queued: true, status: 200 })
+    await expect(
+      steerRun.execute({
+        principal,
+        input: { ...input, steeringId: 'steering', content: 'New instruction' },
+      })
+    ).rejects.toThrow('Local Chat steering is unavailable.')
+    expect(hoisted.steer).not.toHaveBeenCalled()
+    expect(dbChainMockFns.insert).not.toHaveBeenCalled()
   })
 
   it('rejects a removed member before persisting or forwarding Stop', async () => {

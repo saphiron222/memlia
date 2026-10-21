@@ -1,3 +1,4 @@
+// Modified by Memlia: publish the native counter admission and numeric storage contract.
 import type { CatalogBlockDetail } from '@/lib/catalog/projection/block-detail'
 import type { CatalogBlockSummary } from '@/lib/catalog/projection/block-summary'
 import { VALID_LOOP_TYPES, VALID_PARALLEL_TYPES } from '@/lib/workflows/editing/container-types'
@@ -63,7 +64,8 @@ const loopDetail: CatalogBlockDetail = {
       type: 'short-input',
       title: 'Iterations',
       condition: { field: 'loopType', value: 'for' },
-      description: 'Number of iterations for a for loop.',
+      description:
+        'Positive safe integer for a for loop, or a decimal digit string (surrounding whitespace is allowed). Stored as a number. Fractions, scientific-notation strings, expressions and other types are rejected.',
     },
     {
       id: 'collection',
@@ -124,7 +126,8 @@ const parallelDetail: CatalogBlockDetail = {
       type: 'short-input',
       title: 'Count',
       condition: { field: 'parallelType', value: 'count' },
-      description: 'Number of concurrent branches.',
+      description:
+        'Positive safe integer branch count, or a decimal digit string (surrounding whitespace is allowed). Stored as a number. Fractions, scientific-notation strings, expressions and other types are rejected.',
     },
     {
       id: 'collection',

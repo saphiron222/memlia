@@ -6,7 +6,7 @@ Source figée : Sim `c6cef5f87b6a1d1d01df89e7140bad9e9fd4c2e2`. Ce patch prépar
 
 `policy.json` contient 30 entrées `reviewed_secret_fixtures`, couvrant 46 occurrences du détecteur borné. Chaque entrée porte chemin, SHA256 exact, règle, ligne et motif, sans valeur sensible. Il s’agit d’en-têtes PEM sans matériau cryptographique, de placeholders, de chaînes synthétiques de tests et d’identifiants EXAMPLE. Le contrôle existant reste lié au chemin et au contenu entier exact : toute modification du blob annule son exception.
 
-`reviewed-gitleaks.json` décrit séparément 77 findings de Gitleaks 8.30.1 examinés. Le format d’échange est :
+`reviewed-gitleaks.json` décrit séparément les findings de Gitleaks 8.30.1 examinés. Chaque entrée contient :
 
 ```text
 { path, sha256, rule, line, reason }
@@ -25,9 +25,21 @@ python3 scripts/compliance/source_policy.py \
 
 Cette commande **ne lance pas Gitleaks**. Le wrapper appelant doit d’abord lancer un scan complet réel, avec version et configuration contrôlées, sans ignorer les chemins examinés. La commande classe ensuite ses findings ; elle ne transforme pas une absence de scan en preuve.
 
-Elle vérifie tous les blobs examinés, refuse leurs modifications/disparitions/symlinks, tout nouveau tuple règle/ligne/chemin et tout finding attendu manquant. Un rapport vide ou tronqué ne peut donc rendre propres ces sources figées. Les rapports malformés sont refusés sans reproduire leurs valeurs. Codes : 0 classification complète, 1 findings ou dérive, 2 entrée indisponible/invalide. La CI existante n’est pas modifiée par ce patch.
+En mode `source`, elle exige tous les fichiers examinés. En mode `repository`, une fixture absente du checkout peut être omise, mais chaque fichier présent reste vérifié, même sans finding dans le rapport. Les disparitions exigées, symlinks, contenus non admis, nouveaux tuples et findings attendus manquants restent bloquants. Un rapport vide ou tronqué ne rend pas propres des sources dont des findings sont attendus. Les rapports malformés sont refusés sans reproduire leurs valeurs. Codes : 0 classification complète, 1 findings ou dérive, 2 entrée indisponible/invalide.
 
-**Historique :** la commande refuse les findings portant un `Commit`. Le futur wrapper historique devra résoudre chaque `commit:path` avec Git, calculer le SHA256 de ce blob historique, puis appliquer les mêmes tuples. Comparer au fichier courant serait incorrect. Il doit continuer de scanner toutes les refs, les diffs de fusion et le texte indépendamment des attributs Git, refuser tout finding nouveau/non recensé, et conserver les contrôles d’historique complet. Ce branchement attend la revue du format ; aucun succès historique des exceptions n’est prétendu ici.
+**Historique :** les modes `source`/`repository` refusent les findings portant un `Commit`. Le mode `history` résout le vrai `commit:path` avec Git et calcule son SHA256, sans utiliser le fichier courant. `GIT_NO_REPLACE_OBJECTS=1` et `GIT_NO_LAZY_FETCH=1` restent imposés à ces lectures. Le wrapper `scripts/ci/check-secrets.sh` conserve les scans réels du contenu et de toutes les refs, les diffs de fusion et le texte indépendamment des attributs Git. Aucun succès de ce scan complet n’est déduit des tests du classifier.
+
+## Versions explicites des admissions exactes
+
+Le format historique `schema: "memlia.reviewed-gitleaks/v1"` (ou l’absence de `schema` pour les anciennes politiques) conserve un SHA256 unique par chemin et les tuples `(path, rule, line)`. Deux empreintes pour un même chemin restent refusées en v1. Un `schema` explicite inconnu ou non textuel, y compris un booléen, est refusé.
+
+Le format `schema: "memlia.reviewed-gitleaks/v2"` admet plusieurs versions **individuellement relues** d’un même chemin. Son identité d’admission est le quadruplet exact `(path, sha256, rule, line)`. Chaque entrée conserve aussi son motif `reason`. Les chemins doivent être relatifs et canoniques, sans alias `./`, segment `..`, séparateur répété, barre finale ou backslash ; les doublons du quadruplet sont refusés. La version du scanner reste `8.30.1`.
+
+En mode `source`/`repository`, le classifier calcule d’abord l’empreinte du fichier présent et sélectionne uniquement les admissions de **ce blob**. Tous les findings attendus pour ce blob doivent être présents. Les attentes d’une ancienne version ne sont pas exigées du fichier courant, et ne lui accordent aucun droit : contenu différent, nouvelle règle ou nouvelle ligne restent refusés, même si le même chemin possède une autre admission historique. Une empreinte inconnue reste bloquante, y compris avec un rapport vide. Le traitement des fixtures absentes en mode `repository` reste celui décrit ci-dessus.
+
+En mode `history`, chaque finding est comparé à l’empreinte du blob réellement lu au `commit:path` indiqué. Une ancienne ligne associée au nouveau contenu, une nouvelle ligne associée à l’ancien contenu, une règle étrangère ou un blob non relu restent refusés. Une version admise dans le checkout ne sert jamais de fallback pour l’historique.
+
+Ce contrat ne change ni Gitleaks, ni ses règles, ni ses scans, ni les conditions de revue des faux positifs. Il n’admet aucun secret réel et ne migre automatiquement aucune entrée de `reviewed-gitleaks.json`. Un passage à v2 et chaque nouvelle empreinte doivent faire l’objet d’une revue distincte avant publication ; les tests sur des fixtures fictives ne remplacent pas un nouveau rapport de scanner sur le candidat.
 
 ## Exclusion explicite du suivi amont
 

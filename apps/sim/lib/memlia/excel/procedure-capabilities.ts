@@ -2,6 +2,21 @@
 import { type ExcelProcedure, ExcelProcedureSchema } from '@memlia/contracts'
 import { stringifyBoundedJson } from '@/lib/core/utils/bounded-json'
 
+// Internal draft projection only: never a persistable procedure or authority envelope.
+export const excelProcedureDraftSchema = ExcelProcedureSchema.omit({
+  schemaVersion: true,
+  organizationId: true,
+  workspaceId: true,
+  procedureId: true,
+  version: true,
+  parentVersion: true,
+  workflowId: true,
+  deployedVersionId: true,
+  ownerUserId: true,
+  digest: true,
+  policyVersion: true,
+})
+
 type Capability = ExcelProcedure['requiredCapabilities'][number]
 type Operation = ExcelProcedure['operations'][number]
 type Expression = Extract<Operation, { op: 'derive' }>['expression']
@@ -24,7 +39,7 @@ const MAX_INPUT_BYTES = 512 * 1024
 const MAX_DIAGNOSTICS = 128
 
 // Fresh owned descriptions: no mutable shared profile can influence later observations.
-function describeProfile() {
+export function describeExcelProcedureProfile() {
   return {
     id: 'memlia.excel-kernel-primitives/p00-v1' as const,
     sources: [
@@ -126,10 +141,18 @@ function supportsOperation(operation: Operation): boolean {
 
 /** Pure option observation; never admission, dataflow validation or execution permission. */
 export function inspectExcelProcedureCapabilities(input: unknown) {
+  return inspect(input, false)
+}
+
+export function inspectExcelProcedureDraftCapabilities(input: unknown) {
+  return inspect(input, true)
+}
+
+function inspect(input: unknown, draft: boolean) {
   const common = {
     executionAvailable: false as const,
     analysis: 'primitive_options_only' as const,
-    profile: describeProfile(),
+    profile: describeExcelProcedureProfile(),
     notVerified: [
       'dataflow_and_column_types',
       'input_data_and_runtime_limits',
@@ -147,7 +170,9 @@ export function inspectExcelProcedureCapabilities(input: unknown) {
   const captured = stringifyBoundedJson(input, MAX_INPUT_BYTES, { strict: true })
   if (captured === undefined)
     return { ...common, schemaValid: false as const, code: 'invalid_input' as const }
-  const parsed = ExcelProcedureSchema.safeParse(JSON.parse(captured))
+  const parsed = (draft ? excelProcedureDraftSchema : ExcelProcedureSchema).safeParse(
+    JSON.parse(captured)
+  )
   if (!parsed.success)
     return { ...common, schemaValid: false as const, code: 'invalid_input' as const }
   const procedure = parsed.data

@@ -338,6 +338,9 @@ test(
       async () => {
         const f = await fixture('invalid')
         const p = params(f)
+        assert.doesNotThrow(() =>
+          prepare({ ...p, executionTimeoutMs: 86_340_000 - 300_000 }, identity())
+        )
         for (const patch of [
           { enforceCredentialAccess: undefined },
           { enforceCredentialAccess: false },
@@ -348,6 +351,7 @@ test(
           { executionTimeoutMs: Number.NaN },
           { executionTimeoutMs: 0 },
           { executionTimeoutMs: Number.POSITIVE_INFINITY },
+          { executionTimeoutMs: 86_340_000 - 300_000 + 1 },
           { input: undefined },
           { input: { hidden: undefined } },
           { input: new Date() },

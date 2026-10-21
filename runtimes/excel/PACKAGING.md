@@ -43,6 +43,22 @@ MEMLIA_TEST_WHEELHOUSE=/cache/roues-verifiees \
 
 Qualification de ce lot : **installation et tests natifs Mac arm64 seulement**. Les roues Linux peuvent être téléchargées/hashées/inspectées sur Mac ; cela ne qualifie pas leur chargement, libc/ABI/CPU, installation ou exécution Linux. Aucune image, Hyper-V, Windows, Office.js, classeur utilisateur ou réseau isolé au niveau OS n'est qualifié. `--no-index` et chemins locaux ferment la résolution pip ; ils ne constituent pas une sandbox réseau pour un backend Python arbitraire. Seuls les backends/sources revus sont admis.
 
+Le workflow `.github/workflows/memlia-excel-linux.yml` prépare cette qualification
+sur Ubuntu24 x64 et CPython3.12.15. Il télécharge uniquement les quinze distributions
+tierces du verrou, sous contrôle des hashes, puis réemploie sans modification
+`tests/test_packaging.py`. Les deux packages Memlia sont construits depuis le
+checkout local. Les tests existants contrôlent les roues altérées avant installation,
+l'installation offline et une vraie procédure XLSX depuis les packages installés,
+hors des chemins source. Aucun artefact, journal natif ou classeur n'est publié.
+Le token reste en lecture seule ; aucun secret ou runner du cabinet n'est utilisé.
+Les exécutions privées sont désactivées tant que leurs quotas ne sont pas approuvés.
+
+Ce workflow est **NON EXÉCUTÉ** au moment de son ajout. Un succès doit être relié
+au SHA et au run Linux réellement exécutés avant de modifier le verdict ci-dessus.
+Il ne lance pas les136 tests runtime nécessitant pytest, ne qualifie pas une sandbox
+OS, un job Sim ou Excel Desktop. Le délai du job et la VM éphémère sont des limites
+de CI ; aucun nettoyage de processus commercial n'en est déduit.
+
 La reproductibilité porte sur entrées verrouillées, sources et installation. L'égalité byte à byte de deux roues/ZIP n'est pas promise : les timestamps natifs restent possibles.
 
 ## Gate P10/P16 avant activation
@@ -50,3 +66,24 @@ La reproductibilité porte sur entrées verrouillées, sources et installation. 
 L'API bytes n'élimine pas l'IO temporaire d'openpyxl. Le futur processus doit démarrer avec TMPDIR neuf possédé0700 **avant import** et refuser un répertoire absent/lien/non possédé/non inscriptible plutôt que laisser tempfile chercher un repli. Il faut encore fournir et qualifier Linux non-root, filesystemRO ailleurs, réseau absent, limites RAM/CPU/PID/disque, timeout/annulation et suppression des seuls temporaires/descendants possédés même après arrêt forcé. Aucun chemin n'est fourni par le modèle/IR. Ces restrictions OS ne sont pas livrées par ce packager et restent obligatoires avant activation du job. Autorité, admission durable, publication, liaison Sim et idempotence restent des ports distincts.
 
 Les régressions d’intégrité construisent les deux vraies roues natives depuis un contexte temporaire, puis ne modifient que des copies ZIP. Licence remplacée, console entrypoint ajouté, dépendance modifiée, second dist-info et profil WHEEL falsifié sont refusés même avec RECORD recalculé. Un RECORD incomplet est également refusé. Aucune archive forgée n’est installée/importée ; seule la paire native légitime est installée pour la composition XLSX existante.
+
+### Protocole installé, complément de la preuve de procédure
+
+Le test d'installation conserve ses assertions directes sur `prepare_procedure`,
+puis réutilise le même runtime neuf pour lancer réellement
+`python -I -B -m memlia_excel.process`. Le constructeur de fixture natif fournit
+la même procédure et les mêmes octets XLSX ; l'enveloppe est envoyée sur stdin
+jusqu'à EOF, hors du chemin source et sans PYTHONPATH. Le test vérifie l'identité
+de requête, les références, le SHA256 des octets rendus, les contrôles, l'absence
+de publication et un readback littéral du classeur. Il vérifie aussi deux refus
+fermés sans sortie partielle : champ commande inconnu et JSON supplémentaire
+après l'objet. Le temporaire privé doit être vide après les trois enfants.
+
+La commande existante du workflow Linux sélectionne déjà ce test : aucune
+permission, dépendance, étape ou limite de CI supplémentaire n'est nécessaire.
+La nouvelle assertion est exercée localement sur Mac ; **son exécution Linux
+reste NON TESTÉE avant un nouveau résultat réel du workflow portant ce delta**.
+Un futur succès Linux couvrirait packaging → Python installé → protocole → noyau
+→ XLSX. Il ne qualifierait ni le caller TypeScript Sim sur Linux (suite distincte),
+ni une isolation réseau/FS/CPU/RAM, ni un job ou une publication autorisés. Les
+quinze méthodes de test packaging historiques restent sélectionnées.

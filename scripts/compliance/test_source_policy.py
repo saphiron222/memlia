@@ -1,5 +1,6 @@
 # Copyright 2026 Memlia. All rights reserved.
 import importlib.util
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -150,6 +151,150 @@ class HistoryReviewTests(unittest.TestCase):
         issues = source_policy.review_history_findings(self.root, report, self.review)
         self.assertTrue(issues)
         self.assertNotIn('fictional sensitive text', json.dumps(issues))
+
+class VersionedReviewTests(ReviewTests):
+    def setUp(self):
+        super().setUp()
+        self.review['schema'] = 'memlia.reviewed-gitleaks/v2'
+
+    def older_revision(self, **changes):
+        old = dict(self.review['findings'][0],
+                   sha256=hashlib.sha256(b'earlier fictional placeholder\n').hexdigest(),
+                   **changes)
+        self.review['findings'].insert(0, old)
+
+    def classify(self, report=None, repository=False):
+        function = source_policy.review_repository_findings if repository else source_policy.review_findings
+        try:
+            return function(self.root, self.report if report is None else report, self.review)
+        except ValueError as error:
+            self.fail(f'explicit v2 must select the exact current revision: {error}')
+
+    def test_two_hashes_at_the_same_path_rule_and_line_select_only_the_current_blob(self):
+        self.older_revision()
+        self.assertEqual([], self.classify())
+        self.assertEqual([], self.classify(repository=True))
+
+    def test_expected_findings_from_a_different_revision_are_not_required(self):
+        self.older_revision(rule='historical-rule', line=8)
+        self.assertEqual([], self.classify())
+
+    def test_the_selected_revision_still_requires_every_expected_finding(self):
+        self.older_revision()
+        self.review['findings'].append(dict(self.review['findings'][-1], line=2))
+        issues = self.classify()
+        self.assertIn({'path': 'fixture.txt', 'rule': 'expected-gitleaks-finding-missing',
+                       'scanner_rule': 'generic-api-key', 'line': 2}, issues)
+
+    def test_an_unknown_current_hash_never_inherits_any_historical_admission(self):
+        self.older_revision()
+        (self.root / 'fixture.txt').write_text('unreviewed third revision\n')
+        for report in (self.report, []):
+            with self.subTest(report=bool(report)):
+                self.assertTrue(self.classify(report))
+
+    def test_a_different_revision_cannot_authorize_its_line_or_rule_on_current_bytes(self):
+        self.older_revision(rule='historical-rule', line=8)
+        for report in ([{'File': 'fixture.txt', 'RuleID': 'historical-rule', 'StartLine': 8}],
+                       [{'File': 'fixture.txt', 'RuleID': 'generic-api-key', 'StartLine': 8}]):
+            with self.subTest(report=report):
+                self.assertTrue(self.classify(report))
+
+    def test_an_exact_duplicate_tuple_is_rejected_even_with_a_reason(self):
+        self.review['findings'].append(dict(self.review['findings'][0], reason='Another explanation.'))
+        with self.assertRaises(ValueError):
+            source_policy.review_index(self.review)
+
+    def test_version_one_keeps_rejecting_multiple_hashes_per_path(self):
+        self.older_revision(line=8)
+        for schema in (None, 'memlia.reviewed-gitleaks/v1'):
+            with self.subTest(schema=schema):
+                review = {**self.review}
+                if schema is None:
+                    del review['schema']
+                else:
+                    review['schema'] = schema
+                with self.assertRaises(ValueError):
+                    source_policy.review_index(review)
+
+    def test_unknown_or_nonstring_explicit_formats_are_rejected(self):
+        for schema in (True, False, 1, 2, None, [], {}, 'memlia.reviewed-gitleaks/v3'):
+            with self.subTest(schema=schema), self.assertRaises(ValueError):
+                source_policy.review_index({**self.review, 'schema': schema})
+
+    def test_version_two_requires_canonical_relative_policy_paths(self):
+        for path in ('./fixture.txt', 'sub//fixture.txt', 'sub/../fixture.txt',
+                     'sub/./fixture.txt', '../fixture.txt', '/fixture.txt',
+                     'fixture.txt/', '.', 'sub\\fixture.txt'):
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                source_policy.review_index({**self.review, 'findings': [
+                    dict(self.review['findings'][0], path=path)]})
+
+    def test_parent_symlink_cannot_supply_a_reviewed_revision(self):
+        (self.root / 'actual').mkdir()
+        (self.root / 'fixture.txt').rename(self.root / 'actual/fixture.txt')
+        (self.root / 'alias').symlink_to('actual', target_is_directory=True)
+        self.review['findings'][0]['path'] = 'alias/fixture.txt'
+        self.report[0]['File'] = 'alias/fixture.txt'
+        self.assertTrue(self.classify())
+
+
+class VersionedHistoryReviewTests(HistoryReviewTests):
+    def setUp(self):
+        super().setUp()
+        self.review['schema'] = 'memlia.reviewed-gitleaks/v2'
+
+    def next_revision(self):
+        content = b'new heading\na different fictional placeholder\n'
+        (self.root / 'fixture.txt').write_bytes(content)
+        self.git('add', 'fixture.txt')
+        self.git('commit', '-q', '-m', 'second fixture revision')
+        commit = self.git('rev-parse', 'HEAD').strip()
+        self.review['findings'].append(dict(self.review['findings'][0],
+            sha256=hashlib.sha256(content).hexdigest(), line=2))
+        return dict(self.report[0], Commit=commit, StartLine=2)
+
+    def classify_history(self, report):
+        try:
+            return source_policy.review_history_findings(self.root, report, self.review)
+        except ValueError as error:
+            self.fail(f'explicit v2 must compare each real commit:path revision: {error}')
+
+    def test_both_reviewed_revisions_pass_using_their_own_historical_bytes(self):
+        latest = self.next_revision()
+        (self.root / 'fixture.txt').unlink()
+        self.assertEqual([], self.classify_history([*self.history_report, latest]))
+
+    def test_old_line_and_new_commit_are_not_an_exact_admission(self):
+        latest = self.next_revision()
+        self.assertTrue(self.classify_history([dict(latest, StartLine=1)]))
+
+    def test_new_line_and_old_commit_are_not_an_exact_admission(self):
+        self.next_revision()
+        self.assertTrue(self.classify_history([dict(self.history_report[0], StartLine=2)]))
+
+    def test_a_new_rule_cannot_borrow_an_exact_reviewed_historical_blob(self):
+        latest = self.next_revision()
+        self.assertTrue(self.classify_history([dict(latest, RuleID='unreviewed-rule')]))
+
+    def test_an_unreviewed_historical_revision_cannot_borrow_current_reviewed_bytes(self):
+        latest = self.next_revision()
+        (self.root / 'fixture.txt').write_text('unreviewed third historical revision\n')
+        self.git('add', 'fixture.txt')
+        self.git('commit', '-q', '-m', 'unreviewed revision')
+        unreviewed = self.git('rev-parse', 'HEAD').strip()
+        (self.root / 'fixture.txt').write_text('new heading\na different fictional placeholder\n')
+        self.assertTrue(self.classify_history([dict(latest, Commit=unreviewed)]))
+
+    def test_git_replace_cannot_supply_a_different_admitted_revision(self):
+        latest = self.next_revision()
+        old_blob = self.git('rev-parse', self.commit + ':fixture.txt').strip()
+        new_blob = self.git('rev-parse', latest['Commit'] + ':fixture.txt').strip()
+        self.git('replace', old_blob, new_blob)
+        # The replaced checkout would appear to match the new reviewed line.
+        self.assertTrue(self.classify_history([dict(self.history_report[0], StartLine=2)]))
+        self.assertEqual([], self.classify_history(self.history_report))
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -1,6 +1,9 @@
 'use client'
 
+// Modified by Memlia: avoid a second document navigation after Better Auth redirects.
+
 import { useRef, useState } from 'react'
+import { isSafeUrlScheme } from '@better-auth/core/utils/url'
 import {
   ChipModal,
   ChipModalBody,
@@ -276,8 +279,11 @@ export default function LoginPage({
       // Clear reset success message on successful login
       setResetSuccessMessage(null)
 
-      /** Fallback when better-auth does not redirect: a document navigation, like signup's, so the workspace shell initializes its own theme store. */
-      window.location.href = safeCallbackUrl
+      // The native client plugin already navigates for a delegable redirect response.
+      // Keep the document fallback only when that plugin does not request navigation.
+      if (!(result.data?.redirect && result.data.url && isSafeUrlScheme(result.data.url))) {
+        window.location.href = safeCallbackUrl
+      }
     } catch (err: any) {
       if (err.message?.includes('not verified') || err.code?.includes('EMAIL_NOT_VERIFIED')) {
         redirectToVerify(email)

@@ -88,6 +88,12 @@ boucle asyncio, sans mutation de configuration. Le caller reste responsable de l
 vie des tâches qu’il a créées et de leur annulation avant la fermeture du canal.
 Aucune annulation n’est présentée comme une rétraction d’un effet serveur.
 
+Si le corps du context manager est déjà annulé et que la fermeture du **pool**
+échoue, le même `CancelledError` reste prioritaire, avec la note fixe
+`channel_cleanup_unverified: close_failed`. La tâche reste annulée et le canal
+inutilisable ; cette note ne certifie pas la fermeture du pool. Sans annulation
+préalable, l'échec de fermeture reste un `TransportError('close_failed')`.
+
 ## Erreurs et données
 
 `TransportError.code`/`str(error)` ne contiennent que des codes fixes :

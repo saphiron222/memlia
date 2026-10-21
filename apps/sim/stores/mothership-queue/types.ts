@@ -1,3 +1,4 @@
+// Modified by Memlia: retain local-only queue provenance without persisted authority.
 import type { QueuedMessage } from '@/app/workspace/[workspaceId]/home/types'
 
 /**
@@ -13,6 +14,8 @@ export interface QueuedSendHandoffSeed {
 }
 
 export type QueuedMothershipMessage = QueuedMessage & {
+  /** Durable refusal boundary only; never a server authority or an adoption ticket. */
+  localOrigin?: true
   queuedSendHandoff?: QueuedSendHandoffSeed
   /**
    * Why it waits instead of draining. `user`: a failed dispatch stays until the
@@ -60,7 +63,7 @@ export type QueuedMessageEditPatch = Pick<
   | 'requestMode'
   | 'assistantSearch'
   | 'assistantSearchLevel'
->
+> & { localOrigin?: true }
 
 /** A new-chat queue's move to its chat's key. */
 export interface QueueMigration {

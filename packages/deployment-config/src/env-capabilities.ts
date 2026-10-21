@@ -1147,6 +1147,41 @@ export const ASYNC_JOBS_CAPABILITY = defineCapability({
   ],
 } as const)
 
+/** Modified by Memlia: explicit workflow durability never falls through to another backend.
+ * Server env uses skipValidation, so its optional string declarations remain raw strings.
+ * The transport flag by itself still does not select a business backend.
+ */
+export function getConfiguredAsyncJobsProviderId(
+  values: EnvCapabilityValues
+): ProviderId<typeof ASYNC_JOBS_CAPABILITY> | 'pg-boss' {
+  const selected = readValue(values, 'MEMLIA_DURABLE_WORKFLOWS_ENABLED')
+  if (selected === undefined) return requireCapability(ASYNC_JOBS_CAPABILITY, values).providerId
+  try {
+    if (
+      selected !== '1' ||
+      readValue(values, 'MEMLIA_PG_BOSS_ENABLED') !== '1' ||
+      isTruthyValue(values, 'TRIGGER_DEV_ENABLED')
+    )
+      throw new Error()
+    const dsn = readValue(values, 'MEMLIA_PG_BOSS_DATABASE_URL')
+    if (typeof dsn !== 'string' || !dsn.length) throw new Error()
+    const url = new URL(dsn)
+    if (
+      !['postgres:', 'postgresql:'].includes(url.protocol) ||
+      !url.hostname ||
+      url.pathname === '/' ||
+      !url.pathname
+    )
+      throw new Error()
+    return 'pg-boss'
+  } catch {
+    throw new EnvCapabilityConfigurationError(
+      'jobs',
+      'Durable workflow configuration is unavailable.'
+    )
+  }
+}
+
 /** Validates the one provider dependency that cannot be expressed as a field-shape rule. */
 function validateRedisProvider(values: EnvCapabilityValues): readonly EnvProviderValidationIssue[] {
   if (!hasValue(values, 'REDIS_URL')) return []

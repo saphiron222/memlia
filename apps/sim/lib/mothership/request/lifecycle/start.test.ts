@@ -316,6 +316,11 @@ describe('createSSEStream terminal error handling', () => {
     expect(fetchGo).not.toHaveBeenCalled()
     expect(buildChatTitleContext).not.toHaveBeenCalled()
     expect(createRunSegment.mock.calls[0][0].requestContext.recovery).toBeUndefined()
+    expect(createRunSegment.mock.calls[0][0].requestContext.localExecution).toEqual({
+      kind: 'memlia_local_chat',
+      version: 1,
+      recovery: 'none',
+    })
     expect(JSON.stringify(createRunSegment.mock.calls)).not.toMatch(
       /PRIVATE_KEY|PRIVATE_SESSION|localChat/
     )
@@ -362,6 +367,102 @@ describe('createSSEStream terminal error handling', () => {
       })
     ).toThrow('Local Chat is unavailable.')
     expect(runCopilotLifecycle).not.toHaveBeenCalled()
+    expect(fetchGo).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    { kind: 'memlia_local_chat', version: 1, recovery: 'none' },
+    { kind: 'memlia_local_chat', version: 2, recovery: 'none' },
+    null,
+  ])('refuses persisted local identity without local runtime options', (localExecution) => {
+    expect(() =>
+      createSSEStream({
+        requestPayload: {},
+        userId: 'user-1',
+        workspaceId: 'ws',
+        chatId: 'chat',
+        streamId: 'stream',
+        executionId: 'exec',
+        runId: 'run',
+        currentChat: null,
+        message: '',
+        titleModel: '',
+        requestId: 'request',
+        orchestrateOptions: { userId: 'user-1', interactive: true },
+        admittedRun: { requestContext: { localExecution } } as never,
+      })
+    ).toThrow('Local Chat is unavailable.')
+    expect(runCopilotLifecycle).not.toHaveBeenCalled()
+    expect(fetchGo).not.toHaveBeenCalled()
+  })
+
+  it('owns a matching admitted local run before asynchronous publication', async () => {
+    const localChat = {
+      principal: { kind: 'session' as const, userId: 'user-1', sessionId: 'PRIVATE_SESSION' },
+      workspaceId: '44444444-4444-4444-8444-444444444444',
+      workflow: {
+        workflowId: 'workflow-a',
+        policy: 'sanitized_details' as const,
+        previewOperations: true as const,
+      },
+      request: {
+        model: 'gpt-5.4',
+        apiKey: 'PRIVATE_KEY',
+        messages: [{ role: 'user' as const, content: 'Fixture' }],
+      },
+      budget: { windowId: 'budget-a', windowVersion: 1, pricingProfile: {} as never },
+    }
+    const admitted = {
+      id: 'run-a',
+      executionId: 'exec-a',
+      streamId: 'stream-a',
+      chatId: 'chat-a',
+      userId: 'user-1',
+      workspaceId: localChat.workspaceId,
+      workflowId: 'workflow-a',
+      organizationId: null,
+      status: 'active',
+      requestContext: {
+        localExecution: { kind: 'memlia_local_chat', version: 1, recovery: 'none' },
+      },
+    }
+    runCopilotLifecycle.mockResolvedValue({
+      success: true,
+      content: 'Done',
+      contentBlocks: [],
+      toolCalls: [],
+    })
+    clearFilePreviewSessions.mockImplementationOnce(async () => {
+      admitted.status = 'cancelled'
+      admitted.id = 'foreign'
+      admitted.requestContext.localExecution.version = 2
+    })
+    await drainStream(
+      createSSEStream({
+        requestPayload: { message: 'Fixture', workflowId: 'workflow-a' },
+        userId: 'user-1',
+        workspaceId: localChat.workspaceId,
+        chatId: 'chat-a',
+        streamId: 'stream-a',
+        executionId: 'exec-a',
+        runId: 'run-a',
+        currentChat: null,
+        message: 'Fixture',
+        titleModel: '',
+        requestId: 'req-a',
+        orchestrateOptions: {
+          userId: 'user-1',
+          workspaceId: localChat.workspaceId,
+          workflowId: 'workflow-a',
+          chatId: 'chat-a',
+          interactive: true,
+          localChat,
+        },
+        admittedRun: admitted as never,
+      })
+    )
+    expect(runCopilotLifecycle).toHaveBeenCalledOnce()
+    expect(createRunSegment).not.toHaveBeenCalled()
     expect(fetchGo).not.toHaveBeenCalled()
   })
 

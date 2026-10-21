@@ -1,3 +1,5 @@
+// Modified by Memlia in 2026: report Redis shutdown failures to the caller.
+// Upstream Apache-2.0 license and notices retained.
 import { createLogger } from '@sim/logger'
 import {
   presenceEventName,
@@ -235,6 +237,7 @@ export class RedisRoomManager implements IRoomManager {
       logger.info('RedisRoomManager disconnected from Redis')
     } catch (error) {
       logger.error('Error during Redis shutdown:', error)
+      throw error
     }
   }
 

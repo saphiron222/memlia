@@ -77,3 +77,18 @@ comme Sim n’est pas un typecheck d’intégration.
 
 NON TESTÉ : build Sim complet, workflow réel, transaction Drizzle, worker Linux,
 crash après effet externe, intégration d’annulation et atomicité de l’outbox.
+
+## Extension de livraison planifiée
+
+Le paramètre serveur facultatif `{runAt, maxDurationSeconds}` conserve la date
+native et configure `startAfter`/`expireInSeconds` dans pg-boss 12.38. Sans ce
+paramètre, les options de publication historiques sont inchangées. La grâce de
+60 secondes appartient à la livraison ; elle ne prolonge jamais le timeout du
+runner métier. Le native `retryLimit:0` reste appliqué.
+
+Le callback peut rendre un `defer` provenant de la claim native. Le transport
+n'acquitte qu'après confirmation d'une publication déterministe distincte pour
+ce même réveil. Échec, acceptation inconnue, identité différente ou répétition
+prématurée du réveil imposent une réconciliation. Aucun sleep en mémoire ne
+remplace une reprise durable. Les tests unitaires à IO doublée ne qualifient pas
+la reprise PostgreSQL après crash ; cette preuve doit être produite séparément.

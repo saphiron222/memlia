@@ -526,7 +526,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--cgroup', default='/sys/fs/cgroup')
     parser.add_argument('--report', required=True)
-    parser.add_argument('--phase', required=True, choices=['install','inventory','typegen','typecheck','cli','sandbox','next','standalone','test','config'])
+    parser.add_argument('--phase', required=True, choices=['install','inventory','typegen','typecheck','cli','sandbox','next','standalone','test','config','ui-bootstrap','ui-migrate','ui-grants','ui-metadata','ui-baseline','ui-seed','ui-stage','ui-cleanup','ui-readback'])
     parser.add_argument('--experiment', choices=['webpack','turbopack','turbopack-zram'])
     parser.add_argument('--timeout', type=float, default=1800)
     parser.add_argument('--tracked-sources')

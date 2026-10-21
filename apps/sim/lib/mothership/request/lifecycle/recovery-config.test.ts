@@ -1,7 +1,10 @@
+// Modified by Memlia: qualify persistent local engine boundaries.
 import { featureFlagsMock, featureFlagsMockFns } from '@sim/testing/mocks/feature-flags.mock'
 import { describe, expect, it, vi } from 'vitest'
 import { createCopilotResourceAdmission } from '@/lib/mothership/auth/application-delegation'
 import {
+  classifyRunExecution,
+  LocalChatAdmissionSchema,
   StreamRecoveryConfigSchema,
   streamRecoveryConfig,
 } from '@/lib/mothership/request/lifecycle/recovery-config'
@@ -114,5 +117,48 @@ describe('recovery marker written by an admitted turn', () => {
     featureFlagsMockFns.mockIsFeatureEnabled.mockImplementation(async (flag) => flag === 'projects')
     const recovery = await streamRecoveryConfig(options, workspaceRequest)
     expect(recovery?.resourceAuthoringVersion).toBe(1)
+  })
+})
+
+const localMarker = { kind: 'memlia_local_chat', version: 1, recovery: 'none' }
+describe('local run persistence contract', () => {
+  it('distinguishes absent historical marker from the exact local marker', () => {
+    expect(classifyRunExecution(undefined)).toBe('worker')
+    expect(classifyRunExecution({ recovery: config(workspaceRequest) })).toBe('worker')
+    expect(classifyRunExecution({ localExecution: localMarker })).toBe('local')
+  })
+  it.each([
+    null,
+    undefined,
+    false,
+    {},
+    { ...localMarker, version: 2 },
+    { ...localMarker, apiKey: 'fixture' },
+  ])('never treats a present invalid marker as worker', (marker) => {
+    expect(classifyRunExecution({ localExecution: marker })).toBe('unavailable')
+  })
+  it('refuses conflicting worker recovery and any local marker', () => {
+    expect(
+      classifyRunExecution({ localExecution: localMarker, recovery: config(workspaceRequest) })
+    ).toBe('unavailable')
+  })
+  it('captures a minimal local admission and rejects secrets/worker routing', () => {
+    const intent = {
+      kind: 'memlia_local_chat',
+      version: 1,
+      request: { ...workspaceRequest, workflowId: 'workflow', mode: 'agent' },
+    }
+    expect(LocalChatAdmissionSchema.parse(intent)).toEqual(intent)
+    for (const extra of [
+      { apiKey: 'fixture' },
+      { goRoute: '/api/copilot' },
+      { sessionId: 'fixture' },
+    ]) {
+      expect(LocalChatAdmissionSchema.safeParse({ ...intent, ...extra }).success).toBe(false)
+      expect(
+        LocalChatAdmissionSchema.safeParse({ ...intent, request: { ...intent.request, ...extra } })
+          .success
+      ).toBe(false)
+    }
   })
 })

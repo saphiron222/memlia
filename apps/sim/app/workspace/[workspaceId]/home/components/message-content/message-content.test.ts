@@ -1,3 +1,4 @@
+// Modified by Memlia: display and preserve limited Chat response notices.
 import { authClientMock } from '@sim/testing/mocks/auth-client.mock'
 import { describe, expect, it, vi } from 'vitest'
 
@@ -10,6 +11,11 @@ import { describe, expect, it, vi } from 'vitest'
  */
 vi.mock('@/lib/auth/client', () => authClientMock)
 
+import { buildCompletionNotice } from '@/lib/mothership/chat/completion-notice'
+import {
+  buildAssistantSnapshotMessage,
+  reconcileLiveAssistantTurn,
+} from '@/app/workspace/[workspaceId]/home/hooks/message-reconcile'
 import { toDisplayMessage } from '@/lib/mothership/chat/display-message'
 import { normalizeMessage, stripToolResultOutput } from '@/lib/mothership/chat/persisted-message'
 import {
@@ -583,4 +589,58 @@ describe.each([undefined, 'main'])('watch presentation (%s)', (spanId) => {
     expect(stripToolResultOutput(stripped)).toBe(stripped)
     expect(parseBlocks(toDisplayMessage(stripped).contentBlocks ?? [])).toEqual([watch])
   })
+})
+
+describe('limited response transcript projection', () => {
+  it.each(['Une phrase du modèle.', ''])(
+    'keeps one fixed notice when the stored assistant replaces the stream, without an action segment (%#)',
+    (modelText) => {
+      const notice = buildCompletionNotice({
+        status: 'complete',
+        response: {
+          modelTurn: { finishReason: 'max_tokens' },
+          workflow: {
+            version: 1,
+            provenance: 'native_port_results',
+            stage: 'applied',
+            previews: { evaluated: 1, refused: 0 },
+            proposals: { created: 1, applied: 1, skipped: 0 },
+            latestAppliedRevision: { baseRevision: 4, draftRevision: 5 },
+            workflowExecutionByThisChatBackend: 'not_performed',
+          },
+        },
+      })!
+      const blocks: ContentBlock[] = [mainText(modelText), mainText(notice)]
+      const live = buildAssistantSnapshotMessage({
+        id: 'live-assistant:limited',
+        content: modelText + notice,
+        contentBlocks: blocks,
+      })
+      const stored = normalizeMessage(
+        JSON.parse(JSON.stringify({ ...live, id: 'stored-limited', content: modelText }))
+      )
+      const owner = {
+        id: 'stream-limited',
+        role: 'user' as const,
+        content: 'Modifier le workflow',
+        timestamp: '2026-10-20T00:00:00Z',
+      }
+      const reconciled = reconcileLiveAssistantTurn({
+        messages: [owner, stored, live],
+        streamId: owner.id,
+        liveAssistant: live,
+        activeStreamId: null,
+      })
+      expect(reconciled.map((m) => m.id)).toEqual([owner.id, stored.id])
+      const display = toDisplayMessage(reconciled[1])
+      const segments = parseBlocks(display.contentBlocks!)
+      expect(segments.every((segment) => segment.type === 'text')).toBe(true)
+      const text = getOrchestratorMessageText(display.contentBlocks!, display.content)
+      expect(text.match(/Réponse limitée/g)).toHaveLength(1)
+      expect(text).toContain('modification du workflow est signalée comme appliquée')
+      expect(text).toContain('Aucune exécution du workflow par ce Chat')
+      expect(text).not.toContain('finishReason')
+      expect(text).not.toMatch(/<|href=/)
+    }
+  )
 })

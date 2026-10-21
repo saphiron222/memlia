@@ -1,6 +1,8 @@
 // Modified by Memlia in 2026. Upstream Apache-2.0 license and notices retained.
 'use client'
 
+// Modified by Memlia: use the fixed product identity in native Chat labels.
+
 import {
   type KeyboardEvent as ReactKeyboardEvent,
   useCallback,
@@ -1395,15 +1397,15 @@ function SearchModalContent({
                 surface='palette'
                 cycleResultsOnTab={!chatEnabled}
                 autoFocus={!atomicBrowserOcclusion}
-                aria-label={askMode ? 'Ask Sim' : 'Search anything'}
+                aria-label={askMode ? 'Ask Memlia' : 'Search anything'}
                 value={search}
                 onValueChange={handleSearchChange}
                 onKeyDown={handleSearchKeyDown}
-                placeholder={askMode ? 'Ask Sim anything...' : 'Search anything...'}
+                placeholder={askMode ? 'Ask Memlia anything...' : 'Search anything...'}
                 endAdornment={
                   chatEnabled ? (
                     <span className='shrink-0 whitespace-nowrap text-[var(--text-subtle)] text-xs'>
-                      {askMode ? '⇥ Search' : '⇥ Ask Sim'}
+                      {askMode ? '⇥ Search' : '⇥ Ask Memlia'}
                     </span>
                   ) : undefined
                 }

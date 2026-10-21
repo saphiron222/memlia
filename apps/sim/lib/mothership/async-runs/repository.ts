@@ -66,6 +66,10 @@ import {
   traceMothershipTransaction,
 } from '@/lib/mothership/observability/database'
 import type { BillingAdmission } from '@/lib/mothership/request/lifecycle/recovery-config'
+import {
+  classifyRunExecution,
+  type RunExecutionKind,
+} from '@/lib/mothership/request/lifecycle/recovery-config'
 import { markSpanForError } from '@/lib/mothership/request/otel'
 import { sealClientToolSettlement } from '@/lib/mothership/request/tools/client-completion-seal.server'
 import {
@@ -243,6 +247,8 @@ type StoppedSandboxProcess = SessionProcessIdentity & { toolCallId: string }
 
 /** The run a Stop is delivered to. */
 export interface RunStopTarget {
+  /** Captured before a deletion can remove the canonical engine marker. */
+  executionKind?: RunExecutionKind
   id: string
   streamId: string
   userId: string
@@ -330,6 +336,7 @@ export async function stopLiveRunsTx(
       workspaceId: copilotRuns.workspaceId,
       organizationId: copilotRuns.organizationId,
       desktopDeviceId: copilotRuns.desktopDeviceId,
+      requestContext: copilotRuns.requestContext,
     })
     .from(copilotRuns)
     .where(and(liveRunScopeCondition(scope), notInArray(copilotRuns.status, TERMINAL_RUN_STATUSES)))
@@ -342,7 +349,9 @@ export async function stopLiveRunsTx(
     workspaceId,
     organizationId,
     desktopDeviceId,
+    requestContext,
   } of rows) {
+    const executionKind = classifyRunExecution(requestContext)
     /** A run with no single owner has no Stop row to write; run control already answers Stop. */
     if (Boolean(workspaceId) !== Boolean(organizationId))
       await recordRunStopTx(tx, { streamId, userId, workspaceId, organizationId })
@@ -352,6 +361,7 @@ export async function stopLiveRunsTx(
       userId,
       chatId,
       desktopDeviceId,
+      executionKind,
       clientWorkflowExecutionIds: await getUnsettledClientWorkflowExecutions(streamId, userId, tx),
       sandboxProcesses: await getUnsettledStreamSandboxProcesses(streamId, userId, tx),
     })

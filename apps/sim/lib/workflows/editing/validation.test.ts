@@ -1,3 +1,4 @@
+// Modified by Memlia: validate container counters without coercing general block fields.
 import { resetEnvFlagsMock, setEnvFlags } from '@sim/testing'
 import { toolsUtilsMock, toolsUtilsMockFns } from '@sim/testing/mocks/blocks.mock'
 import {
@@ -304,6 +305,71 @@ afterAll(resetEnvFlagsMock)
 
 beforeEach(() => {
   mockIsIntegrationDeploymentAvailable.mockReturnValue(true)
+})
+
+describe('container counter inputs', () => {
+  it.each([3, '3', ' 003 ', Number.MAX_SAFE_INTEGER])(
+    'admits the canonical count for %j',
+    (value) => {
+      for (const [type, field] of [
+        ['loop', 'iterations'],
+        ['parallel', 'count'],
+      ]) {
+        const result = validateInputsForBlock(type, { [field]: value }, 'container')
+        expect(result.errors).toEqual([])
+        expect(result.validInputs[field]).toBe(
+          value === Number.MAX_SAFE_INTEGER ? Number.MAX_SAFE_INTEGER : 3
+        )
+      }
+    }
+  )
+
+  it.each([
+    0,
+    -1,
+    1.5,
+    NaN,
+    Infinity,
+    Number.MAX_SAFE_INTEGER + 1,
+    '',
+    ' ',
+    '0',
+    '-3',
+    '+3',
+    '3.0',
+    '3e0',
+    '3x',
+    '9007199254740993',
+    '9'.repeat(400),
+    true,
+    null,
+    undefined,
+    [],
+    {},
+  ])('rejects an invalid count %j', (value) => {
+    for (const [type, field] of [
+      ['loop', 'iterations'],
+      ['parallel', 'count'],
+    ]) {
+      const result = validateInputsForBlock(type, { [field]: value }, 'container')
+      expect(result.validInputs).toEqual({})
+      expect(result.errors).toHaveLength(1)
+      expect(result.errors[0]).toMatchObject({ blockId: 'container', blockType: type, field })
+    }
+  })
+
+  it('keeps native collections and conditions outside numeric admission', () => {
+    expect(
+      validateInputsForBlock('loop', { collection: '<start.items>', condition: '3' }, 'container')
+    ).toEqual({
+      validInputs: { collection: '<start.items>', condition: '3' },
+      errors: [],
+    })
+    expect(validateInputsForBlock('parallel', { collection: ['3'] }, 'container')).toEqual({
+      validInputs: { collection: ['3'] },
+      errors: [],
+    })
+  })
 })
 
 describe('validateInputsForBlock', () => {

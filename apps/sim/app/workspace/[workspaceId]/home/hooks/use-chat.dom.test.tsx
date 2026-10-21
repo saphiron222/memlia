@@ -28,6 +28,7 @@ import { sleep } from '@sim/utils/helpers'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { LocalProfileObservation } from '@/hooks/queries/local-chat-capabilities'
 
 const {
   mockRequestJson,
@@ -46,6 +47,21 @@ const {
         abortSignal?: AbortSignal
       }) => Promise<{ success: boolean }>
     >(),
+}))
+
+const profileFixture = vi.hoisted(() => ({
+  current: {
+    status: 'ready',
+    scopeKey: 'fixture-scope',
+    profile: { version: 1, backend: 'legacy' },
+  } as LocalProfileObservation,
+}))
+// Query HTTP/auth is a boundary double here; its native cache transitions have a separate suite.
+vi.mock('@/hooks/queries/local-chat-capabilities', () => ({
+  useLocalChatCapabilities: () => ({
+    ...profileFixture.current,
+    read: () => profileFixture.current,
+  }),
 }))
 
 vi.mock('@/app/workspace/[workspaceId]/providers/feature-flags-provider', () => ({
@@ -316,7 +332,8 @@ let queryClient: QueryClient
 
 function renderUseChat(
   owner: string | { organizationId: string } = 'ws-1',
-  requestMode?: 'agent' | 'assistant'
+  requestMode?: 'agent' | 'assistant',
+  workflowId?: string
 ): {
   getResult: () => ReturnType<typeof useChat>
   unmount: () => void
@@ -330,7 +347,7 @@ function renderUseChat(
   let result: ReturnType<typeof useChat> | undefined
 
   function Probe() {
-    result = useChat(owner, undefined, { requestMode })
+    result = useChat(owner, undefined, { requestMode, workflowId })
     return null
   }
 
@@ -371,7 +388,8 @@ function renderUseChatInChat(
     defaultOptions: { queries: { retry: false } },
   }),
   selectedResourceId?: string,
-  requestMode?: 'agent' | 'assistant'
+  requestMode?: 'agent' | 'assistant',
+  workflowId?: string
 ): {
   getResult: () => ReturnType<typeof useChat>
   unmount: () => void
@@ -391,6 +409,7 @@ function renderUseChatInChat(
     result = useChat('ws-1', chatId, {
       ...(selectedResourceId ? { activeResourceState } : {}),
       ...(requestMode ? { requestMode } : {}),
+      ...(workflowId ? { workflowId } : {}),
     })
     return null
   }
@@ -607,6 +626,11 @@ async function waitFor(predicate: () => boolean, budgetMs = 2000): Promise<void>
 
 describe('useChat remount send recovery', () => {
   beforeEach(() => {
+    profileFixture.current = {
+      status: 'ready',
+      scopeKey: 'fixture-scope',
+      profile: { version: 1, backend: 'legacy' },
+    }
     vi.stubGlobal('fetch', fetchStub)
     mockUsePathname.mockReturnValue('/workspace/ws-1/home')
     state.postBehavior = 'hang'
@@ -630,6 +654,676 @@ describe('useChat remount send recovery', () => {
     }
     queryClient?.clear()
     resetDeploymentShape()
+  })
+
+  it('local loading refuses before POST and preserves the untouched queue', async () => {
+    profileFixture.current = { status: 'loading', scopeKey: 'fixture-scope' }
+    const hook = renderUseChat('ws-1', 'agent', 'wf-1')
+    await act(async () => {
+      void hook.getResult().sendMessage('Un texte conservé')
+      await sleep(20)
+    })
+    expect(state.postBodies).toEqual([])
+    expect(hook.getResult().messages).toEqual([])
+    expect(hook.getResult().messageQueue).toEqual([])
+  })
+
+  it('local unavailable refuses a programmatic send instead of falling back to legacy', async () => {
+    profileFixture.current = { status: 'unavailable', scopeKey: 'fixture-scope' }
+    const hook = renderUseChat('ws-1', 'agent', 'wf-1')
+    await act(async () => {
+      void hook.getResult().sendMessage('Un texte conservé')
+      await sleep(20)
+    })
+    expect(state.postBodies).toEqual([])
+  })
+
+  const localFixture = () => {
+    profileFixture.current = {
+      status: 'ready',
+      scopeKey: 'fixture-scope',
+      profile: {
+        version: 1,
+        backend: 'local',
+        provider: 'openai',
+        model: 'gpt-4.1',
+        workspaceId: 'ws-1',
+        workflowId: 'wf-1',
+        modes: ['agent'],
+        requiresExistingWorkflow: true,
+        requestSupported: true,
+        currentWorkflowReference: 'implicit',
+        modelSelection: false,
+        effort: false,
+        attachments: false,
+        otherResources: false,
+        contexts: false,
+        desktop: false,
+      },
+    }
+  }
+
+  it('local settings require explicit adoption before a programmatic send', async () => {
+    localFixture()
+    const hook = renderUseChat('ws-1', 'agent', 'wf-1')
+    await act(async () => {
+      void hook.getResult().sendMessage('Un texte')
+      await sleep(20)
+    })
+    expect(state.postBodies).toEqual([])
+  })
+
+  it('local adopted text uses the allowed body without global model or effort changes', async () => {
+    localFixture()
+    const hook = renderUseChat('ws-1', 'agent', 'wf-1')
+    const preferences = useMothershipEffortStore.getState()
+    act(() => hook.getResult().localChat.adopt())
+    await act(async () => {
+      expect(hook.getResult().trySubmitMessage('Bonjour')).toBe(true)
+      await sleep(30)
+    })
+    expect(state.postBodies).toHaveLength(1)
+    expect(state.postBodies[0]).toEqual({
+      message: 'Bonjour',
+      workspaceId: 'ws-1',
+      workflowId: 'wf-1',
+      userMessageId: expect.any(String),
+      createNewChat: true,
+      mode: 'agent',
+    })
+    expect(useMothershipEffortStore.getState()).toBe(preferences)
+  })
+
+  it.each(['file', 'context', 'resource', 'utf8', 'json'])(
+    'local refuses %s before clearing or queueing an intention',
+    async (kind) => {
+      localFixture()
+      const hook = renderUseChat('ws-1', 'agent', 'wf-1')
+      act(() => hook.getResult().localChat.adopt())
+      if (kind === 'resource')
+        act(() => {
+          hook.getResult().addResource({ type: 'workflow', id: 'wf-1', title: 'Explicit choice' })
+        })
+      const text =
+        kind === 'utf8' ? 'é'.repeat(32769) : kind === 'json' ? '\u0001'.repeat(20000) : 'Bonjour'
+      act(() => {
+        expect(
+          hook
+            .getResult()
+            .trySubmitMessage(
+              text,
+              kind === 'file'
+                ? [{ id: 'f', key: 'k', filename: 'file.txt', media_type: 'text/plain', size: 1 }]
+                : undefined,
+              kind === 'context'
+                ? [{ kind: 'workflow', workflowId: 'wf-1', label: 'Explicit choice' }]
+                : undefined
+            )
+        ).toBe(false)
+      })
+      await act(async () => {
+        await sleep(20)
+      })
+      expect(state.postBodies).toEqual([])
+      expect(hook.getResult().messageQueue).toEqual([])
+    }
+  )
+
+  it('local queued intent is not adopted into a changed profile by a later settings acknowledgment', async () => {
+    localFixture()
+    const hook = renderUseChat('ws-1', 'agent', 'wf-1')
+    act(() => {
+      hook.getResult().localChat.adopt()
+      expect(hook.getResult().trySubmitMessage('Ancienne intention')).toBe(true)
+      const profile = profileFixture.current.profile
+      if (profile?.backend !== 'local') throw new Error('Expected local fixture')
+      profileFixture.current = {
+        ...profileFixture.current,
+        profile: { ...profile, model: 'another-admin-model' },
+      }
+      hook.getResult().localChat.adopt()
+    })
+    await act(async () => {
+      await sleep(30)
+    })
+    expect(state.postBodies).toEqual([])
+    expect(hook.getResult().messageQueue.map((m) => m.content)).toEqual(['Ancienne intention'])
+  })
+
+  it('review local queued intention cannot automatically drain into legacy', async () => {
+    localFixture()
+    const hook = renderUseChat('ws-1', 'agent', 'wf-1')
+    act(() => {
+      hook.getResult().localChat.adopt()
+      expect(hook.getResult().trySubmitMessage('Intention locale automatique')).toBe(true)
+      profileFixture.current = {
+        status: 'ready',
+        scopeKey: 'fixture-scope',
+        profile: { version: 1, backend: 'legacy' },
+      }
+    })
+    await act(async () => {
+      await sleep(30)
+    })
+    expect(state.postBodies).toEqual([])
+    expect(hook.getResult().messageQueue.map((m) => m.content)).toEqual([
+      'Intention locale automatique',
+    ])
+  })
+
+  it('review local queued intention cannot silently become legacy after profile replacement', async () => {
+    localFixture()
+    const hook = renderUseChat('ws-1', 'agent', 'wf-1')
+    act(() => {
+      hook.getResult().localChat.adopt()
+      expect(hook.getResult().trySubmitMessage('Intention locale uniquement')).toBe(true)
+      profileFixture.current = { status: 'loading', scopeKey: 'fixture-scope' }
+    })
+    await act(async () => {
+      await sleep(30)
+    })
+    expect(state.postBodies).toEqual([])
+    expect(hook.getResult().messageQueue.map((m) => m.content)).toEqual([
+      'Intention locale uniquement',
+    ])
+    profileFixture.current = {
+      status: 'ready',
+      scopeKey: 'fixture-scope',
+      profile: { version: 1, backend: 'legacy' },
+    }
+    await act(async () => {
+      void hook.getResult().sendNow()
+      await sleep(30)
+    })
+    expect(state.postBodies).toEqual([])
+    expect(hook.getResult().messageQueue.map((m) => m.content)).toEqual([
+      'Intention locale uniquement',
+    ])
+  })
+
+  it('origin survives remount and session rehydration into legacy without authority', async () => {
+    localFixture()
+    const hook = renderUseChat('ws-1', 'agent', 'wf-1')
+    act(() => {
+      hook.getResult().localChat.adopt()
+      expect(hook.getResult().trySubmitMessage('Origine durable')).toBe(true)
+      profileFixture.current = { status: 'loading', scopeKey: 'fixture-scope' }
+    })
+    await act(async () => {
+      await sleep(20)
+    })
+    hook.unmount()
+    const saved = sessionStorage.getItem('mothership-queue')
+    expect(saved).not.toBeNull()
+    act(() => useMothershipQueueStore.getState().reset())
+    sessionStorage.setItem('mothership-queue', saved!)
+    await act(async () => {
+      await useMothershipQueueStore.persist.rehydrate()
+    })
+    profileFixture.current = {
+      status: 'ready',
+      scopeKey: 'fixture-scope',
+      profile: { version: 1, backend: 'legacy' },
+    }
+    const resumed = renderUseChat('ws-1', 'agent', 'wf-1')
+    await act(async () => {
+      await resumed.getResult().sendNow()
+      await sleep(20)
+    })
+    expect(state.postBodies).toEqual([])
+    expect(resumed.getResult().messageQueue.map((m) => m.content)).toEqual(['Origine durable'])
+  })
+
+  it('origin local edit cannot clear the composer under legacy', async () => {
+    localFixture()
+    const hook = renderUseChat('ws-1', 'agent', 'wf-1')
+    act(() => {
+      hook.getResult().localChat.adopt()
+      hook.getResult().trySubmitMessage('Texte local à conserver')
+      profileFixture.current = { status: 'loading', scopeKey: 'fixture-scope' }
+    })
+    await act(async () => {
+      await sleep(20)
+    })
+    act(() => {
+      hook.getResult().editQueuedMessage(hook.getResult().messageQueue[0].id)
+    })
+    profileFixture.current = {
+      status: 'ready',
+      scopeKey: 'fixture-scope',
+      profile: { version: 1, backend: 'legacy' },
+    }
+    act(() => {
+      expect(hook.getResult().trySubmitMessage('Texte édité conservé')).toBe(false)
+    })
+    expect(state.postBodies).toEqual([])
+    expect(hook.getResult().messageQueue.map((m) => m.content)).toEqual(['Texte local à conserver'])
+  })
+
+  it('origin pending local admission survives unmount once without a legacy handoff', async () => {
+    localFixture()
+    stubFirstPostPendingThenAdmitted()
+    const hook = renderUseChat('ws-1', 'agent', 'wf-1')
+    act(() => {
+      hook.getResult().localChat.adopt()
+      hook.getResult().trySubmitMessage('Admission locale incertaine')
+    })
+    await waitFor(() => state.postBodies.length === 1)
+    expect(state.postBodies[0]).not.toHaveProperty('localOrigin')
+    expect(readQueuedSendHandoffState()).toBeNull()
+    hook.unmount()
+    await act(async () => {
+      await sleep(30)
+    })
+    expect(allQueuedMessages().map((m) => m.content)).toEqual(['Admission locale incertaine'])
+    expect(allQueuedMessages()[0]).toMatchObject({ localOrigin: true, admissionUnknown: true })
+    expect(MothershipHandoffStorage.consume('ws-1')).toBeNull()
+    profileFixture.current = {
+      status: 'ready',
+      scopeKey: 'fixture-scope',
+      profile: { version: 1, backend: 'legacy' },
+    }
+    const resumed = renderUseChat('ws-1', 'agent', 'wf-1')
+    await act(async () => {
+      await resumed.getResult().sendNow()
+      await sleep(30)
+    })
+    expect(state.postBodies).toHaveLength(1)
+    expect(resumed.getResult().messageQueue).toHaveLength(1)
+  })
+
+  it('origin explicitly edited legacy entry becomes local and remains locally bound', async () => {
+    const key = 'origin-edit'
+    const hook = renderUseChatInChat(
+      key,
+      { id: key, title: 'Local', messages: [], activeStreamId: null, resources: [] },
+      undefined,
+      undefined,
+      'agent',
+      'wf-1'
+    )
+    act(() => {
+      useMothershipQueueStore
+        .getState()
+        .enqueue(key, { id: 'from-legacy', content: 'Avant', hold: 'user' })
+      hook.getResult().editQueuedMessage('from-legacy')
+    })
+    localFixture()
+    act(() => {
+      hook.getResult().localChat.adopt()
+      expect(hook.getResult().trySubmitMessage('Après adoption locale')).toBe(true)
+      profileFixture.current = { status: 'loading', scopeKey: 'fixture-scope' }
+    })
+    await act(async () => {
+      await sleep(20)
+    })
+    expect(useMothershipQueueStore.getState().queues[key][0]).toMatchObject({
+      localOrigin: true,
+      content: 'Après adoption locale',
+    })
+    profileFixture.current = {
+      status: 'ready',
+      scopeKey: 'fixture-scope',
+      profile: { version: 1, backend: 'legacy' },
+    }
+    await act(async () => {
+      await hook.getResult().sendNow()
+      await sleep(20)
+    })
+    expect(state.postBodies).toEqual([])
+  })
+
+  it.each([null, false, 'unknown', { version: 2 }])(
+    'origin malformed persisted marker %j never authorizes legacy',
+    async (localOrigin) => {
+      const key = 'origin-malformed'
+      const hook = renderUseChatInChat(
+        key,
+        { id: key, title: 'Local', messages: [], activeStreamId: null, resources: [] },
+        undefined,
+        undefined,
+        'agent',
+        'wf-1'
+      )
+      const restored = JSON.parse(
+        JSON.stringify({ id: 'unknown-origin', content: 'Conservé', localOrigin })
+      )
+      act(() => useMothershipQueueStore.getState().enqueue(key, restored))
+      await act(async () => {
+        await hook.getResult().sendNow()
+        await sleep(20)
+      })
+      expect(state.postBodies).toEqual([])
+      expect(hook.getResult().messageQueue).toHaveLength(1)
+    }
+  )
+
+  it('origin remounted local intention requires edit after adoption and sends no marker', async () => {
+    localFixture()
+    const hook = renderUseChat('ws-1', 'agent', 'wf-1')
+    act(() => {
+      hook.getResult().localChat.adopt()
+      hook.getResult().trySubmitMessage('Avant relecture')
+      profileFixture.current = { status: 'loading', scopeKey: 'fixture-scope' }
+    })
+    await act(async () => {
+      await sleep(20)
+    })
+    hook.unmount()
+    localFixture()
+    const resumed = renderUseChat('ws-1', 'agent', 'wf-1')
+    act(() => resumed.getResult().localChat.adopt())
+    await act(async () => {
+      await resumed.getResult().sendNow()
+      await sleep(20)
+    })
+    expect(state.postBodies).toEqual([])
+    act(() => {
+      resumed.getResult().editQueuedMessage(resumed.getResult().messageQueue[0].id)
+      expect(resumed.getResult().trySubmitMessage('Après relecture explicite')).toBe(true)
+    })
+    await waitFor(() => state.postBodies.length === 1)
+    expect(state.postBodies[0].message).toBe('Après relecture explicite')
+    expect(state.postBodies[0]).not.toHaveProperty('localOrigin')
+    expect(state.postBodies[0]).not.toHaveProperty('modelSelection')
+  })
+
+  it('local adoption is invalidated by a new native pick even when its effort value is unchanged', async () => {
+    localFixture()
+    useMothershipEffortStore.getState().setChatEffort('chat-pick', 'low')
+    const history: MothershipChatHistory = {
+      id: 'chat-pick',
+      title: 'Local',
+      messages: [],
+      activeStreamId: null,
+      resources: [],
+    }
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const hook = renderUseChatInChat('chat-pick', history, client, undefined, 'agent', 'wf-1')
+    act(() => hook.getResult().localChat.adopt())
+    const first = useMothershipEffortStore.getState().chatEfforts['chat-pick']
+    act(() => useMothershipEffortStore.getState().setChatEffort('chat-pick', 'low'))
+    expect(useMothershipEffortStore.getState().chatEfforts['chat-pick'].pick).not.toBe(first.pick)
+    act(() => expect(hook.getResult().trySubmitMessage('Choix explicite')).toBe(false))
+    expect(state.postBodies).toEqual([])
+    expect(hook.getResult().messageQueue).toEqual([])
+  })
+
+  it('local Home explains the missing workflow without creating a queued intention', () => {
+    localFixture()
+    const profile = profileFixture.current.profile
+    if (profile?.backend !== 'local') throw new Error('Expected local fixture')
+    const { workflowId: _workflowId, ...workspaceProfile } = profile
+    profileFixture.current = {
+      ...profileFixture.current,
+      profile: {
+        ...workspaceProfile,
+        requestSupported: false,
+        currentWorkflowReference: 'unavailable',
+      },
+    }
+    const hook = renderUseChat('ws-1')
+    act(() => hook.getResult().localChat.adopt())
+    expect(hook.getResult().localChat.message).toContain('Ouvrez un workflow existant')
+    act(() => expect(hook.getResult().trySubmitMessage('Ne pas créer')).toBe(false))
+    expect(state.postBodies).toEqual([])
+    expect(hook.getResult().messageQueue).toEqual([])
+  })
+
+  it('local direct handoff mode remains refused after cabinet settings adoption', async () => {
+    localFixture()
+    const hook = renderUseChat('ws-1', 'agent', 'wf-1')
+    act(() => hook.getResult().localChat.adopt())
+    await act(async () => {
+      await hook
+        .getResult()
+        .sendMessage('Recherche explicite', undefined, undefined, { requestMode: 'assistant' })
+    })
+    expect(state.postBodies).toEqual([])
+  })
+
+  it('local async preparation preserves the queued intention when settings change before fetch', async () => {
+    localFixture()
+    const history: MothershipChatHistory = {
+      id: 'chat-local',
+      title: 'Local',
+      messages: [],
+      activeStreamId: null,
+      resources: [],
+    }
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const hook = renderUseChatInChat('chat-local', history, client, undefined, 'agent', 'wf-1')
+    const waiting = createDeferred<void>()
+    const reached = createDeferred<void>()
+    vi.spyOn(client, 'cancelQueries').mockImplementation(() => {
+      reached.resolve()
+      return waiting.promise
+    })
+    act(() => {
+      hook.getResult().localChat.adopt()
+      expect(hook.getResult().trySubmitMessage('Intention avant attente')).toBe(true)
+    })
+    await act(async () => {
+      await reached.promise
+    })
+    expect(hook.getResult().messages).toEqual([])
+    profileFixture.current = { ...profileFixture.current, status: 'unavailable' }
+    await act(async () => {
+      waiting.resolve()
+      await sleep(20)
+    })
+    expect(state.postBodies).toEqual([])
+    expect(hook.getResult().messageQueue.map((m) => m.content)).toEqual(['Intention avant attente'])
+    expect(hook.getResult().isSending).toBe(false)
+  })
+
+  it('origin after-await local intention cannot become legacy', async () => {
+    localFixture()
+    const history: MothershipChatHistory = {
+      id: 'chat-local',
+      title: 'Local',
+      messages: [],
+      activeStreamId: null,
+      resources: [],
+    }
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const hook = renderUseChatInChat('chat-local', history, client, undefined, 'agent', 'wf-1')
+    const waiting = createDeferred<void>()
+    const reached = createDeferred<void>()
+    vi.spyOn(client, 'cancelQueries').mockImplementation(() => {
+      reached.resolve()
+      return waiting.promise
+    })
+    act(() => {
+      hook.getResult().localChat.adopt()
+      expect(hook.getResult().trySubmitMessage('Intention avant attente')).toBe(true)
+    })
+    await act(async () => {
+      await reached.promise
+    })
+    expect(hook.getResult().messages).toEqual([])
+    profileFixture.current = {
+      status: 'ready',
+      scopeKey: 'fixture-scope',
+      profile: { version: 1, backend: 'legacy' },
+    }
+    await act(async () => {
+      waiting.resolve()
+      await sleep(20)
+    })
+    expect(state.postBodies).toEqual([])
+    expect(hook.getResult().messageQueue.map((m) => m.content)).toEqual(['Intention avant attente'])
+    expect(hook.getResult().isSending).toBe(false)
+  })
+
+  it('local resumed queue without its original scope attestation remains visible and unsent', async () => {
+    localFixture()
+    const hook = renderUseChat('ws-1', 'agent', 'wf-1')
+    act(() => {
+      hook.getResult().localChat.adopt()
+      expect(hook.getResult().trySubmitMessage('Intention conservée')).toBe(true)
+      profileFixture.current = { ...profileFixture.current, status: 'loading' }
+    })
+    await act(async () => {
+      await sleep(20)
+    })
+    hook.unmount()
+    localFixture()
+    const resumed = renderUseChat('ws-1', 'agent', 'wf-1')
+    act(() => resumed.getResult().localChat.adopt())
+    await act(async () => {
+      await resumed.getResult().sendNow()
+      await sleep(20)
+    })
+    expect(state.postBodies).toEqual([])
+    expect(resumed.getResult().messageQueue.map((m) => m.content)).toEqual(['Intention conservée'])
+  })
+
+  it('local publication reentry does not strand the send when a subscriber changes the profile', async () => {
+    localFixture()
+    const history: MothershipChatHistory = {
+      id: 'chat-reentrant',
+      title: 'Local',
+      messages: [],
+      activeStreamId: null,
+      resources: [],
+    }
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const hook = renderUseChatInChat('chat-reentrant', history, client, undefined, 'agent', 'wf-1')
+    const unsubscribe = client.getQueryCache().subscribe((event) => {
+      if (event.type === 'updated' && event.query.queryKey.includes('chat-reentrant')) {
+        const h = client.getQueryData<MothershipChatHistory>(
+          mothershipChatKeys.detail('chat-reentrant')
+        )
+        if (h?.messages.some((m) => m.content === 'Texte avant publication'))
+          profileFixture.current = { ...profileFixture.current, status: 'unavailable' }
+      }
+    })
+    try {
+      act(() => {
+        hook.getResult().localChat.adopt()
+        hook.getResult().trySubmitMessage('Texte avant publication')
+      })
+      await act(async () => {
+        await sleep(30)
+      })
+      expect(state.postBodies).toEqual([])
+      expect(hook.getResult().isSending).toBe(false)
+      expect(hook.getResult().messageQueue.map((m) => m.content)).toEqual([
+        'Texte avant publication',
+      ])
+    } finally {
+      unsubscribe()
+    }
+  })
+
+  it('origin reentrant publication cannot change local intent into legacy', async () => {
+    localFixture()
+    const history: MothershipChatHistory = {
+      id: 'chat-reentrant',
+      title: 'Local',
+      messages: [],
+      activeStreamId: null,
+      resources: [],
+    }
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const hook = renderUseChatInChat('chat-reentrant', history, client, undefined, 'agent', 'wf-1')
+    const unsubscribe = client.getQueryCache().subscribe((event) => {
+      if (event.type === 'updated' && event.query.queryKey.includes('chat-reentrant')) {
+        const h = client.getQueryData<MothershipChatHistory>(
+          mothershipChatKeys.detail('chat-reentrant')
+        )
+        if (h?.messages.some((m) => m.content === 'Texte avant publication'))
+          profileFixture.current = {
+            status: 'ready',
+            scopeKey: 'fixture-scope',
+            profile: { version: 1, backend: 'legacy' },
+          }
+      }
+    })
+    try {
+      act(() => {
+        hook.getResult().localChat.adopt()
+        hook.getResult().trySubmitMessage('Texte avant publication')
+      })
+      await act(async () => {
+        await sleep(30)
+      })
+      expect(state.postBodies).toEqual([])
+      expect(hook.getResult().isSending).toBe(false)
+      expect(hook.getResult().messageQueue.map((m) => m.content)).toEqual([
+        'Texte avant publication',
+      ])
+    } finally {
+      unsubscribe()
+    }
+  })
+
+  it('local removal during preparation does not dispatch a withdrawn queued message', async () => {
+    localFixture()
+    const history: MothershipChatHistory = {
+      id: 'chat-remove',
+      title: 'Local',
+      messages: [],
+      activeStreamId: null,
+      resources: [],
+    }
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const hook = renderUseChatInChat('chat-remove', history, client, undefined, 'agent', 'wf-1')
+    const waiting = createDeferred<void>()
+    const reached = createDeferred<void>()
+    vi.spyOn(client, 'cancelQueries').mockImplementation(() => {
+      reached.resolve()
+      return waiting.promise
+    })
+    act(() => {
+      hook.getResult().localChat.adopt()
+      hook.getResult().trySubmitMessage('À retirer')
+    })
+    await act(async () => {
+      await reached.promise
+    })
+    const queued = hook.getResult().messageQueue[0]
+    act(() => hook.getResult().removeFromQueue(queued.id))
+    await act(async () => {
+      waiting.resolve()
+      await sleep(20)
+    })
+    expect(state.postBodies).toEqual([])
+    expect(hook.getResult().messageQueue).toEqual([])
+    expect(hook.getResult().messages).toEqual([])
+  })
+
+  it('local queue consumption occurs only after the still-authorized POST has started', async () => {
+    localFixture()
+    const hook = renderUseChat('ws-1', 'agent', 'wf-1')
+    const observations: number[] = []
+    const unsubscribe = useMothershipQueueStore.subscribe((next, previous) => {
+      const before = Object.values(previous.queues)
+        .flat()
+        .some((entry) => entry.content === 'Envoi possédé')
+      const after = Object.values(next.queues)
+        .flat()
+        .some((entry) => entry.content === 'Envoi possédé')
+      if (before && !after) {
+        observations.push(state.postBodies.length)
+        profileFixture.current = { ...profileFixture.current, status: 'unavailable' }
+      }
+    })
+    try {
+      act(() => {
+        hook.getResult().localChat.adopt()
+        hook.getResult().trySubmitMessage('Envoi possédé')
+      })
+      await act(async () => {
+        await sleep(30)
+      })
+      expect(observations).toEqual([1])
+      expect(state.postBodies).toHaveLength(1)
+      expect(state.postBodies[0].message).toBe('Envoi possédé')
+    } finally {
+      unsubscribe()
+    }
   })
 
   it.each([false, true])(

@@ -1,5 +1,5 @@
 {
-  "schema": "memlia.reviewed-gitleaks/v1",
+  "schema": "memlia.reviewed-gitleaks/v2",
   "scanner": "gitleaks",
   "version": "8.30.1",
   "source_sha": "c6cef5f87b6a1d1d01df89e7140bad9e9fd4c2e2",
@@ -542,6 +542,48 @@
       "rule": "generic-api-key",
       "line": 18,
       "reason": "Valeurs de test explicites dans fixture Helm ou environnement mocké ; aucun secret de déploiement."
+    },
+    {
+      "path": "apps/sim/providers/anthropic/controlled-client.test.ts",
+      "sha256": "647c5190b97e80fe9489bf9b703faeb34715e204aa17674af91890ca7024b1fb",
+      "rule": "generic-api-key",
+      "line": 267,
+      "reason": "ID de workspace API explicitement fictif dans un test SDK avec HTTP doublé ; la chaîne adjacente apiKey est une constante FICTITIOUS, aucune clé réelle ni valeur ambiante lue."
+    },
+    {
+      "path": "apps/sim/providers/anthropic/controlled-client.test.ts",
+      "sha256": "647c5190b97e80fe9489bf9b703faeb34715e204aa17674af91890ca7024b1fb",
+      "rule": "generic-api-key",
+      "line": 288,
+      "reason": "ID de workspace API explicitement fictif dans un test SDK avec HTTP doublé ; la chaîne adjacente apiKey est une constante FICTITIOUS, aucune clé réelle ni valeur ambiante lue."
+    },
+    {
+      "path": "apps/sim/blocks/registry-maps.ts",
+      "sha256": "65b369e669d8cd80a1337262f1cd9f8e87ab2b7240ee0cf4d2c8e827216ee07e",
+      "rule": "airtable-api-key",
+      "line": 9,
+      "reason": "Import de symboles AirtableBlock/AirtableBlockMeta, pas un token ; nouveau blob exact après ajout du bloc Excel natif, ligne relue et détection ciblée Gitleaks8.30.1 conservée."
+    },
+    {
+      "path": "packages/deployment-config/src/env-capabilities.ts",
+      "sha256": "fa7d84435d0c7ecf1e1ecb01f605340ecb712ebfbd3626cab3fe59a2ad44ea31",
+      "rule": "generic-api-key",
+      "line": 1568,
+      "reason": "Noms littéraux des variables ANTHROPIC_API_KEY_1/2/3 dans LLM_KEY_POOLS, aucune valeur de clé ; nouveau blob exact, ligne relue et détection ciblée Gitleaks8.30.1 conservée."
+    },
+    {
+      "path": "apps/sim/providers/anthropic/core.test.ts",
+      "sha256": "cb3ca25594846b7f238726736339752a1db3489090b2b2324659c0d63107db1a",
+      "rule": "generic-api-key",
+      "line": 979,
+      "reason": "Même chaîne déterministe fictive du test natif de masquage Anthropic, contexte local relu à la ligne979. Nouveau blob exact après adaptations distinctes des lignes1/675 et ajout de tests natifs de fin de réponse ; le préfixe entier n’est pas annoncé identique. Admission limitée à ce couple path/SHA/règle/ligne, sans désactivation du scanner ni exemption future."
+    },
+    {
+      "path": "apps/sim/lib/workflows/editing/validation.test.ts",
+      "sha256": "49ffb89dd3b61ba7ec40b68167cce28563967d73e569f1385e09dd501c2bd2c7",
+      "rule": "generic-api-key",
+      "line": 770,
+      "reason": "Constante de fixture de test inspectée ; valeur descriptive ou synthétique injectée dans mocks/assertions de non-divulgation, sans appel fournisseur réel. Revue du 20 octobre : unique constante et contexte inchangés après ajout des tests de compteurs ; déplacement704→770, ancien blob conservé pour l’histoire."
     }
   ]
 }

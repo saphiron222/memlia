@@ -1,4 +1,4 @@
-// Modified by Memlia: reserve and bound each controlled streaming SDK turn.
+// Modified by Memlia: reserve and bound each controlled SDK turn; preserve its closed finish reason.
 import { prepareConversationGeneration } from '@/providers/conversation-generation'
 /**
  * Live Anthropic streaming tool loop.
@@ -22,6 +22,7 @@ import {
   buildAnthropicUsageCost,
   buildAnthropicUsageTokens,
   createAnthropicUsageAccumulator,
+  observeAnthropicUsage,
   toAnthropicModelUsage,
 } from '@/providers/anthropic/usage'
 import { checkForForcedToolUsage } from '@/providers/anthropic/utils'
@@ -29,8 +30,18 @@ import {
   captureProviderConversationStep,
   recordProviderConversationToolError,
 } from '@/providers/conversation-history'
-import { awaitProviderModelCall, executeProviderTool } from '@/providers/runtime-context'
-import type { AgentStreamEvent, ToolCallEndStatus } from '@/providers/stream-events'
+import {
+  awaitProviderModelCall,
+  beginProviderModelAttempt,
+  completeProviderModelAttempt,
+  executeProviderTool,
+  getProviderRuntimeContext,
+} from '@/providers/runtime-context'
+import {
+  type AgentStreamEvent,
+  type ToolCallEndStatus,
+  isAgentTurnFinishReason,
+} from '@/providers/stream-events'
 import {
   isAbortError,
   type StreamingToolLoopComplete,
@@ -114,6 +125,9 @@ export function createAnthropicStreamingToolLoopStream(
   const { anthropic, payload, request, messages, providerId, logger, timeSegments, onComplete } =
     options
   const forcedToolNames = options.forcedTools ?? []
+  const controls = getProviderRuntimeContext()?.controlledRun
+  const observeAttempts = !!controls?.observeModelAttempt
+  const observationModel = request.model
   const loopAbortController = new AbortController()
   const abortFromRequest = () => loopAbortController.abort(request.abortSignal?.reason)
   let activeMessageStream: { abort: () => void } | undefined
@@ -202,15 +216,24 @@ export function createAnthropicStreamingToolLoopStream(
 
           const modelStart = Date.now()
           const prepared = await prepareConversationGeneration(request, 'anthropic', turnPayload)
-          const options = await awaitProviderModelCall(loopAbortController.signal)
-          options?.signal.throwIfAborted()
-          const messageStream = anthropic.messages.stream(prepared, options)
-          activeMessageStream = messageStream
-
+          const { options, reference } = observeAttempts
+            ? await beginProviderModelAttempt(loopAbortController.signal)
+            : {
+                options: await awaitProviderModelCall(loopAbortController.signal),
+                reference: undefined,
+              }
           const textChunks: string[] = []
 
           try {
+            options?.signal.throwIfAborted()
+            const messageStream = anthropic.messages.stream(
+              observeAttempts ? { ...prepared, service_tier: 'standard_only' } : prepared,
+              options
+            )
+            activeMessageStream = messageStream
+            let sawMessageStop = false
             for await (const event of messageStream) {
+              if (event.type === 'message_stop') sawMessageStop = true
               if (event.type === 'content_block_start') {
                 const block = event.content_block
                 if (block.type === 'tool_use' && block.id && block.name) {
@@ -241,6 +264,18 @@ export function createAnthropicStreamingToolLoopStream(
 
             const finalMessage = await messageStream.finalMessage()
             activeMessageStream = undefined
+            if (reference) {
+              const observation = sawMessageStop
+                ? observeAnthropicUsage(observationModel, finalMessage)
+                : { kind: 'unknown' as const, reason: 'incomplete' as const }
+              const recorded = await completeProviderModelAttempt(reference, observation)
+              if (
+                !recorded ||
+                observation.kind !== 'usage' ||
+                observation.cost.kind !== 'list_price_estimate'
+              )
+                throw new Error('Anthropic model usage is unavailable.')
+            }
             const modelEnd = Date.now()
             const thisModelTime = modelEnd - modelStart
             modelTime += thisModelTime
@@ -258,6 +293,8 @@ export function createAnthropicStreamingToolLoopStream(
             })
 
             addAnthropicUsage(usage, finalMessage.usage)
+            // Record already observed spend even if cancellation arrived during settlement.
+            if (observeAttempts) loopAbortController.signal.throwIfAborted()
 
             const textContent = finalMessage.content
               .filter((item): item is Anthropic.Messages.TextBlock => item.type === 'text')
@@ -311,7 +348,14 @@ export function createAnthropicStreamingToolLoopStream(
             if (textChunks.length === 0 && textContent) {
               controller.enqueue({ type: 'text_delta', text: textContent, turn: 'pending' })
             }
-            controller.enqueue({ type: 'turn_end', turn: turnTag })
+            if (!isAgentTurnFinishReason(finalMessage.stop_reason)) {
+              throw new Error('Anthropic stream ended without a supported finish reason')
+            }
+            controller.enqueue({
+              type: 'turn_end',
+              turn: turnTag,
+              finishReason: finalMessage.stop_reason,
+            })
             content = textChunks.length > 0 ? textChunks.join('') : textContent
 
             enrichModelSegment(timeSegments, finalMessage, textContent, request.model, providerId)
@@ -443,9 +487,15 @@ export function createAnthropicStreamingToolLoopStream(
                     request,
                     toolUse.id,
                     toolName,
-                    getErrorMessage(error, 'Tool execution failed')
+                    controls
+                      ? 'Controlled tool execution failed.'
+                      : getErrorMessage(error, 'Tool execution failed')
                   )
-                  logger.error('Error processing tool call:', { error, toolName })
+                  if (controls)
+                    logger.error('Controlled Anthropic tool failed', {
+                      code: 'ANTHROPIC_CONTROLLED_TOOL_FAILED',
+                    })
+                  else logger.error('Error processing tool call:', { error, toolName })
                   const value = {
                     toolUse,
                     toolName,
@@ -454,7 +504,9 @@ export function createAnthropicStreamingToolLoopStream(
                     result: {
                       success: false as const,
                       output: undefined,
-                      error: getErrorMessage(error, 'Tool execution failed'),
+                      error: controls
+                        ? 'Controlled tool execution failed.'
+                        : getErrorMessage(error, 'Tool execution failed'),
                     },
                     startTime: toolCallStartTime,
                     endTime: toolCallEndTime,
@@ -562,6 +614,11 @@ export function createAnthropicStreamingToolLoopStream(
               throw new DOMException('Stream aborted', 'AbortError')
             }
           } catch (error) {
+            if (reference)
+              await completeProviderModelAttempt(reference, {
+                kind: 'unknown',
+                reason: 'transport_error',
+              })
             settleOpenTools(
               controller,
               openToolStarts,
@@ -584,11 +641,15 @@ export function createAnthropicStreamingToolLoopStream(
           openTools: openToolStarts,
           aborted: loopAbortController.signal.aborted,
           consumerCancelled,
-          error,
+          error: observeAttempts ? new Error('Controlled Anthropic streaming failed.') : error,
           onUnexpectedError: (cause) =>
-            logger.error('Anthropic streaming tool loop failed', {
-              error: toError(cause).message,
-            }),
+            controls
+              ? logger.error('Controlled Anthropic streaming failed', {
+                  code: 'ANTHROPIC_CONTROLLED_STREAM_FAILED',
+                })
+              : logger.error('Anthropic streaming tool loop failed', {
+                  error: toError(cause).message,
+                }),
         })
       } finally {
         activeMessageStream = undefined

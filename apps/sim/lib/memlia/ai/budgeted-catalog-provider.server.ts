@@ -8,7 +8,8 @@ import {
   captureWorkflowProposalBinding,
   runCatalogProvider,
 } from '@/lib/memlia/chat/provider-binding'
-import { LIST_PRICE_POLICY, priceModelUsage } from '@/providers/cost-policy'
+import { buildAnthropicModelUsage } from '@/providers/anthropic/usage'
+import { LIST_PRICE_POLICY, type ModelUsage, priceModelUsage } from '@/providers/cost-policy'
 import { getStaticProviderModels } from '@/providers/models'
 import { OPENAI_CACHE_WRITE_MULTIPLIER } from '@/providers/openai/utils'
 import { getModelPricing } from '@/providers/pricing'
@@ -47,6 +48,7 @@ function capture(raw: BudgetedCatalogProviderOptions) {
       'signal',
       'workflow',
       'proposal',
+      'anthropicWorkspaceId',
     ])
     if (Reflect.ownKeys(raw).some((key) => typeof key !== 'string' || !keys.has(key)))
       throw failure()
@@ -91,6 +93,13 @@ function capture(raw: BudgetedCatalogProviderOptions) {
       throw failure()
     const profile = captureChatPricingProfile(input.budget.pricingProfile)
     if (
+      Object.hasOwn(input, 'anthropicWorkspaceId') &&
+      (profile.profile.provider !== 'anthropic' ||
+        typeof input.anthropicWorkspaceId !== 'string' ||
+        !/^wrkspc_[A-Za-z0-9]{8,100}$/.test(input.anthropicWorkspaceId))
+    )
+      throw failure()
+    if (
       input.request?.model !== profile.profile.model ||
       input.request.maxTokens !== profile.profile.bounds.outputTokens
     )
@@ -105,7 +114,9 @@ function capture(raw: BudgetedCatalogProviderOptions) {
 /** Registry, bounds and estimate are checked synchronously, without an await between them. */
 function assertNativeProfile(captured: ReturnType<typeof captureChatPricingProfile>) {
   const profile = captured.profile
-  const model = getStaticProviderModels('openai').find((entry) => entry.id === profile.model)
+  const model = getStaticProviderModels(profile.provider).find(
+    (entry) => entry.id === profile.model
+  )
   const output = model?.capabilities?.maxOutputTokens
   if (
     !model ||
@@ -127,15 +138,34 @@ function assertNativeProfile(captured: ReturnType<typeof captureChatPricingProfi
       .filter((n) => n <= profile.bounds.contextTokens),
   ])
   for (const tokens of ends) {
-    const usages = [
+    const usages: ModelUsage[] = [
       { input: tokens, output: profile.bounds.outputTokens },
       { input: 0, output: profile.bounds.outputTokens, cacheRead: tokens },
-      {
+    ]
+    if (profile.provider === 'anthropic') {
+      usages.push(
+        buildAnthropicModelUsage({
+          input: 0,
+          output: profile.bounds.outputTokens,
+          cacheRead: 0,
+          cacheWriteFiveMinute: tokens,
+          cacheWriteOneHour: 0,
+        }),
+        buildAnthropicModelUsage({
+          input: 0,
+          output: profile.bounds.outputTokens,
+          cacheRead: 0,
+          cacheWriteFiveMinute: 0,
+          cacheWriteOneHour: tokens,
+        })
+      )
+    } else {
+      usages.push({
         input: 0,
         output: profile.bounds.outputTokens,
         cacheWrites: [{ tokens, inputRateMultiplier: OPENAI_CACHE_WRITE_MULTIPLIER }],
-      },
-    ]
+      })
+    }
     for (const usage of usages) {
       const amount = priceModelUsage(profile.model, usage, LIST_PRICE_POLICY).total
       if (
@@ -178,7 +208,7 @@ export async function runBudgetedCatalogProvider(raw: BudgetedCatalogProviderOpt
   const { budget: _budget, ...binding } = input
   return runCatalogProvider({
     ...binding,
-    provider: 'openai',
+    provider: profile.profile.provider,
     signal,
     ...(proposal ? { proposal } : {}),
     async beforeModelTransport(abort, attempt) {

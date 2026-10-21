@@ -29,7 +29,9 @@ process.env.MEMLIA_PG_BOSS_ENABLED = '1'
 process.env.MEMLIA_PG_BOSS_DATABASE_URL = env.MEMLIA_PG_BOSS_DATABASE_URL
 const { db } = await import('@sim/db')
 const { asyncJobs, outboxEvent } = await import('@sim/db/schema')
-const { admitPgBossJob, PG_BOSS_OUTBOX_EVENT } = await import('./pg-boss-admission')
+const { admitPgBossJob, readPgBossPublication, PG_BOSS_OUTBOX_EVENT } = await import(
+  './pg-boss-admission'
+)
 const { pgBossOutboxHandlers } = await import('./pg-boss-outbox')
 const { pgBossClient } = await import('./pg-boss-client')
 const { processOutboxEventById } = await import('@/lib/core/outbox/service')
@@ -252,6 +254,13 @@ test(
       async () => {
         const value = input('publish')
         const admission = await admit(value)
+        const [event] = await db
+          .select()
+          .from(outboxEvent)
+          .where(eq(outboxEvent.id, admission.outboxEventId))
+        const publication = await readPgBossPublication(db, event.payload)
+        assert.equal(publication.runAt, value.envelope.submittedAt)
+        assert.equal(publication.maxDurationSeconds, 900)
         const group = OUTBOX_HANDLER_GROUPS.find((group) =>
           group.events.includes(PG_BOSS_OUTBOX_EVENT)
         )

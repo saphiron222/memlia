@@ -1,3 +1,4 @@
+// Modified by Memlia: qualify local stream replay without worker fallback.
 import { trace } from '@opentelemetry/api'
 import {
   BasicTracerProvider,
@@ -16,14 +17,23 @@ import { CopilotResumeOutcome } from '@/lib/mothership/generated/trace-attribute
 import { TraceAttr } from '@/lib/mothership/generated/trace-attributes-v1'
 import { TraceSpan } from '@/lib/mothership/generated/trace-spans-v1'
 
-const { getLatestRunForStream, readEvents, readFilePreviewSessions, findReplayGap } = vi.hoisted(
-  () => ({
-    getLatestRunForStream: vi.fn(),
-    readEvents: vi.fn(),
-    readFilePreviewSessions: vi.fn(),
-    findReplayGap: vi.fn(),
-  })
-)
+const {
+  getLatestRunForStream,
+  readEvents,
+  readFilePreviewSessions,
+  findReplayGap,
+  openRunReplay,
+  forwardRunReplay,
+  ringCanServe,
+} = vi.hoisted(() => ({
+  getLatestRunForStream: vi.fn(),
+  readEvents: vi.fn(),
+  readFilePreviewSessions: vi.fn(),
+  findReplayGap: vi.fn(),
+  openRunReplay: vi.fn(),
+  forwardRunReplay: vi.fn(),
+  ringCanServe: vi.fn(),
+}))
 
 vi.mock('@/lib/mothership/request/application/recover-stream', () => ({
   readChatStream: { execute: getLatestRunForStream },
@@ -36,7 +46,10 @@ vi.mock('@/lib/mothership/request/session', () => ({
   readFilePreviewSessions,
   findReplayGap,
   readRingPosition: async () => ({ requestedAfterSeq: 0, oldestSeq: 0, latestSeq: 0 }),
-  ringCanServe: () => true,
+  ringCanServe,
+  openRunReplay,
+  forwardRunReplay,
+  RunReplayUnavailableError: class extends Error {},
   replayGapTerminal: async () => ({ gapDetected: true, envelopes: [] }),
   createEvent: (event: Record<string, unknown>) => ({
     stream: {
@@ -87,6 +100,15 @@ describe('copilot chat stream replay route', () => {
     readEvents.mockResolvedValue([])
     readFilePreviewSessions.mockResolvedValue([])
     findReplayGap.mockResolvedValue(null)
+    ringCanServe.mockReturnValue(true)
+    openRunReplay.mockResolvedValue(
+      new ReadableStream({
+        start(controller) {
+          controller.close()
+        },
+      })
+    )
+    forwardRunReplay.mockResolvedValue('fixture-end')
   })
 
   it('refuses replay after organization membership is removed', async () => {
@@ -312,5 +334,120 @@ describe('copilot chat stream replay route', () => {
     expect(text).toContain('the start of the turn')
     expect(text).not.toContain('past a trimmed gap')
     expect(text).not.toContain(`"type":"${MothershipStreamV1EventType.complete}"`)
+  })
+})
+
+describe('durable local stream replay boundary', () => {
+  const marker = { kind: 'memlia_local_chat', version: 1, recovery: 'none' }
+  const localRun = {
+    id: 'run-1',
+    streamId: 'stream-1',
+    executionId: 'exec-1',
+    chatId: 'chat-1',
+    status: 'active',
+    requestContext: { localExecution: marker },
+  }
+  beforeEach(() => {
+    vi.clearAllMocks()
+    authMockFns.mockGetSession.mockResolvedValue({
+      user: { id: 'user-1' },
+      session: { id: 'session-1' },
+    })
+    getLatestRunForStream.mockResolvedValue(localRun)
+    readEvents.mockResolvedValue([])
+    readFilePreviewSessions.mockResolvedValue([])
+    findReplayGap.mockResolvedValue(null)
+    ringCanServe.mockReturnValue(true)
+    openRunReplay.mockResolvedValue(
+      new ReadableStream({
+        start(controller) {
+          controller.close()
+        },
+      })
+    )
+    forwardRunReplay.mockResolvedValue('fixture-end')
+  })
+  it.each([marker, null, { ...marker, version: 2 }, { ...marker, secret: 'fixture' }])(
+    'refuses explicit worker journal for local or malformed persisted marker %j',
+    async (localExecution) => {
+      getLatestRunForStream.mockResolvedValue({ ...localRun, requestContext: { localExecution } })
+      const response = await GET(
+        new NextRequest('http://localhost/api/copilot/chat/stream?streamId=stream-1&source=log')
+      )
+      expect(response.status).toBe(503)
+      expect(await response.json()).toEqual({ error: 'Stream replay is unavailable' })
+      expect(openRunReplay).not.toHaveBeenCalled()
+      expect(forwardRunReplay).not.toHaveBeenCalled()
+    }
+  )
+  it.each([false, true])(
+    'refuses missing local buffer without contacting worker, batch=%s',
+    async (batch) => {
+      findReplayGap.mockResolvedValue({ requestedAfterSeq: 0, oldestSeq: 5, latestSeq: 9 })
+      const response = await GET(
+        new NextRequest(`http://localhost/api/copilot/chat/stream?streamId=stream-1&batch=${batch}`)
+      )
+      expect(response.status).toBe(503)
+      expect(await response.json()).toEqual({ error: 'Stream replay is unavailable' })
+      expect(openRunReplay).not.toHaveBeenCalled()
+    }
+  )
+  it('serves buffered local data and the persisted terminal without recomputation', async () => {
+    getLatestRunForStream.mockResolvedValue({ ...localRun, status: 'complete' })
+    readEvents
+      .mockResolvedValueOnce([
+        {
+          stream: { streamId: 'stream-1', cursor: '1' },
+          seq: 1,
+          trace: { requestId: 'req' },
+          type: MothershipStreamV1EventType.text,
+          payload: { channel: 'assistant', text: 'owned buffered response' },
+        },
+      ])
+      .mockResolvedValue([])
+    const response = await GET(
+      new NextRequest('http://localhost/api/copilot/chat/stream?streamId=stream-1')
+    )
+    expect(response.status).toBe(200)
+    const text = (await readAllChunks(response)).join('')
+    expect(text).toContain('owned buffered response')
+    expect(text).toContain('"status":"complete"')
+    expect(openRunReplay).not.toHaveBeenCalled()
+  })
+  it('keeps native cancelled terminal when its local buffer expired', async () => {
+    getLatestRunForStream.mockResolvedValue({ ...localRun, status: 'cancelled' })
+    findReplayGap.mockResolvedValue({ requestedAfterSeq: 4, oldestSeq: 0, latestSeq: 0 })
+    const response = await GET(
+      new NextRequest('http://localhost/api/copilot/chat/stream?streamId=stream-1&after=4')
+    )
+    const text = (await readAllChunks(response)).join('')
+    expect(text).toContain('"status":"cancelled"')
+    expect(openRunReplay).not.toHaveBeenCalled()
+  })
+  it('closes a local tail with no false completion on a polling gap; subsequent journal request refuses', async () => {
+    ringCanServe.mockReturnValue(false)
+    const response = await GET(
+      new NextRequest('http://localhost/api/copilot/chat/stream?streamId=stream-1')
+    )
+    const text = (await readAllChunks(response)).join('')
+    expect(text).not.toContain('"type":"complete"')
+    expect(openRunReplay).not.toHaveBeenCalled()
+    const retry = await GET(
+      new NextRequest('http://localhost/api/copilot/chat/stream?streamId=stream-1&source=log')
+    )
+    expect(retry.status).toBe(503)
+    expect(openRunReplay).not.toHaveBeenCalled()
+  })
+  it('preserves historical worker replay even when a forged request header claims local execution', async () => {
+    getLatestRunForStream.mockResolvedValue({ ...localRun, requestContext: {} })
+    const response = await GET(
+      new NextRequest('http://localhost/api/copilot/chat/stream?streamId=stream-1&source=log', {
+        headers: { 'x-memlia-local-execution': 'true' },
+      })
+    )
+    expect(response.status).toBe(200)
+    await readAllChunks(response)
+    expect(openRunReplay).toHaveBeenCalledOnce()
+    expect(forwardRunReplay).toHaveBeenCalledOnce()
   })
 })

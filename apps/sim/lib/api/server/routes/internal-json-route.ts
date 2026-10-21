@@ -1,3 +1,4 @@
+// Modified by Memlia: expose native query validation options on internal routes.
 import {
   type DelegatedPrincipal,
   describePrincipalAuth,
@@ -238,7 +239,12 @@ export interface InternalJsonResponseFinalization {
 
 type InternalJsonParseOptions = Pick<
   ParseRequestOptions,
-  'maxBodyBytes' | 'bypassesProxy' | 'validationErrorResponse' | 'optionalJsonBody'
+  | 'maxBodyBytes'
+  | 'bypassesProxy'
+  | 'validationErrorResponse'
+  | 'optionalJsonBody'
+  | 'rejectBlankQueryValues'
+  | 'rejectDuplicateQueryValues'
 >
 
 /**

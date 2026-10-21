@@ -1,3 +1,4 @@
+// Modified by Memlia: opt-in local HTTP admission without worker preparation or fallback.
 import { context as otelContextApi } from '@opentelemetry/api'
 import type { SessionPrincipal } from '@sim/auth/principal'
 import { createLogger } from '@sim/logger'
@@ -15,6 +16,7 @@ import {
   mothershipResourceAttachmentSchema as ResourceAttachmentSchema,
 } from '@/lib/api/contracts/mothership-resources'
 import { isZodError, validationErrorResponse } from '@/lib/api/server'
+import { parseJsonBody } from '@/lib/api/server/validation'
 import { getSession } from '@/lib/auth'
 import {
   resolveBillingAttribution,
@@ -22,11 +24,17 @@ import {
 } from '@/lib/billing/core/attribution'
 import { type AtomicClaimResult, chatSendIdempotency } from '@/lib/core/idempotency'
 import { asOrchestrationError, statusForOrchestrationError } from '@/lib/core/orchestration/types'
+import { isCrossSiteSessionRequest } from '@/lib/core/security/same-origin'
 import { listPersonalCredentials } from '@/lib/credentials/application/personal-credentials'
 import {
   isKnowledgeMemberAccessAvailable,
   requireOrganizationSearchAvailable,
 } from '@/lib/knowledge/access/availability'
+import {
+  type PreparedLocalChatAdmission,
+  prepareLocalChatAdmission,
+} from '@/lib/memlia/chat/local-admission.server'
+import { readLocalChatCapabilities } from '@/lib/memlia/chat/local-capabilities.server'
 import { loadCopilotSearchIntegrations } from '@/lib/mothership/application/load-search-integrations'
 import { chatOperations } from '@/lib/mothership/application/operations'
 import {
@@ -76,6 +84,7 @@ import { AssistantSearchLevel } from '@/lib/mothership/generated/assistant'
 import { FileOperationOwner } from '@/lib/mothership/generated/file-owner'
 import {
   type ChatContextItem,
+  ChatPayloadSchema,
   type ChatRequest,
   type ModelSelection,
   ModelSelectionSchema,
@@ -372,6 +381,56 @@ const ChatMessageSchema = z
     (body) => body.message.length > 0 || (!!body.organizationId && !!body.fileAttachments?.length),
     { message: 'Message is required', path: ['message'] }
   )
+
+// The local profile accepts plain workflow text only. Override the legacy resource
+// preprocessor so an unsupported attachment can never disappear before refusal.
+const LocalChatMessageSchema = ChatMessageSchema.safeExtend({
+  mode: z.literal('agent').default('agent'),
+  organizationId: z.never().optional(),
+  // Reject a supplied model, retaining only the native metadata default.
+  model: z
+    .never()
+    .optional()
+    .transform(() => DEFAULT_MODEL),
+  provider: z.never().optional(),
+  modelSelection: z.never().optional(),
+  effort: z.never().optional(),
+  assistantSearch: z.never().optional(),
+  assistantFast: z.never().optional(),
+  assistantSearchLevel: z.never().optional(),
+  implicitFeedback: z.never().optional(),
+  prefetch: z.literal(false).optional(),
+  contexts: z.array(z.never()).max(0).optional(),
+  commands: z.array(z.never()).max(0).optional(),
+  fileAttachments: z.array(z.never()).max(0).optional(),
+  resourceAttachments: z.array(z.never()).max(0).optional(),
+  clientCapabilities: z.array(z.literal('workflow-tool-pickup')).max(1).optional(),
+  userMessageId: z.uuid().optional(),
+  chatId: z.uuid().optional(),
+  desktopCapabilities: z
+    .object({
+      localFilesystem: z.literal(false).optional(),
+      localFiles: z.literal(false).optional(),
+      localReadClaims: z.literal(false).optional(),
+      browser: z.literal(false).optional(),
+      terminal: z.literal(false).optional(),
+      computerUse: z.literal(false).optional(),
+      terminals: z.array(z.never()).max(0).optional(),
+      browserSessions: z.array(z.never()).max(0).optional(),
+    })
+    .strict()
+    .optional(),
+})
+  .strict()
+  .refine(
+    (body) =>
+      Boolean(body.workflowId || body.workflowName) &&
+      Boolean(body.chatId || body.createNewChat) &&
+      Buffer.byteLength(body.message, 'utf8') <= 65536
+  )
+
+const localChatRefusal = (status: number) =>
+  NextResponse.json({ error: 'Local Chat request is unavailable.' }, { status })
 
 type UnifiedChatRequest = z.infer<typeof ChatMessageSchema>
 
@@ -900,6 +959,8 @@ function duplicateChatSendResponse(claim: AtomicClaimResult, userMessageId: stri
 }
 
 export async function handleUnifiedChatPost(req: NextRequest) {
+  // Presence is the server opt-in: even an empty or invalid value must not fall back.
+  const localMode = Object.hasOwn(process.env, 'MEMLIA_CHAT_POLICY_FILE')
   let actualChatId: string | undefined
   let userMessageId = ''
   let chatStreamLockAcquired = false
@@ -927,12 +988,25 @@ export async function handleUnifiedChatPost(req: NextRequest) {
     }
     const authenticatedUserId = session.user.id
     const authenticatedUserEmail = session.user.email
+    const sessionId = localMode ? session.session?.id : session.session.id
+    if (localMode && !sessionId) return createUnauthorizedResponse()
+    if (localMode && isCrossSiteSessionRequest(req)) return localChatRefusal(403)
+    if (localMode && req.signal.aborted) return localChatRefusal(400)
 
-    const body = ChatMessageSchema.parse(await req.json())
+    let rawBody: unknown
+    if (localMode) {
+      const parsed = await parseJsonBody(req, 'response', 96 * 1024)
+      if (!parsed.success) return localChatRefusal(parsed.reason === 'too_large' ? 413 : 400)
+      rawBody = parsed.data
+    } else {
+      rawBody = await req.json()
+    }
+    const body = (localMode ? LocalChatMessageSchema : ChatMessageSchema).parse(rawBody)
+    if (localMode && req.signal.aborted) return localChatRefusal(400)
     // Admission records a send's own effort as the chat's explicit choice.
     const effortChoice = body.mode === 'assistant' ? undefined : body.effort
     let modelSelectorEnabled = false
-    if (body.mode !== 'assistant') {
+    if (!localMode && body.mode !== 'assistant') {
       const [selectorEnabled, planEnabled] = await Promise.all([
         isMothershipModelSelectorEnabled(),
         body.mode === 'plan' ? isPlanModeEnabled(authenticatedUserId) : false,
@@ -978,44 +1052,47 @@ export async function handleUnifiedChatPost(req: NextRequest) {
     // the "turn user.id into a real person" round-trip to the DB
     // for every ad-hoc investigation.
     otelRoot.span.setAttribute(TraceAttr.UserId, authenticatedUserId)
-    if (authenticatedUserEmail) {
+    if (!localMode && authenticatedUserEmail) {
       otelRoot.span.setAttribute(TraceAttr.UserEmail, authenticatedUserEmail)
     }
     // Wrap the rest of the handler so nested spans attach to the
     // root via AsyncLocalStorage (otherwise they orphan into new traces).
     const activeOtelRoot = otelRoot
     return await otelContextApi.with(activeOtelRoot.context, async () => {
-      const branch = await withCopilotSpan(
-        TraceSpan.CopilotChatResolveBranch,
-        {
-          [TraceAttr.WorkflowId]: body.workflowId ?? '',
-          [TraceAttr.WorkspaceId]: body.workspaceId ?? '',
-        },
-        () =>
-          resolveBranch({
-            authenticatedUserId,
-            principal: {
-              kind: 'session',
-              userId: authenticatedUserId,
-              sessionId: session.session.id,
+      const resolveChatBranch = () =>
+        resolveBranch({
+          authenticatedUserId,
+          principal: {
+            kind: 'session',
+            userId: authenticatedUserId,
+            sessionId,
+          },
+          workflowId: body.workflowId,
+          workflowName: body.workflowName,
+          workspaceId: body.workspaceId,
+          organizationId: body.organizationId,
+          model: body.model,
+          mode: body.mode,
+          provider: body.provider,
+        })
+      const branch = localMode
+        ? await resolveChatBranch()
+        : await withCopilotSpan(
+            TraceSpan.CopilotChatResolveBranch,
+            {
+              [TraceAttr.WorkflowId]: body.workflowId ?? '',
+              [TraceAttr.WorkspaceId]: body.workspaceId ?? '',
             },
-            workflowId: body.workflowId,
-            workflowName: body.workflowName,
-            workspaceId: body.workspaceId,
-            organizationId: body.organizationId,
-            model: body.model,
-            mode: body.mode,
-            provider: body.provider,
-          }),
-        activeOtelRoot.context
-      )
+            resolveChatBranch,
+            activeOtelRoot.context
+          )
       if (branch instanceof NextResponse) {
         // Non-actionable 4xx (400 bad-request from resolveBranch): stamp
         // outcome=error for dashboards but leave span status UNSET so
         // error alerts don't fire on normal validation rejections.
         activeOtelRoot.span.setAttribute(TraceAttr.HttpStatusCode, branch.status)
         activeOtelRoot.finish('error')
-        return branch
+        return localMode ? localChatRefusal(branch.status) : branch
       }
 
       /**
@@ -1055,13 +1132,36 @@ export async function handleUnifiedChatPost(req: NextRequest) {
         return capabilityRefusalResponse(chatCapability)
       }
 
+      let localProvider: 'openai' | 'anthropic' | undefined
+      let localModel: string | undefined
+      if (localMode) {
+        if (branch.kind !== 'workflow' || !branch.workspaceId || req.signal.aborted)
+          throw new Error('Local Chat request is unavailable.')
+        const capabilities = await readLocalChatCapabilities.execute({
+          principal: { kind: 'session', userId: authenticatedUserId, sessionId },
+          input: { workspaceId: branch.workspaceId, workflowId: branch.workflowId },
+        })
+        if (
+          req.signal.aborted ||
+          capabilities.backend !== 'local' ||
+          (capabilities.provider !== 'openai' && capabilities.provider !== 'anthropic') ||
+          capabilities.workspaceId !== branch.workspaceId ||
+          capabilities.workflowId !== branch.workflowId ||
+          !capabilities.requestSupported
+        )
+          throw new Error('Local Chat request is unavailable.')
+        // Capture the non-secret model before chat storage or complete preparation awaits.
+        localProvider = capabilities.provider
+        localModel = capabilities.model
+      }
+
       const assistantImages =
         branch.kind === 'organization' && body.fileAttachments?.length
           ? await prepareOrganizationChatAttachments({
               principal: {
                 kind: 'session',
                 userId: authenticatedUserId,
-                sessionId: session.session.id,
+                sessionId,
               },
               organizationId: branch.organizationId,
               mode:
@@ -1080,43 +1180,47 @@ export async function handleUnifiedChatPost(req: NextRequest) {
          capability check above then refused. Every refusal ahead of this point
          (a rejected branch, a withheld `copilot.use`) now records the shape of
          the request and none of its content. */
-      activeOtelRoot.setUserMessagePreview(body.message)
-      activeOtelRoot.setInputMessages({ userMessage: body.message })
+      if (!localMode) {
+        activeOtelRoot.setUserMessagePreview(body.message)
+        activeOtelRoot.setInputMessages({ userMessage: body.message })
+      }
 
       let currentChat: ChatLoadResult['chat'] = null
       let chatIsNew = false
       actualChatId = body.chatId
 
       if (body.chatId || body.createNewChat || branch.kind === 'organization') {
-        const chatResult = await withCopilotSpan(
-          TraceSpan.CopilotChatResolveOrCreateChat,
-          {
-            [TraceAttr.ChatPreexisting]: !!body.chatId,
-            [TraceAttr.CopilotChatIsNew]: !!body.createNewChat,
-          },
-          () =>
-            resolveOrCreateChat({
-              chatId: body.chatId,
-              mode:
-                body.mode === 'plan' ? 'plan' : body.mode === 'assistant' ? 'assistant' : 'agent',
-              userId: authenticatedUserId,
-              ...(branch.kind === 'workflow' ? { workflowId: branch.workflowId } : {}),
-              workspaceId: branch.workspaceId,
-              ...(branch.kind === 'organization'
-                ? {
-                    organizationId: branch.organizationId,
-                    principal: {
-                      kind: 'session' as const,
-                      userId: authenticatedUserId,
-                      sessionId: session.session.id,
-                    },
-                  }
-                : {}),
-              model: branch.titleModel,
-              type: branch.kind === 'workflow' ? 'copilot' : 'mothership',
-            }),
-          activeOtelRoot.context
-        )
+        const resolveChat = () =>
+          resolveOrCreateChat({
+            chatId: body.chatId,
+            mode: body.mode === 'plan' ? 'plan' : body.mode === 'assistant' ? 'assistant' : 'agent',
+            userId: authenticatedUserId,
+            ...(branch.kind === 'workflow' ? { workflowId: branch.workflowId } : {}),
+            workspaceId: branch.workspaceId,
+            ...(branch.kind === 'organization'
+              ? {
+                  organizationId: branch.organizationId,
+                  principal: {
+                    kind: 'session' as const,
+                    userId: authenticatedUserId,
+                    sessionId,
+                  },
+                }
+              : {}),
+            model: localModel ?? branch.titleModel,
+            type: branch.kind === 'workflow' ? 'copilot' : 'mothership',
+          })
+        const chatResult = localMode
+          ? await resolveChat()
+          : await withCopilotSpan(
+              TraceSpan.CopilotChatResolveOrCreateChat,
+              {
+                [TraceAttr.ChatPreexisting]: !!body.chatId,
+                [TraceAttr.CopilotChatIsNew]: !!body.createNewChat,
+              },
+              resolveChat,
+              activeOtelRoot.context
+            )
         currentChat = chatResult.chat
         actualChatId = chatResult.chatId || body.chatId
         chatIsNew = chatResult.isNew
@@ -1127,7 +1231,7 @@ export async function handleUnifiedChatPost(req: NextRequest) {
           return NextResponse.json({ error: 'Chat not found' }, { status: 404 })
         }
       }
-      if (body.mode !== 'assistant')
+      if (!localMode && body.mode !== 'assistant')
         Object.assign(
           body,
           resolveMothershipModelSettings(
@@ -1185,205 +1289,247 @@ export async function handleUnifiedChatPost(req: NextRequest) {
       })
 
       const workspaceId = branch.workspaceId
-      // The workspace branch already resolved this permission (and gated on it)
-      // during branch resolution; reuse it instead of querying again.
-      const userPermissionPromise =
-        branch.kind === 'workspace'
-          ? Promise.resolve(branch.workspacePermission)
-          : workspaceId
-            ? getUserEntityPermissions(authenticatedUserId, 'workspace', workspaceId).catch(
-                (error) => {
-                  logger.warn('Failed to load user permissions', {
-                    error: getErrorMessage(error),
-                    workspaceId,
-                  })
-                  return null
-                }
-              )
-            : Promise.resolve(null)
-      const personalCredentialsPromise =
-        workspaceId && body.mode === 'assistant'
-          ? listPersonalCredentials.execute({
-              principal: {
-                kind: 'session',
-                userId: authenticatedUserId,
-                sessionId: session.session.id,
-              },
-              input: { workspaceId },
-            })
-          : Promise.resolve(undefined)
-      // Wrap the pre-LLM prep work in spans so the trace waterfall shows
-      // where time is going between "request received" and "llm.stream
-      // opens". Previously these ran bare under the root and inflated the
-      // apparent "gap" before the model call. Each promise is its own
-      // span; they run concurrently under Promise.all below.
-      // Resolve environment and billing context before preparing the durable start intent.
-      const executionContextPromise = withCopilotSpan(
-        TraceSpan.CopilotChatBuildExecutionContext,
-        { [TraceAttr.CopilotBranchKind]: branch.kind },
-        () =>
-          branch.buildExecutionContext({
-            userId: authenticatedUserId,
-            chatId: actualChatId,
-            userTimezone: body.userTimezone,
-            messageId: userMessageId,
-          }),
-        activeOtelRoot.context
-      )
-      const agentContextsPromise = executionContextPromise.then((executionContext) => {
-        if (body.mode === 'assistant') return []
-        return withCopilotSpan(
-          TraceSpan.CopilotChatResolveAgentContexts,
-          {
-            [TraceAttr.CopilotContextsCount]: normalizedContexts.length,
-            [TraceAttr.CopilotResourceAttachmentsCount]: body.resourceAttachments?.length ?? 0,
-          },
+      let localAdmission: PreparedLocalChatAdmission | undefined
+      let executionContext: ExecutionContext
+      let preparedPayload: ChatRequest
+      if (localMode) {
+        if (
+          branch.kind !== 'workflow' ||
+          !workspaceId ||
+          !actualChatId ||
+          !currentChat ||
+          req.signal.aborted
+        )
+          throw new Error('Local Chat request is unavailable.')
+        localAdmission = await prepareLocalChatAdmission({
+          principal: { kind: 'session', userId: authenticatedUserId, sessionId },
+          chatId: actualChatId,
+          workspaceId,
+          workflowId: branch.workflowId,
+          currentMessage: { id: userMessageId, content: body.message },
+        })
+        if (
+          req.signal.aborted ||
+          localAdmission.localChat.request.model !== localModel ||
+          localAdmission.localChat.budget.pricingProfile.provider !== localProvider
+        )
+          throw new Error('Local Chat request is unavailable.')
+        executionContext = {
+          userId: authenticatedUserId,
+          workflowId: branch.workflowId,
+          workspaceId,
+          chatId: actualChatId,
+          messageId: userMessageId,
+          executionId,
+          runId,
+          requestMode: 'agent',
+          copilotToolExecution: true,
+          secretActorUserId: null,
+          userTimezone: body.userTimezone,
+        }
+        preparedPayload = ChatPayloadSchema.parse(localAdmission.intent.request)
+      } else {
+        // The workspace branch already resolved this permission (and gated on it)
+        // during branch resolution; reuse it instead of querying again.
+        const userPermissionPromise =
+          branch.kind === 'workspace'
+            ? Promise.resolve(branch.workspacePermission)
+            : workspaceId
+              ? getUserEntityPermissions(authenticatedUserId, 'workspace', workspaceId).catch(
+                  (error) => {
+                    logger.warn('Failed to load user permissions', {
+                      error: getErrorMessage(error),
+                      workspaceId,
+                    })
+                    return null
+                  }
+                )
+              : Promise.resolve(null)
+        const personalCredentialsPromise =
+          workspaceId && body.mode === 'assistant'
+            ? listPersonalCredentials.execute({
+                principal: {
+                  kind: 'session',
+                  userId: authenticatedUserId,
+                  sessionId,
+                },
+                input: { workspaceId },
+              })
+            : Promise.resolve(undefined)
+        // Wrap the pre-LLM prep work in spans so the trace waterfall shows
+        // where time is going between "request received" and "llm.stream
+        // opens". Previously these ran bare under the root and inflated the
+        // apparent "gap" before the model call. Each promise is its own
+        // span; they run concurrently under Promise.all below.
+        // Resolve environment and billing context before preparing the durable start intent.
+        const executionContextPromise = withCopilotSpan(
+          TraceSpan.CopilotChatBuildExecutionContext,
+          { [TraceAttr.CopilotBranchKind]: branch.kind },
           () =>
-            resolveAgentContexts({
-              requestMode: body.mode,
-              contexts: normalizedContexts,
-              resourceAttachments: body.resourceAttachments,
-              organizationId: branch.kind === 'organization' ? branch.organizationId : undefined,
-              persistResources: chatIsNew && body.mode !== 'assistant',
-              browserAvailable:
-                body.mode !== 'assistant' && body.desktopCapabilities?.browser === true,
+            branch.buildExecutionContext({
               userId: authenticatedUserId,
-              message: body.message,
-              workspaceId,
               chatId: actualChatId,
-              resolvedSecretTraceRegistry: executionContext.resolvedSecretTraceRegistry,
-              requestId,
+              userTimezone: body.userTimezone,
+              messageId: userMessageId,
             }),
           activeOtelRoot.context
         )
-      })
-      const chatMcpServerIdsPromise =
-        currentChat && !chatIsNew ? loadChatMcpServerIds(currentChat.id) : Promise.resolve([])
-      const [
-        agentContexts,
-        userPermission,
-        executionContext,
-        personalCredentials,
-        chatMcpServerIds,
-      ] = await Promise.all([
-        agentContextsPromise,
-        userPermissionPromise,
-        executionContextPromise,
-        personalCredentialsPromise,
-        chatMcpServerIdsPromise,
-      ])
-      let workspaceContext: string | undefined
-      if (personalCredentials) {
-        workspaceContext = JSON.stringify({
-          credentials: personalCredentials.credentials.map((credential) => ({
-            id: credential.id,
-            providerId: credential.providerId,
-            displayName: credential.displayName,
-            ...(credential.type === 'personal_token'
-              ? { instanceUrl: credential.instanceUrl }
-              : {}),
-          })),
-        })
-      }
-      if (
-        branch.kind === 'organization' &&
-        actualChatId &&
-        (body.mode === 'assistant' ||
-          (await isKnowledgeMemberAccessAvailable({ organizationId: branch.organizationId })))
-      ) {
-        workspaceContext = await loadCopilotSearchIntegrations({
-          userId: authenticatedUserId,
-          organizationId: branch.organizationId,
-          chatId: actualChatId,
-          messageId: userMessageId,
-          signal: req.signal,
-        })
-      }
-      const turnContexts = agentContexts
-      if (body.mode === 'assistant' || branch.kind === 'organization')
-        executionContext.assistantSearch = body.assistantSearch
-
-      executionContext.userPermission = userPermission ?? undefined
-      const invocation = authoringInvocation({ chatId: actualChatId, workspaceId })
-      if (invocation)
-        executionContext.copilotResourceAdmission = createCopilotResourceAdmission({
-          userId: authenticatedUserId,
-          invocation,
-        })
-
-      /** Trace catalog preparation and attachment tracking before durable admission. */
-      const preparedPayload = await withCopilotSpan(
-        TraceSpan.CopilotChatBuildPayload,
-        {
-          [TraceAttr.CopilotBranchKind]: branch.kind,
-          [TraceAttr.CopilotFileAttachmentsCount]: body.fileAttachments?.length ?? 0,
-          [TraceAttr.CopilotContextsCount]: normalizedContexts.length,
-        },
-        () => {
-          const mcpServerIds = collectChatMcpServerIds(chatMcpServerIds, normalizedContexts)
-          return branch.kind === 'workflow'
-            ? branch.buildPayload({
-                message: body.message,
+        const agentContextsPromise = executionContextPromise.then((executionContext) => {
+          if (body.mode === 'assistant') return []
+          return withCopilotSpan(
+            TraceSpan.CopilotChatResolveAgentContexts,
+            {
+              [TraceAttr.CopilotContextsCount]: normalizedContexts.length,
+              [TraceAttr.CopilotResourceAttachmentsCount]: body.resourceAttachments?.length ?? 0,
+            },
+            () =>
+              resolveAgentContexts({
+                requestMode: body.mode,
+                contexts: normalizedContexts,
+                resourceAttachments: body.resourceAttachments,
+                organizationId: branch.kind === 'organization' ? branch.organizationId : undefined,
+                persistResources: chatIsNew && body.mode !== 'assistant',
+                browserAvailable:
+                  body.mode !== 'assistant' && body.desktopCapabilities?.browser === true,
                 userId: authenticatedUserId,
-                userMessageId,
-                chatId: actualChatId,
-                contexts: turnContexts,
-                assistantSearch: body.mode === 'assistant' ? body.assistantSearch : undefined,
-                assistantFast: body.assistantFast,
-                assistantSearchLevel: body.assistantSearchLevel,
-                mcpServerIds,
-                fileAttachments,
-                userPermission: userPermission ?? undefined,
-                userTimezone: body.userTimezone,
-                effort: body.effort,
-                modelSelection: body.modelSelection,
-                workflowId: branch.workflowId,
-                workflowName: branch.workflowName,
-                workspaceId: branch.workspaceId,
-                mode: branch.mode,
-                provider: branch.provider,
-                commands: body.commands,
-                prefetch: body.prefetch,
-                implicitFeedback: body.implicitFeedback,
-                desktopLocalFilesystem: body.desktopCapabilities?.localFilesystem === true,
-                desktopLocalFiles: body.desktopCapabilities?.localFiles === true,
-                browser: body.desktopCapabilities?.browser === true,
-                terminalCapable: body.desktopCapabilities?.terminal === true,
-                computerUse: body.desktopCapabilities?.computerUse === true,
-                terminals: body.desktopCapabilities?.terminals,
-                browserSessions: body.desktopCapabilities?.browserSessions,
-              })
-            : branch.buildPayload({
                 message: body.message,
-                userId: authenticatedUserId,
-                userMessageId,
+                workspaceId,
                 chatId: actualChatId,
-                contexts: turnContexts,
-                assistantSearch:
-                  body.mode === 'assistant' || branch.kind === 'organization'
-                    ? body.assistantSearch
-                    : undefined,
-                mcpServerIds,
-                fileAttachments,
-                assistantImages: assistantImages?.content,
-                assistantFast: body.assistantFast,
-                assistantSearchLevel: body.assistantSearchLevel,
-                workspaceContext,
-                userPermission: userPermission ?? undefined,
-                userTimezone: body.userTimezone,
-                effort: body.effort,
-                modelSelection: body.modelSelection,
-                desktopLocalFilesystem: body.desktopCapabilities?.localFilesystem === true,
-                desktopLocalFiles: body.desktopCapabilities?.localFiles === true,
-                browser: body.desktopCapabilities?.browser === true,
-                terminalCapable: body.desktopCapabilities?.terminal === true,
-                computerUse: body.desktopCapabilities?.computerUse === true,
-                terminals: body.desktopCapabilities?.terminals,
-                browserSessions: body.desktopCapabilities?.browserSessions,
-              })
-        },
-        activeOtelRoot.context
-      )
+                resolvedSecretTraceRegistry: executionContext.resolvedSecretTraceRegistry,
+                requestId,
+              }),
+            activeOtelRoot.context
+          )
+        })
+        const chatMcpServerIdsPromise =
+          currentChat && !chatIsNew ? loadChatMcpServerIds(currentChat.id) : Promise.resolve([])
+        const [
+          agentContexts,
+          userPermission,
+          loadedExecutionContext,
+          personalCredentials,
+          chatMcpServerIds,
+        ] = await Promise.all([
+          agentContextsPromise,
+          userPermissionPromise,
+          executionContextPromise,
+          personalCredentialsPromise,
+          chatMcpServerIdsPromise,
+        ])
+        executionContext = loadedExecutionContext
+        let workspaceContext: string | undefined
+        if (personalCredentials) {
+          workspaceContext = JSON.stringify({
+            credentials: personalCredentials.credentials.map((credential) => ({
+              id: credential.id,
+              providerId: credential.providerId,
+              displayName: credential.displayName,
+              ...(credential.type === 'personal_token'
+                ? { instanceUrl: credential.instanceUrl }
+                : {}),
+            })),
+          })
+        }
+        if (
+          branch.kind === 'organization' &&
+          actualChatId &&
+          (body.mode === 'assistant' ||
+            (await isKnowledgeMemberAccessAvailable({ organizationId: branch.organizationId })))
+        ) {
+          workspaceContext = await loadCopilotSearchIntegrations({
+            userId: authenticatedUserId,
+            organizationId: branch.organizationId,
+            chatId: actualChatId,
+            messageId: userMessageId,
+            signal: req.signal,
+          })
+        }
+        const turnContexts = agentContexts
+        if (body.mode === 'assistant' || branch.kind === 'organization')
+          executionContext.assistantSearch = body.assistantSearch
+
+        executionContext.userPermission = userPermission ?? undefined
+        const invocation = authoringInvocation({ chatId: actualChatId, workspaceId })
+        if (invocation)
+          executionContext.copilotResourceAdmission = createCopilotResourceAdmission({
+            userId: authenticatedUserId,
+            invocation,
+          })
+
+        /** Trace catalog preparation and attachment tracking before durable admission. */
+        preparedPayload = await withCopilotSpan(
+          TraceSpan.CopilotChatBuildPayload,
+          {
+            [TraceAttr.CopilotBranchKind]: branch.kind,
+            [TraceAttr.CopilotFileAttachmentsCount]: body.fileAttachments?.length ?? 0,
+            [TraceAttr.CopilotContextsCount]: normalizedContexts.length,
+          },
+          () => {
+            const mcpServerIds = collectChatMcpServerIds(chatMcpServerIds, normalizedContexts)
+            return branch.kind === 'workflow'
+              ? branch.buildPayload({
+                  message: body.message,
+                  userId: authenticatedUserId,
+                  userMessageId,
+                  chatId: actualChatId,
+                  contexts: turnContexts,
+                  assistantSearch: body.mode === 'assistant' ? body.assistantSearch : undefined,
+                  assistantFast: body.assistantFast,
+                  assistantSearchLevel: body.assistantSearchLevel,
+                  mcpServerIds,
+                  fileAttachments,
+                  userPermission: userPermission ?? undefined,
+                  userTimezone: body.userTimezone,
+                  effort: body.effort,
+                  modelSelection: body.modelSelection,
+                  workflowId: branch.workflowId,
+                  workflowName: branch.workflowName,
+                  workspaceId: branch.workspaceId,
+                  mode: branch.mode,
+                  provider: branch.provider,
+                  commands: body.commands,
+                  prefetch: body.prefetch,
+                  implicitFeedback: body.implicitFeedback,
+                  desktopLocalFilesystem: body.desktopCapabilities?.localFilesystem === true,
+                  desktopLocalFiles: body.desktopCapabilities?.localFiles === true,
+                  browser: body.desktopCapabilities?.browser === true,
+                  terminalCapable: body.desktopCapabilities?.terminal === true,
+                  computerUse: body.desktopCapabilities?.computerUse === true,
+                  terminals: body.desktopCapabilities?.terminals,
+                  browserSessions: body.desktopCapabilities?.browserSessions,
+                })
+              : branch.buildPayload({
+                  message: body.message,
+                  userId: authenticatedUserId,
+                  userMessageId,
+                  chatId: actualChatId,
+                  contexts: turnContexts,
+                  assistantSearch:
+                    body.mode === 'assistant' || branch.kind === 'organization'
+                      ? body.assistantSearch
+                      : undefined,
+                  mcpServerIds,
+                  fileAttachments,
+                  assistantImages: assistantImages?.content,
+                  assistantFast: body.assistantFast,
+                  assistantSearchLevel: body.assistantSearchLevel,
+                  workspaceContext,
+                  userPermission: userPermission ?? undefined,
+                  userTimezone: body.userTimezone,
+                  effort: body.effort,
+                  modelSelection: body.modelSelection,
+                  desktopLocalFilesystem: body.desktopCapabilities?.localFilesystem === true,
+                  desktopLocalFiles: body.desktopCapabilities?.localFiles === true,
+                  browser: body.desktopCapabilities?.browser === true,
+                  terminalCapable: body.desktopCapabilities?.terminal === true,
+                  computerUse: body.desktopCapabilities?.computerUse === true,
+                  terminals: body.desktopCapabilities?.terminals,
+                  browserSessions: body.desktopCapabilities?.browserSessions,
+                })
+          },
+          activeOtelRoot.context
+        )
+      }
 
       if (actualChatId) {
         activeOtelRoot.span.setAttribute(TraceAttr.ChatId, actualChatId)
@@ -1406,14 +1552,27 @@ export async function handleUnifiedChatPost(req: NextRequest) {
         if (!lease || !sendClaim?.claimToken || sendClaim.storageMethod !== 'database') {
           throw new Error('Chat admission requires its controller and durable send claim')
         }
-        const resourceAuthoringVersion = await durableResourceAuthoringVersion(
-          executionContext.copilotResourceAdmission !== undefined
-        )
+        const startIntent = localAdmission
+          ? { local: localAdmission.intent }
+          : {
+              recovery: {
+                kind: 'interactive_stream' as const,
+                resourceAuthoringVersion: await durableResourceAuthoringVersion(
+                  executionContext.copilotResourceAdmission !== undefined
+                ),
+                request: { ...requestPayload, messageId: userMessageId, chatId: actualChatId },
+                goRoute: branch.goRoute,
+                clientToolPickupExpected,
+                userTimezone: executionContext.userTimezone,
+                requestMode: body.mode,
+              },
+            }
+        if (localMode && req.signal.aborted) throw new Error('Local Chat request is unavailable.')
         admittedRun = await admitChatTurn.execute({
           principal: {
             kind: 'session',
             userId: authenticatedUserId,
-            sessionId: session.session.id,
+            sessionId,
           },
           input: {
             chatId: actualChatId,
@@ -1425,29 +1584,26 @@ export async function handleUnifiedChatPost(req: NextRequest) {
             message: {
               id: userMessageId,
               content: body.message,
-              fileAttachments,
-              contexts: normalizedContexts,
+              ...(!localMode ? { fileAttachments, contexts: normalizedContexts } : {}),
               requestMode:
                 body.mode === 'plan' ? 'plan' : body.mode === 'assistant' ? 'assistant' : 'agent',
             },
-            recovery: {
-              kind: 'interactive_stream',
-              resourceAuthoringVersion,
-              request: { ...requestPayload, messageId: userMessageId, chatId: actualChatId },
-              goRoute: branch.goRoute,
-              clientToolPickupExpected,
-              userTimezone: executionContext.userTimezone,
-              requestMode: body.mode,
-            },
+            ...startIntent,
             notifyWorkspaceStatus: branch.notifyChatStatus,
             // The effort this turn actually runs at, so the stored pick is always one it can use.
-            effortChoice: effortChoice && body.effort,
-            desktopDeviceId: backgroundExecutorDeviceId(body),
+            ...(!localMode
+              ? {
+                  effortChoice: effortChoice && body.effort,
+                  desktopDeviceId: backgroundExecutorDeviceId(body),
+                }
+              : {}),
           },
         })
-        // Admission committed. A failure to attach this HTTP sink must leave the turn recoverable.
+        // Admission committed: retain the claim even if attaching this HTTP sink fails.
+        // Local runs keep their durable marker, without promising worker recovery.
         sendClaim = undefined
       }
+      if (localMode && req.signal.aborted) throw new Error('Local Chat request is unavailable.')
       const stream = createSSEStream({
         requestPayload,
         admittedRun,
@@ -1458,7 +1614,7 @@ export async function handleUnifiedChatPost(req: NextRequest) {
         chatId: actualChatId,
         currentChat,
         message: body.message,
-        titleModel: branch.titleModel,
+        titleModel: localAdmission?.localChat.request.model ?? branch.titleModel,
         ...(branch.titleProvider ? { titleProvider: branch.titleProvider } : {}),
         requestId,
         workspaceId,
@@ -1480,7 +1636,9 @@ export async function handleUnifiedChatPost(req: NextRequest) {
           clientToolPickupExpected,
           desktopClaimsLocalReads: body.desktopCapabilities?.localReadClaims === true,
           executionContext,
-          billingAttribution: executionContext.billingAttribution,
+          ...(localAdmission
+            ? { localChat: localAdmission.localChat }
+            : { billingAttribution: executionContext.billingAttribution }),
           onComplete: buildOnComplete({
             runController,
             chatId: actualChatId,
@@ -1492,7 +1650,7 @@ export async function handleUnifiedChatPost(req: NextRequest) {
             userId: authenticatedUserId,
             requestMode:
               body.mode === 'plan' ? 'plan' : body.mode === 'assistant' ? 'assistant' : 'agent',
-            otelRoot,
+            otelRoot: localMode ? undefined : otelRoot,
           }),
           onError: buildOnError({
             runController,
@@ -1509,18 +1667,19 @@ export async function handleUnifiedChatPost(req: NextRequest) {
         },
       })
 
-      captureServerEvent(
-        authenticatedUserId,
-        'copilot_chat_sent',
-        {
-          ...(branch.kind === 'workflow' ? { workflow_id: branch.workflowId } : {}),
-          ...(workspaceId ? { workspace_id: workspaceId } : {}),
-          has_file_attachments: (body.fileAttachments?.length ?? 0) > 0,
-          has_contexts: normalizedContexts.length > 0,
-          mode: body.mode,
-        },
-        workspaceId ? { groups: { workspace: workspaceId } } : undefined
-      )
+      if (!localMode)
+        captureServerEvent(
+          authenticatedUserId,
+          'copilot_chat_sent',
+          {
+            ...(branch.kind === 'workflow' ? { workflow_id: branch.workflowId } : {}),
+            ...(workspaceId ? { workspace_id: workspaceId } : {}),
+            has_file_attachments: (body.fileAttachments?.length ?? 0) > 0,
+            has_contexts: normalizedContexts.length > 0,
+            mode: body.mode,
+          },
+          workspaceId ? { groups: { workspace: workspaceId } } : undefined
+        )
 
       // Expose the root gen_ai.agent.execute span's trace identity to
       // the browser so subsequent HTTP calls (stop, abort, confirm,
@@ -1546,6 +1705,29 @@ export async function handleUnifiedChatPost(req: NextRequest) {
       })
     }) // end otelContextApi.with
   } catch (error) {
+    if (localMode) {
+      if (chatStreamLockAcquired && actualChatId && userMessageId) {
+        await releasePendingChatStream(actualChatId, userMessageId).catch(() => {
+          logger.warn('Local Chat stream lease cleanup is unavailable.')
+        })
+      }
+      otelRoot?.finish('error', new Error('Local Chat request is unavailable.'))
+      const applicationError = asOrchestrationError(error)
+      if (applicationError instanceof ChatSendSupersededError)
+        return NextResponse.json(
+          { error: 'This message was already sent.', activeStreamId: userMessageId },
+          { status: 409 }
+        )
+      const status =
+        isZodError(error) || error instanceof SyntaxError
+          ? 400
+          : applicationError?.code === 'forbidden' ||
+              applicationError?.code === 'not_found' ||
+              isWorkspaceAccessDeniedError(error)
+            ? 403
+            : 503
+      return localChatRefusal(status)
+    }
     if (chatStreamLockAcquired && actualChatId && userMessageId) {
       await releasePendingChatStream(actualChatId, userMessageId)
     }
@@ -1607,6 +1789,10 @@ export async function handleUnifiedChatPost(req: NextRequest) {
       await chatSendIdempotency
         .release(sendClaim.normalizedKey, sendClaim.storageMethod, sendClaim.claimToken)
         .catch((releaseError) => {
+          if (localMode) {
+            logger.warn('Local Chat send claim cleanup is unavailable.')
+            return
+          }
           logger.warn('Could not release the claim for an unfinished send', {
             userMessageId,
             error: getErrorMessage(releaseError, 'Unknown error'),

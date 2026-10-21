@@ -234,3 +234,193 @@ it('accepts plain JSON records without requiring a prototype or altering selecte
   expect(decision.data.workflow).toBe('catalogue_only')
   expect(decision.activation).toBe('blocked')
 })
+
+// A wrong backend/window selection would let the HTTP composer choose a worker
+// or budget that the installation administrator did not explicitly select.
+function localConfiguration() {
+  return {
+    ...configuration(),
+    localBackend: {
+      kind: 'memlia_local_chat',
+      version: 1,
+      budgetWindow: { id: 'cabinet_chat_v1', version: 7 },
+    },
+  }
+}
+it('captures the exact local backend and window without authorizing a transport', () => {
+  const input = localConfiguration()
+  input.data.workflow = 'summary_only'
+  const result = parseChatInstallationPolicy(input)
+  expect(result).toEqual({
+    ...input,
+    kind: 'configuration_decision',
+    activation: 'blocked',
+  })
+  expect(selectWorkflowReadPolicy(result, 'server-workflow')).toEqual({
+    workflowId: 'server-workflow',
+    policy: 'summary_only',
+  })
+  input.localBackend.budgetWindow.id = 'later_window'
+  input.localBackend.budgetWindow.version = 99
+  expect(result.localBackend).toEqual({
+    kind: 'memlia_local_chat',
+    version: 1,
+    budgetWindow: { id: 'cabinet_chat_v1', version: 7 },
+  })
+  expect(Object.isFrozen(result.localBackend)).toBe(true)
+  expect(Object.isFrozen(result.localBackend!.budgetWindow)).toBe(true)
+})
+it.each([
+  undefined,
+  null,
+  {},
+  { kind: 'worker', version: 1, budgetWindow: { id: 'window', version: 1 } },
+  { kind: 'memlia_local_chat', version: 2, budgetWindow: { id: 'window', version: 1 } },
+  { kind: 'memlia_local_chat', version: 1 },
+  { kind: 'memlia_local_chat', version: 1, budgetWindow: null },
+  { kind: 'memlia_local_chat', version: 1, budgetWindow: { id: '', version: 1 } },
+  { kind: 'memlia_local_chat', version: 1, budgetWindow: { id: ' window', version: 1 } },
+  { kind: 'memlia_local_chat', version: 1, budgetWindow: { id: 'w'.repeat(129), version: 1 } },
+  ...[0, -1, 1.5, '1', 2147483648].map((version) => ({
+    kind: 'memlia_local_chat',
+    version: 1,
+    budgetWindow: { id: 'window', version },
+  })),
+  {
+    kind: 'memlia_local_chat',
+    version: 1,
+    budgetWindow: { id: 'window', version: 1, userId: 'foreign' },
+  },
+  {
+    kind: 'memlia_local_chat',
+    version: 1,
+    budgetWindow: { id: 'window', version: 1 },
+    apiKey: 'FICTITIOUS_KEY',
+  },
+])('rejects a present malformed local backend instead of falling back (%#)', (localBackend) => {
+  expect(() => parseChatInstallationPolicy({ ...configuration(), localBackend })).toThrowError(
+    new Error('Chat installation policy is unavailable.')
+  )
+})
+it('selects the strict Anthropic local backend and its server-only API workspace', () => {
+  const decision = parseChatInstallationPolicy({
+    ...localConfiguration(),
+    provider: 'anthropic',
+    model: 'claude-haiku-4-5',
+    anthropicWorkspaceId: 'wrkspc_Fictitious1234',
+  })
+  expect(decision).toMatchObject({
+    provider: 'anthropic',
+    model: 'claude-haiku-4-5',
+    activation: 'blocked',
+    anthropicWorkspaceId: 'wrkspc_Fictitious1234',
+  })
+})
+it('refuses nested backend accessors and hidden authority without evaluating them', () => {
+  let reads = 0
+  for (const level of ['localBackend', 'budgetWindow'] as const) {
+    const input = localConfiguration()
+    const target = level === 'localBackend' ? input.localBackend : input.localBackend.budgetWindow
+    Object.defineProperty(target, level === 'localBackend' ? 'kind' : 'id', {
+      enumerable: true,
+      get() {
+        reads++
+        throw new Error('FICTITIOUS_PRIVATE_GETTER')
+      },
+    })
+    expect(() => parseChatInstallationPolicy(input)).toThrowError(
+      new Error('Chat installation policy is unavailable.')
+    )
+  }
+  for (const decorate of [
+    (value: object) => Object.defineProperty(value, 'apiKey', { value: 'FICTITIOUS_PRIVATE' }),
+    (value: object) => Object.assign(value, { [Symbol('authority')]: 'FICTITIOUS_PRIVATE' }),
+  ]) {
+    const input = localConfiguration()
+    decorate(input.localBackend.budgetWindow)
+    expect(() => parseChatInstallationPolicy(input)).toThrowError(
+      new Error('Chat installation policy is unavailable.')
+    )
+  }
+  expect(reads).toBe(0)
+})
+
+it.each([
+  '',
+  'workspace',
+  'wrkspc_short',
+  'wrkspc_Fictitious1234\r\nx-test: value',
+  null,
+  undefined,
+])(
+  'refuses malformed server API workspace without changing provider selection (%#)',
+  (anthropicWorkspaceId) => {
+    expect(() =>
+      parseChatInstallationPolicy({
+        ...localConfiguration(),
+        provider: 'anthropic',
+        model: 'claude-haiku-4-5',
+        anthropicWorkspaceId,
+      })
+    ).toThrow('Chat installation policy is unavailable.')
+  }
+)
+it('refuses Anthropic workspace on OpenAI before any credentials or transport', () => {
+  expect(() =>
+    parseChatInstallationPolicy({
+      ...localConfiguration(),
+      anthropicWorkspaceId: 'wrkspc_Fictitious1234',
+    })
+  ).toThrow('Chat installation policy is unavailable.')
+})
+
+function thinkingConfiguration(thinkingLevel: unknown, model = 'claude-haiku-5-5') {
+  const input = localConfiguration()
+  return {
+    ...input,
+    provider: 'anthropic',
+    model,
+    localBackend: { ...input.localBackend, thinkingLevel },
+  }
+}
+
+it.each([
+  ['claude-haiku-5-5', 'low'],
+  ['claude-haiku-5-5', 'none'],
+  ['claude-sonnet-5-5', 'none'],
+  ['claude-haiku-4-5', 'high'],
+])('accepts the declared server thinking choice %s/%s without activating it', (model, level) => {
+  const result = parseChatInstallationPolicy(thinkingConfiguration(level, model))
+  expect(result.localBackend).toMatchObject({ thinkingLevel: level })
+  expect(result.activation).toBe('blocked')
+})
+
+it.each([undefined, null, false, 2, {}, '', 'LOW', ' low', 'between_tools', 'automatic', 'x'.repeat(65)])(
+  'refuses an invalid explicitly supplied thinking level (%#)', (level) => {
+    expect(() => parseChatInstallationPolicy(thinkingConfiguration(level))).toThrow(
+      'Chat installation policy is unavailable.')
+  }
+)
+
+it('does not send an unsupported thinking parameter to another provider or silently ignore a level', () => {
+  expect(() => parseChatInstallationPolicy({ ...thinkingConfiguration('low'),
+    provider: 'openai', model: models.openai })).toThrow('Chat installation policy is unavailable.')
+  expect(() => parseChatInstallationPolicy(thinkingConfiguration('xhigh', 'claude-haiku-4-5')))
+    .toThrow('Chat installation policy is unavailable.')
+  // No explicit noneMode: native omission would not attest disabled thinking.
+  expect(() => parseChatInstallationPolicy(thinkingConfiguration('none', 'claude-haiku-4-5')))
+    .toThrow('Chat installation policy is unavailable.')
+})
+
+it('owns and freezes thinking configuration and never evaluates its getter', () => {
+  const input = thinkingConfiguration('low')
+  const result = parseChatInstallationPolicy(input)
+  input.localBackend.thinkingLevel = 'high'
+  expect(result.localBackend?.thinkingLevel).toBe('low')
+  expect(Reflect.set(result.localBackend!, 'thinkingLevel', 'high')).toBe(false)
+  let reads = 0
+  Object.defineProperty(input.localBackend, 'thinkingLevel', { enumerable: true,
+    get() { reads++; throw new Error('FICTITIOUS_PRIVATE_GETTER') } })
+  expect(() => parseChatInstallationPolicy(input)).toThrow('Chat installation policy is unavailable.')
+  expect(reads).toBe(0)
+})

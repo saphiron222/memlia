@@ -103,3 +103,17 @@ describe('stream-events contract', () => {
     await expect(reader.read()).resolves.toEqual({ done: true, value: undefined })
   })
 })
+
+// Native stop observations are optional for legacy providers, but never arbitrary.
+it.each([
+  ['final', 'end_turn', true],
+  ['final', 'stop_sequence', true],
+  ['final', 'max_tokens', true],
+  ['intermediate', 'tool_use', true],
+  ['final', 'tool_use', false],
+  ['intermediate', 'max_tokens', false],
+  ['final', 'PRIVATE_RAW_REASON', false],
+  ['final', null, false],
+] as const)('finish reason contract: %s / %s', (turn, finishReason, expected) => {
+  expect(isAgentStreamEvent({ type: 'turn_end', turn, finishReason })).toBe(expected)
+})

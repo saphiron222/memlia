@@ -1,3 +1,4 @@
+// Memlia modification: register the native Excel workflow block.
 import { A2ABlock } from '@/blocks/blocks/a2a'
 import { AffinityBlock, AffinityBlockMeta } from '@/blocks/blocks/affinity'
 import { AgentBlock } from '@/blocks/blocks/agent'
@@ -207,6 +208,7 @@ import { ManageEngineSdpBlock, ManageEngineSdpBlockMeta } from '@/blocks/blocks/
 import { ManualTriggerBlock } from '@/blocks/blocks/manual_trigger'
 import { McpBlock } from '@/blocks/blocks/mcp'
 import { Mem0Block, Mem0BlockMeta } from '@/blocks/blocks/mem0'
+import { MemliaExcelBlock } from '@/blocks/blocks/memlia_excel'
 import { MemoryBlock } from '@/blocks/blocks/memory'
 import { MicrosoftAdBlock, MicrosoftAdBlockMeta } from '@/blocks/blocks/microsoft_ad'
 import {
@@ -591,6 +593,7 @@ export const BLOCK_REGISTRY: Record<string, BlockConfig> = {
   manual_trigger: ManualTriggerBlock,
   mcp: McpBlock,
   mem0: Mem0Block,
+  memlia_excel: MemliaExcelBlock,
   memory: MemoryBlock,
   microsoft_ad: MicrosoftAdBlock,
   microsoft_dataverse: MicrosoftDataverseBlock,

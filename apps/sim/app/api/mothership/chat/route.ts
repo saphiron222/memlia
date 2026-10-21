@@ -1,3 +1,4 @@
+// Modified by Memlia: delegate local requests before shim body consumption.
 import { type NextRequest, NextResponse } from 'next/server'
 import { mothershipChatPostEnvelopeSchema } from '@/lib/api/contracts/mothership-chats'
 import { getSession } from '@/lib/auth'
@@ -13,6 +14,9 @@ import { validateShimEnvelope } from '@/lib/mothership/request/http'
 export const maxDuration = 3600
 
 export const POST = withRouteHandler(async (request: NextRequest) => {
+  if (Object.hasOwn(process.env, 'MEMLIA_CHAT_POLICY_FILE')) {
+    return handleUnifiedChatPost(request)
+  }
   const session = await getSession()
   if (!session?.user?.id) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })

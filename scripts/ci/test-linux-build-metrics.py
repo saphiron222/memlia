@@ -212,7 +212,8 @@ class MetricsTests(unittest.TestCase):
                                (['--anything'], None), (['--validation-only','extra'], None)]:
             with self.subTest(args=args):
                 result = subprocess.run(['bash','-c','set -euo pipefail\n'+block+'printf "%s" "$scope"',
-                                         'mode-test',*args],capture_output=True,text=True,timeout=10)
+                                         'mode-test',*args],capture_output=True,text=True,timeout=10,
+                                        env={**os.environ, 'MEMLIA_CI_CHAT_UI': '0'})
                 if expected is None:
                     self.assertEqual(result.returncode, 2)
                     self.assertEqual(result.stdout, '')
@@ -925,6 +926,22 @@ class ProcfsExitRaceTests(unittest.TestCase):
             self.assertEqual(metrics.identities([900002]), {900002: 43})
         with patch.object(Path, 'read_text', side_effect=FileNotFoundError()):
             self.assertEqual(metrics.sample_processes([900001]), (0, 0))
+
+
+class UIPhaseAdmissionTests(unittest.TestCase):
+    def test_every_ui_phase_still_requires_real_cgroup_before_child(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            for phase in ('bootstrap','migrate','grants','metadata','baseline','seed','stage','cleanup','readback'):
+                with self.subTest(phase=phase):
+                    report=root/(phase+'.json');marker=root/(phase+'.started')
+                    run=subprocess.run([sys.executable,str(HERE/'linux-build-metrics.py'),
+                        '--cgroup',temporary,'--report',str(report),'--phase','ui-'+phase,
+                        '--',sys.executable,'-c',f"from pathlib import Path;Path({str(marker)!r}).touch()"],capture_output=True,timeout=5)
+                    self.assertNotEqual(run.returncode,0)
+                    receipt=json.loads(report.read_text())
+                    self.assertEqual(receipt['status'],'failed');self.assertFalse(receipt['normalCompletion'])
+                    self.assertFalse(marker.exists())
 
 
 if __name__ == '__main__':

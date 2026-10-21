@@ -152,8 +152,16 @@ class PreparationChannel:
             raise TransportError('channel_closed')
         return self
 
-    async def __aexit__(self, *exc):
-        await self.aclose()
+    async def __aexit__(self, exc_type, exc, traceback):
+        try:
+            await self.aclose()
+        except TransportError:
+            if not isinstance(exc, asyncio.CancelledError):
+                raise
+            # A failed pool close must not turn an already cancelled task into
+            # an ordinary failure eligible for retry. aclose has disabled reuse;
+            # keep the cleanup uncertainty explicit on the original cancellation.
+            exc.add_note('channel_cleanup_unverified: close_failed')
 
     async def aclose(self) -> None:
         self._closed = True

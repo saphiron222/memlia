@@ -1,3 +1,4 @@
+// Modified by Memlia: verify private provenance and guarded native publication.
 import { createSessionPrincipal } from '@sim/testing/factories/principal.factory'
 import { storageServiceMock, storageServiceMockFns } from '@sim/testing/mocks/storage-service.mock'
 import { uploadsCopilotMock, uploadsCopilotMockFns } from '@sim/testing/mocks/uploads-copilot.mock'
@@ -32,6 +33,7 @@ vi.mock('@/lib/uploads/core/storage-service', () => storageServiceMock)
 vi.mock('@/lib/uploads/server/metadata', () => uploadsMetadataMock)
 
 import {
+  bindInternalToolFilePublication,
   presentInternalToolOperationResult,
   storeInternalToolFileResult,
 } from '@/lib/internal/tool-operations/file-result.server'
@@ -407,5 +409,40 @@ describe('presentInternalToolOperationResult', () => {
     expect(mockDeleteFile).toHaveBeenCalledTimes(2)
     expect(mockDeleteFileMetadata).toHaveBeenCalledTimes(1)
     expect(mockDeleteFileMetadata).toHaveBeenCalledWith('execution/file-2/second.xlsx')
+  })
+})
+
+describe('server-only file publication binding', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+  it('preserves exact provenance into native storage without serializing it', async () => {
+    const provenance = {
+      status: 'exact' as const,
+      entries: [{ sourceUserId: 'source-owner', encryptedValue: 'ciphertext-fixture' }],
+    }
+    const revalidate = vi.fn(async () => {})
+    const result = bindInternalToolFilePublication(
+      createInternalToolFileResult(file(), (stored) => ({ file: stored })),
+      provenance,
+      revalidate
+    )
+    const response = await presentInternalToolOperationResult(result, runContext)
+    expect(mockUploadExecutionFile.mock.calls[0]?.[5]).toEqual(provenance)
+    expect(revalidate).toHaveBeenCalledTimes(2)
+    expect(await response.text()).not.toContain('ciphertext-fixture')
+  })
+  it('does not upload after a failed publication revalidation', async () => {
+    const result = bindInternalToolFilePublication(
+      createInternalToolFileResult(file(), (stored) => stored),
+      { status: 'unrecorded' },
+      async () => {
+        throw new Error('fixed-refusal')
+      }
+    )
+    await expect(presentInternalToolOperationResult(result, runContext)).rejects.toThrow(
+      'fixed-refusal'
+    )
+    expect(mockUploadExecutionFile).not.toHaveBeenCalled()
   })
 })

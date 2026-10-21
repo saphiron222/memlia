@@ -34,7 +34,7 @@ const schema = z
   .object({
     version: z.literal(1),
     basis: z.literal('native_list_price_estimate_v1'),
-    provider: z.literal('openai'),
+    provider: z.enum(['openai', 'anthropic']),
     model: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/),
     pricing,
     bounds: z

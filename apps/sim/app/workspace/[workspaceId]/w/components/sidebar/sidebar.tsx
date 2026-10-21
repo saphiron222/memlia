@@ -829,6 +829,15 @@ export const Sidebar = memo(function Sidebar({ organizationHref, desktopExecutor
           hidden: permissionConfig.hideFilesTab && !accessRequestsEnabled,
           restricted: permissionConfig.hideFilesTab,
         },
+        // Modified by Memlia: native Excel entry uses the existing Chat access policy.
+        {
+          id: 'excel-automations',
+          label: 'Automatiser Excel',
+          icon: Files,
+          href: `/workspace/${workspaceId}/excel-automations`,
+          hidden: permissionConfig.hideCopilot && !accessRequestsEnabled,
+          restricted: permissionConfig.hideCopilot,
+        },
         {
           id: 'knowledge-base',
           label: 'Knowledge bases',
@@ -855,6 +864,7 @@ export const Sidebar = memo(function Sidebar({ organizationHref, desktopExecutor
       ].filter((item) => !item.hidden),
     [
       workspaceId,
+      permissionConfig.hideCopilot,
       permissionConfig.hideFilesTab,
       permissionConfig.hideKnowledgeBaseTab,
       permissionConfig.hideTablesTab,

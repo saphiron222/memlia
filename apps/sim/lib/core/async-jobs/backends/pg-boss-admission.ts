@@ -289,7 +289,14 @@ export async function admitPgBossJob(tx: Transaction, input: PgBossAdmissionInpu
 export async function readPgBossPublication(
   reader: Reader,
   payload: unknown
-): Promise<{ jobId: string; outboxEventId: string; envelope: JobEnvelope; status: string }> {
+): Promise<{
+  jobId: string
+  outboxEventId: string
+  envelope: JobEnvelope
+  status: string
+  runAt: string
+  maxDurationSeconds: number
+}> {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload))
     throw new PgBossAdmissionError('admission_invalid_reference')
   const reference = payload as Record<string, unknown>
@@ -312,5 +319,7 @@ export async function readPgBossPublication(
     outboxEventId: request.outboxEventId,
     envelope: request.envelope,
     status: row.status,
+    runAt: request.runAt,
+    maxDurationSeconds: request.maxDurationSeconds,
   }
 }

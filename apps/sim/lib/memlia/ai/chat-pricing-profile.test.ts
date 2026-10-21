@@ -71,18 +71,18 @@ test('strict profile refuses getters, lossy JSON, excessive values and unknown f
   const hidden = fixture()
   Object.defineProperty(hidden, 'hidden', { value: 'private', enumerable: false })
   const sparse = fixture()
-  delete sparse.pricing.tiers[0]
+  Reflect.deleteProperty(sparse.pricing.tiers, '0')
   const wrongs: unknown[] = [
     accessor,
     hidden,
     sparse,
     { ...fixture(), extra: 'private' },
-    { ...fixture(), provider: 'anthropic' },
+    { ...fixture(), provider: 'azure-anthropic' },
     { ...fixture(), version: 2 },
     { ...fixture(), maximumCostUsd: '999999999.000000000001' },
     { ...fixture(), maximumCostUsd: '0' },
     { ...fixture(), maximumCostUsd: '1e-8' },
-    { ...fixture(), pricing: { ...fixture().pricing, input: Infinity } },
+    { ...fixture(), pricing: { ...fixture().pricing, input: Number.POSITIVE_INFINITY } },
     { ...fixture(), pricing: { ...fixture().pricing, updatedAt: '2026-02-30' } },
     {
       ...fixture(),
@@ -104,4 +104,21 @@ test('native complete pricing snapshot roundtrips without changing rates or tier
   const captured = captureChatPricingProfile({ ...fixture(), pricing })
   assert.deepEqual(captured.profile.pricing, pricing)
   assert.notEqual(captured.profile.pricing, pricing)
+})
+
+test('keeps the historical OpenAI canonical hash and adds a distinct Anthropic profile', () => {
+  assert.equal(
+    captureChatPricingProfile(fixture()).hash,
+    '9b2d7566a2294300fae8a699ebb8bcb16a7341d4a438d513c986a886886854b1'
+  )
+  const captured = captureChatPricingProfile({
+    ...fixture(),
+    provider: 'anthropic',
+    model: 'claude-haiku-4-5',
+    pricing: { input: 1, cachedInput: 0.1, output: 5, updatedAt: '2026-09-04' },
+    bounds: { contextTokens: 200000, outputTokens: 100 },
+    maximumCostUsd: '1',
+  })
+  assert.equal(captured.profile.provider, 'anthropic')
+  assert.notEqual(captured.hash, captureChatPricingProfile(fixture()).hash)
 })

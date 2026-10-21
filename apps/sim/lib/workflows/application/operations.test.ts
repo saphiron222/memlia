@@ -1,3 +1,4 @@
+// Memlia modifications: assert session/write-only inactive Excel preparation.
 import { permissionSatisfies } from '@sim/platform-authz/workspace'
 import { describe, expect, it } from 'vitest'
 import { workflowOperations } from '@/lib/workflows/application/operations'
@@ -86,4 +87,16 @@ describe('workflow operation registry', () => {
     })
     expect(workflowOperations.applyOperations.principalKinds).not.toContain('workspace_api_key')
   })
+})
+
+it('keeps Excel test snapshots session/write-only without deployment authority', () => {
+  expect(workflowOperations.prepareExcelTest).toMatchObject({
+    id: 'workflows.excel.prepare_test',
+    minimumRole: 'write',
+    workspaceApiKey: 'deny',
+    capability: 'none',
+    principalKinds: ['session'],
+  })
+  expect(workflowOperations.prepareExcelTest.delegatedServices).toBeUndefined()
+  expect(workflowOperations.prepareExcelTest.contentDelivery).toBeUndefined()
 })

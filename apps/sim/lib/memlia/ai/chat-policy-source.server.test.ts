@@ -256,3 +256,25 @@ describe('POSIX ownership and bounded descriptor lifecycle', () => {
     refuses()
   })
 })
+
+it('reads the explicit local backend from the same administrator policy file', () => {
+  write(
+    JSON.stringify({
+      ...configuration(),
+      localBackend: {
+        kind: 'memlia_local_chat',
+        version: 1,
+        budgetWindow: { id: 'cabinet_chat_v1', version: 7 },
+      },
+    })
+  )
+  const result = readChatInstallationPolicyFile()
+  expect(result.policy.localBackend).toEqual({
+    kind: 'memlia_local_chat',
+    version: 1,
+    budgetWindow: { id: 'cabinet_chat_v1', version: 7 },
+  })
+  expect(result.policy.activation).toBe('blocked')
+  write(JSON.stringify({ ...configuration(), localBackend: null }))
+  refuses()
+})

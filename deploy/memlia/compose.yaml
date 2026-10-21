@@ -49,8 +49,17 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OLLAMA_URL: ${OLLAMA_URL:-}
+      # Presence selects the independent local backend; no worker fallback.
+      MEMLIA_CHAT_POLICY_FILE: /etc/memlia/chat-policy.json
+      COPILOT_TOOL_PERMISSIONS_ENABLED: 'true'
     volumes:
       - uploads:/app/apps/sim/uploads
+      - type: bind
+        source: ${MEMLIA_CHAT_POLICY_SOURCE:?Administrator-owned Chat policy file required}
+        target: /etc/memlia/chat-policy.json
+        read_only: true
+        bind:
+          create_host_path: false
     depends_on:
       db: {condition: service_healthy}
       redis: {condition: service_healthy}

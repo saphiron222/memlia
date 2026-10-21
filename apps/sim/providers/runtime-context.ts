@@ -47,6 +47,8 @@ export type ProviderModelObservation =
 export interface ProviderRuntimeContext {
   /** Optional trusted request controls; never populated from a provider/model payload. */
   controlledRun?: {
+    /** Captured server installation choice; never derived from model/request headers. */
+    anthropicWorkspaceId?: string
     signal: AbortSignal
     beforeModelCall(): void
     /** Trusted server guard, awaited for each physical attempt; not a model argument. */

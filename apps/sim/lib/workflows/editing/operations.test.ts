@@ -1,3 +1,4 @@
+// Modified by Memlia: regressions for admitted native container execution counters.
 import { integrationsAvailabilityMock } from '@sim/testing/mocks/integrations-availability.mock'
 import type { BlockState } from '@sim/workflow-types/workflow'
 import type { Mock } from 'vitest'
@@ -513,6 +514,206 @@ function makeParallelWorkflow() {
   workflow.blocks['loop-1'].data = { parallelType: 'count', count: 5 }
   return workflow
 }
+
+describe('container counter admission', () => {
+  it('creates a loop with a numeric execution count from its decimal input', () => {
+    const result = applyOperationsToWorkflowState(makeLoopWorkflow(), [
+      {
+        operation_type: 'add',
+        block_id: 'counted-loop',
+        params: {
+          type: 'loop',
+          name: 'Counted loop',
+          inputs: { loopType: 'for', iterations: '3' },
+        },
+      },
+    ])
+    const id = result.mintedBlockIds['counted-loop'] ?? 'counted-loop'
+    expect(result.validationErrors).toEqual([])
+    expect(result.state.blocks[id].subBlocks.iterations.value).toBe(3)
+    expect(result.state.blocks[id].data.count).toBe(3)
+    expect(result.state.loops[id].iterations).toBe(3)
+  })
+
+  it.each(['loop', 'parallel'] as const)(
+    'admits counts in every native %s authoring path',
+    (type) => {
+      for (const value of [3, '3']) {
+        const inputs =
+          type === 'loop'
+            ? { loopType: 'for', iterations: value }
+            : { parallelType: 'count', count: value }
+        const added = { type, name: 'Counter target', inputs }
+        const existing = type === 'loop' ? makeLoopWorkflow() : makeParallelWorkflow()
+        const nested = makeNestedLoopWorkflow()
+        nested.blocks['inner-loop'].type = type
+        nested.blocks['inner-loop'].name = 'Counter target'
+        nested.blocks['inner-loop'].data.count = 5
+        const movingId = '9484800e-f074-4ef8-a227-30e5d185eeea'
+        const moving = {
+          blocks: {
+            'outer-loop': nested.blocks['outer-loop'],
+            [movingId]: { ...nested.blocks['inner-loop'], id: movingId },
+          },
+          edges: [],
+          loops: {},
+          parallels: {},
+        }
+        const scenarios: Array<{
+          graph: Record<string, unknown>
+          operation: EditWorkflowOperation
+        }> = [
+          {
+            graph: makeLoopWorkflow(),
+            operation: { operation_type: 'add', block_id: 'target', params: added },
+          },
+          {
+            graph: existing,
+            operation: {
+              operation_type: 'edit',
+              block_id: 'loop-1',
+              params: { name: 'Counter target', inputs },
+            },
+          },
+          {
+            graph: makeLoopWorkflow(),
+            operation: {
+              operation_type: 'insert_into_subflow',
+              block_id: 'target',
+              params: { ...added, subflowId: 'loop-1' },
+            },
+          },
+          {
+            graph: makeLoopWorkflow(),
+            operation: {
+              operation_type: 'add',
+              block_id: 'outer',
+              params: { type: 'loop', name: 'New outer', nestedNodes: { target: added } },
+            },
+          },
+          {
+            graph: nested,
+            operation: {
+              operation_type: 'edit',
+              block_id: 'outer-loop',
+              params: { nestedNodes: { target: added } },
+            },
+          },
+          {
+            graph: moving,
+            operation: {
+              operation_type: 'insert_into_subflow',
+              block_id: movingId,
+              params: { ...added, subflowId: 'outer-loop' },
+            },
+          },
+        ]
+        for (const { graph, operation } of scenarios) {
+          const result = applyOperationsToWorkflowState(graph, [operation])
+          expect(result.validationErrors, operation.operation_type).toEqual([])
+          const blocks: Record<string, BlockState> = result.state.blocks
+          const block = Object.values(blocks).find(
+            (candidate) => candidate.name === 'Counter target'
+          )
+          expect(block, operation.operation_type).toBeDefined()
+          if (!block) throw new Error('Expected authored container')
+          expect(
+            block?.subBlocks[type === 'loop' ? 'iterations' : 'count']?.value,
+            operation.operation_type
+          ).toBe(3)
+          expect(block.data?.count, operation.operation_type).toBe(3)
+          const config =
+            type === 'loop' ? result.state.loops[block.id] : result.state.parallels[block.id]
+          expect(type === 'loop' ? config.iterations : config.count, operation.operation_type).toBe(
+            3
+          )
+        }
+      }
+    }
+  )
+
+  it.each(['loop', 'parallel'] as const)(
+    'reports an invalid %s count without writing it in best effort',
+    (type) => {
+      const graph = type === 'loop' ? makeLoopWorkflow() : makeParallelWorkflow()
+      const inputs = type === 'loop' ? { iterations: '3wrong' } : { count: '3wrong' }
+      const result = applyOperationsToWorkflowState(graph, [
+        { operation_type: 'edit', block_id: 'loop-1', params: { name: 'Renamed', inputs } },
+      ])
+      expect(result.validationErrors).toHaveLength(1)
+      expect(result.validationErrors[0]).toMatchObject({
+        blockId: 'loop-1',
+        field: type === 'loop' ? 'iterations' : 'count',
+      })
+      expect(result.state.blocks['loop-1'].name).toBe('Renamed')
+      expect(result.state.blocks['loop-1'].data.count).toBe(5)
+      expect(
+        result.state.blocks['loop-1'].subBlocks[type === 'loop' ? 'iterations' : 'count']
+      ).toBeUndefined()
+      expect(graph.blocks['loop-1'].data.count).toBe(5)
+    }
+  )
+
+  it.each(['loop', 'parallel'] as const)(
+    'preserves an absent counter and refuses edits of a locked %s',
+    (type) => {
+      const graph = type === 'loop' ? makeLoopWorkflow() : makeParallelWorkflow()
+      const unchanged = applyOperationsToWorkflowState(graph, [
+        { operation_type: 'edit', block_id: 'loop-1', params: { name: 'Same count' } },
+      ])
+      expect(unchanged.validationErrors).toEqual([])
+      expect(unchanged.state.blocks['loop-1'].data.count).toBe(5)
+      Object.assign(graph.blocks['loop-1'], { locked: true })
+      const result = applyOperationsToWorkflowState(graph, [
+        {
+          operation_type: 'edit',
+          block_id: 'loop-1',
+          params: { inputs: type === 'loop' ? { iterations: '3' } : { count: '3' } },
+        },
+      ])
+      expect(result.skippedItems).toContainEqual(expect.objectContaining({ type: 'block_locked' }))
+      expect(result.state.blocks['loop-1'].data.count).toBe(5)
+      expect(result.state.blocks['loop-1'].subBlocks).toEqual({})
+    }
+  )
+
+  it.each(['forEach', 'while', 'doWhile'] as const)(
+    'does not apply a for count to a %s loop',
+    (loopType) => {
+      const graph = makeLoopWorkflow()
+      Object.assign(graph.blocks['loop-1'].data, { loopType })
+      const result = applyOperationsToWorkflowState(graph, [
+        { operation_type: 'edit', block_id: 'loop-1', params: { inputs: { iterations: '3' } } },
+      ])
+      expect(result.validationErrors).toEqual([])
+      expect(result.state.blocks['loop-1'].data.count).toBe(5)
+      expect(result.state.loops['loop-1'].loopType).toBe(loopType)
+    }
+  )
+
+  it('does not apply a count to a collection parallel', () => {
+    const graph = makeParallelWorkflow()
+    graph.blocks['loop-1'].data.parallelType = 'collection'
+    const result = applyOperationsToWorkflowState(graph, [
+      { operation_type: 'edit', block_id: 'loop-1', params: { inputs: { count: '3' } } },
+    ])
+    expect(result.validationErrors).toEqual([])
+    expect(result.state.blocks['loop-1'].data.count).toBe(5)
+    expect(result.state.parallels['loop-1'].parallelType).toBe('collection')
+  })
+
+  it('preserves decimal-looking text on an ordinary short-input', () => {
+    const result = applyOperationsToWorkflowState(makeLoopWorkflow(), [
+      {
+        operation_type: 'add',
+        block_id: 'ordinary',
+        params: { type: 'conditional_format', name: 'Ordinary', inputs: { mode: '3' } },
+      },
+    ])
+    const id = result.mintedBlockIds.ordinary ?? 'ordinary'
+    expect(result.state.blocks[id].subBlocks.mode.value).toBe('3')
+  })
+})
 
 describe('handleEditOperation container inputs', () => {
   it('reports an unknown loop input field instead of discarding it silently', () => {

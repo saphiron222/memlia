@@ -233,6 +233,7 @@ import {
   MothershipStreamV1CompletionStatus,
   MothershipStreamV1ToolOutcome,
 } from '@/lib/mothership/generated/mothership-stream-v1'
+import * as streamingContext from '@/lib/mothership/request/context/request-context'
 import {
   BillingLimitError,
   CopilotBackendError,
@@ -4352,6 +4353,65 @@ describe('server-only local lifecycle branch', () => {
     localProvider.mockReset()
     mockRunStreamLoop.mockClear()
     mockRequestExplicitStreamAbort.mockClear()
+  })
+  it.each([
+    { flag: false, route: '/api/copilot' },
+    { flag: true, route: '/api/copilot' },
+    { flag: false, route: '/api/mothership' },
+    { flag: true, route: '/api/mothership' },
+  ])(
+    'local gate prompts once without preferences: flag=$flag route=$route',
+    async ({ flag, route }) => {
+      setEnvFlags({ isHosted: false, isCopilotToolPermissionsEnabled: flag })
+      mockGetAutoAllowedTools.mockClear()
+      mockGetAutoAllowedTools.mockResolvedValue(new Set(['memlia_apply_workflow_proposal']))
+      const create = vi.spyOn(streamingContext, 'createStreamingContext')
+      localProvider.mockResolvedValue({
+        stream: new ReadableStream({
+          start(c) {
+            c.enqueue({ type: 'text_delta', text: 'Local answer.', turn: 'final' })
+            c.enqueue({ type: 'turn_end', turn: 'final' })
+            c.close()
+          },
+        }),
+      })
+      try {
+        const result = await runCopilotLifecycle(
+          { messageId: 'message-local', mode: 'agent' },
+          { ...options(), goRoute: route }
+        )
+        expect(result.success).toBe(true)
+        expect(result.content).toBe('Local answer.')
+        expect(localProvider).toHaveBeenCalledOnce()
+        expect(mockRunStreamLoop).not.toHaveBeenCalled()
+        expect(mockGetAutoAllowedTools).not.toHaveBeenCalled()
+        const context = create.mock.results[0]?.value as StreamingContext
+        expect(context.toolPermissions.enabled).toBe(true)
+        expect(context.toolPermissions.autoAllowed.size).toBe(0)
+        expect(context.toolPermissions.autoAllowPermitted).toBe(false)
+      } finally {
+        create.mockRestore()
+      }
+    }
+  )
+  it('does not create a gate or read preferences for an invalid local identity', async () => {
+    setEnvFlags({ isHosted: false, isCopilotToolPermissionsEnabled: false })
+    mockGetAutoAllowedTools.mockClear()
+    const create = vi.spyOn(streamingContext, 'createStreamingContext')
+    try {
+      await expect(
+        runCopilotLifecycle(
+          { messageId: 'message-local', mode: 'agent' },
+          { ...options(), goRoute: '/api/copilot', userId: 'another-user' }
+        )
+      ).rejects.toThrow('Local Chat is unavailable.')
+      expect(create).not.toHaveBeenCalled()
+      expect(mockGetAutoAllowedTools).not.toHaveBeenCalled()
+      expect(localProvider).not.toHaveBeenCalled()
+      expect(mockRunStreamLoop).not.toHaveBeenCalled()
+    } finally {
+      create.mockRestore()
+    }
   })
   it('uses native local events and result without worker/title or attachment egress', async () => {
     localProvider.mockResolvedValue({

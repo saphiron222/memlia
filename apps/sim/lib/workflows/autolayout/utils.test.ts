@@ -1,3 +1,4 @@
+// Modified by Memlia (2026): cover targeted layout of protected annotations.
 import { BLOCK_DIMENSIONS } from '@sim/workflow-renderer'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_VERTICAL_SPACING } from '@/lib/workflows/autolayout/constants'
@@ -116,6 +117,41 @@ describe('resolveNoteOverlaps', () => {
   })
 
   describe('targeted mode (previousBlocks)', () => {
+    it.each([false, true])(
+      'keeps a protected note anchored when a block moves onto it (locked ancestor: %s)',
+      (lockedAncestor) => {
+        const parentData = lockedAncestor ? { parentId: 'container' } : undefined
+        const previousBlocks: Record<string, BlockState> = {
+          a: createBlock('a', 'agent', { x: 2000, y: 2000 }, { data: parentData }),
+          note: createBlock(
+            'note',
+            'note',
+            { x: 150, y: 150 },
+            {
+              locked: !lockedAncestor,
+              data: parentData,
+              height: 120,
+              layout: { measuredHeight: 120 },
+            }
+          ),
+        }
+        if (lockedAncestor) {
+          previousBlocks.container = createBlock(
+            'container',
+            'loop',
+            { x: 0, y: 0 },
+            { locked: true }
+          )
+        }
+        const blocks = structuredClone(previousBlocks)
+        blocks.a.position = { x: 150, y: 150 }
+
+        resolveNoteOverlaps(blocks, DEFAULT_VERTICAL_SPACING, { previousBlocks })
+
+        expect(blocks.note).toEqual(previousBlocks.note)
+      }
+    )
+
     it('relocates a note when a block was moved onto it', () => {
       const previousBlocks: Record<string, BlockState> = {
         a: createBlock('a', 'agent', { x: 2000, y: 2000 }),

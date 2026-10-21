@@ -36,7 +36,11 @@ import {
   supportsNativeStructuredOutputs,
   supportsTemperature,
 } from '@/providers/models'
-import { awaitProviderModelCall, executeProviderTool } from '@/providers/runtime-context'
+import {
+  awaitProviderModelCall,
+  executeProviderTool,
+  getProviderRuntimeContext,
+} from '@/providers/runtime-context'
 import { createStreamingExecution } from '@/providers/streaming-execution'
 import { isAbortError } from '@/providers/streaming-tool-loop-shared'
 import { adaptAnthropicToolSchema } from '@/providers/tool-schema-adapter'
@@ -287,6 +291,9 @@ export async function executeAnthropicProviderRequest(
   config: AnthropicProviderConfig
 ): Promise<ProviderResponse | StreamingExecution> {
   const { logger, providerId, providerLabel } = config
+  const observeAttempts = !!getProviderRuntimeContext()?.controlledRun?.observeModelAttempt
+  if (observeAttempts && (providerId !== 'anthropic' || !request.stream || !request.tools?.length))
+    throw new Error('Model observation requires the Anthropic streaming tool loop.')
 
   if (!request.apiKey) {
     throw new Error(`API key is required for ${providerLabel}`)
@@ -482,6 +489,12 @@ export async function executeAnthropicProviderRequest(
   }
   payload.system = buildSystemBlocks(systemTexts, cacheStaticPrefix)
 
+  // Extended thinking can raise the native output limit. An observed reservation
+  // owns the explicit request ceiling; refuse that adjustment instead of repricing it.
+  if (observeAttempts && payload.max_tokens !== request.maxTokens)
+    throw new Error('Controlled Anthropic output limit is unavailable.')
+  if (observeAttempts && !anthropicTools?.length)
+    throw new Error('Model observation requires the Anthropic streaming tool loop.')
   if (request.stream && anthropicTools && anthropicTools.length > 0) {
     logger.info(`Using streaming tool loop for ${providerLabel} request`)
 
