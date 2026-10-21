@@ -252,7 +252,7 @@ jobs:
               value=json.loads(raw);assert set(value)=={'status','phase','step','errorCode','cleanup','imagesBuilt','durableQualified'}
               assert value['status'] in ('passed','failed') and value['phase'] in module.PHASES
               assert value['step'] in module.STEPS and value['errorCode'] in module.ERROR_CODES
-              assert value['step']==value['phase'] or value['phase']=='contexts' and value['step'] in {'cron-assets',*('context-'+name for name in module.APPS)}
+              assert module.valid_step(value['phase'],value['step'])
               assert (value['errorCode']=='none') == (value['status']=='passed')
               assert type(value['imagesBuilt']) is int and 0<=value['imagesBuilt']<=5
               assert type(value['cleanup']) is bool and type(value['durableQualified']) is bool

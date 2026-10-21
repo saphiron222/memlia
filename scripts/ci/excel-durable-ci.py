@@ -31,8 +31,15 @@ ORIGIN='https://localhost:18443'
 REGISTRY='registry:3.0.0@sha256:6c5666b861f3505b116bb9aa9b25175e71210414bd010d92035ff64018f9457e'
 TYPE_IMAGE='node:24.22.0-bookworm@sha256:14078204b6bb268c107ceff6d3c43f45a888105e5c2b18b14c32b3409d93a1b0'
 PHASES={'preflight','tools','typegen','typecheck','contexts','registry','builder','images','tls','qualification','complete'}
-STEPS=PHASES|{'cron-assets'}|{'context-'+name for name in APPS}
-ERROR_CODES={'none','source_refused','file_missing','command_failed','timeout','preparation_refused','unexpected_failure'}
+IMAGE_OPERATIONS=('preflight','build','guard','push','inspect-tag','pull','inspect-digest','verify-digest')
+IMAGE_STEPS={'image-'+name+'-'+operation for name in APPS for operation in IMAGE_OPERATIONS}
+CLI_STEPS={'buildx-cli-version','buildx-cli-help'}
+STEPS=PHASES|{'cron-assets'}|{'context-'+name for name in APPS}|IMAGE_STEPS|CLI_STEPS
+DIAGNOSTIC_BYTES=8*1024**2  # Same bound as the existing owned_client capture.
+ERROR_CODES={'none','source_refused','file_missing','command_failed','timeout','preparation_refused','unexpected_failure',
+             'diagnostic_unknown','diagnostic_unavailable','diagnostic_truncated','command_interrupted','client_ownership_refused',
+             'observed_cli_flag_refused','observed_no_space','observed_tls_refused','observed_connection_refused',
+             'observed_lockfile_frozen','observed_js_heap_limit','observed_exit_137','observed_process_exit','cli_option_unavailable'}
 
 def error_code(error):
     # Exact allowlist only: exception text/path/argv never enter the public receipt.
@@ -42,8 +49,115 @@ def error_code(error):
     if isinstance(error,ValueError):
         if error.args==('source_refused',):return 'source_refused'
         if error.args==('recipe_build_failed',):return 'command_failed'
+        if error.args==('buildx_option_unavailable',):return 'cli_option_unavailable'
+        if error.args==('buildx_cli_unknown',):return 'diagnostic_unknown'
         return 'preparation_refused'
     return 'unexpected_failure'
+
+
+def valid_step(phase,step):
+    return step in STEPS and (step==phase or phase=='contexts' and step in {'cron-assets',*('context-'+name for name in APPS)}
+                             or phase=='images' and step in IMAGE_STEPS or phase=='tools' and step in CLI_STEPS)
+
+
+def probe_buildx(execute,step):
+    # Native capture is closed before interpretation, including nonzero exits.
+    # A generic docker --help is not evidence of the buildx build command.
+    step('buildx-cli-version');version=execute(['buildx','version'],capture=True,seconds=15)
+    step('buildx-cli-help');help_text=execute(['buildx','build','--help'],capture=True,seconds=15)
+    require(type(version) is bytes and 0<len(version)<=16384 and type(help_text) is bytes and 0<len(help_text)<=65536,'buildx_cli_unknown')
+    try:
+        version_text=version.decode('utf-8').removesuffix('\n').removesuffix('\r');text=help_text.decode('utf-8')
+    except UnicodeError:raise ValueError('buildx_cli_unknown') from None
+    require(re.fullmatch(r'github\.com/docker/buildx v[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]{1,80})? [a-f0-9]{7,64}',version_text) is not None,'buildx_cli_unknown')
+    require(not any(ord(c)<32 and c not in '\n\r\t' for c in text) and '\x7f' not in text,'buildx_cli_unknown')
+    lines=[line.removesuffix('\r') for line in text.split('\n')]
+    require(sum(re.fullmatch(r'Usage:[ \t]+docker buildx build \[OPTIONS\] PATH \| URL \| -',line) is not None for line in lines)==1,'buildx_cli_unknown')
+    options=[line for line in lines if re.fullmatch(r'[ \t]{2,}--cgroup-parent(?:[ \t]+[^\r\n]*)?',line)]
+    require(len(options)<=1,'buildx_cli_unknown')
+    require(len(options)==1,'buildx_option_unavailable')
+    return {'realUsage':True,'cgroupParentListed':True,'versionBytes':len(version),'helpBytes':len(help_text)}
+
+
+def classify_command_output(raw):
+    """Closed observations from complete captured output, never a proven root cause.
+
+    Build output is untrusted. No substring, argv, path, URL, credential, exit text
+    or arbitrary field is returned. Conflicting observations stay unknown.
+    """
+    if type(raw) is not bytes or not raw:return 'diagnostic_unknown'
+    if len(raw)>DIAGNOSTIC_BYTES:return 'diagnostic_truncated'
+    if raw.count(b'\n')>65536 or b'\0' in raw:return 'diagnostic_unknown'
+    try:text=raw.decode('utf-8')
+    except UnicodeError:return 'diagnostic_unknown'
+    observed=set();process_exit=None
+    for line in text.split('\n'):
+        line=line.removesuffix('\r')
+        if len(line)>8192:return 'diagnostic_unknown'
+        # SGR only at complete line boundaries. Interior splices, cursor controls,
+        # binary output or an unrecognized multiplexed prefix are not normalized.
+        line=re.sub(r'^(?:\x1b\[[0-9;]{0,32}m)*','',line)
+        line=re.sub(r'(?:\x1b\[[0-9;]{0,32}m)*$','',line)
+        if any(ord(c)<32 and c!='\t' for c in line) or '\x7f' in line:return 'diagnostic_unknown'
+        line=re.sub(r'^#[0-9]{1,5} (?:[0-9]{1,8}\.[0-9]{1,6} )?','',line)
+        if line in {'unknown flag: '+flag for flag in ('--cgroup-parent','--load','--builder','--provenance','--sbom','--progress')}:
+            observed.add('observed_cli_flag_refused')
+        if line=='error: lockfile had changes, but lockfile is frozen':observed.add('observed_lockfile_frozen')
+        if line in ('FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory',
+                    'FATAL ERROR: Ineffective mark-compacts near heap limit Allocation failed - JavaScript heap out of memory'):
+            observed.add('observed_js_heap_limit')
+        if line.startswith(('ERROR: ','Error response from daemon: ')):
+            if line.endswith(': no space left on device'):observed.add('observed_no_space')
+            if line.endswith(': x509: certificate signed by unknown authority'):observed.add('observed_tls_refused')
+            if line.endswith(': connect: connection refused'):observed.add('observed_connection_refused')
+        match=re.fullmatch(r'ERROR: failed to build: failed to solve: process .{1,4096} did not complete successfully: exit code: ([1-9][0-9]{0,2})',line)
+        if match and int(match[1])<=255:
+            value='observed_exit_137' if match[1]=='137' else 'observed_process_exit'
+            if process_exit is not None and process_exit!=value:return 'diagnostic_unknown'
+            process_exit=value
+    if len(observed)>1:return 'diagnostic_unknown'
+    return next(iter(observed)) if observed else process_exit or 'diagnostic_unknown'
+
+
+def command_failure(error,work,receipt):
+    # ownership/capture state is supplied only by the existing native port, never
+    # from the command's output. Do not parse a file while a producer is uncertain.
+    if isinstance(error,ValueError) and error.args==('client_ownership_refused',):return 'client_ownership_refused'
+    if not (type(receipt.get('pid')) is int and receipt['pid']>0 and receipt.get('waited') is True and receipt.get('groupClosed') is True):return 'diagnostic_unavailable'
+    if isinstance(error,ValueError):
+        if error.args==('recipe_build_log_limit',):return 'diagnostic_truncated'
+        if error.args==('recipe_build_interrupted',):return 'command_interrupted'
+        if error.args!=('recipe_build_failed',):return error_code(error)
+    elif not isinstance(error,subprocess.CalledProcessError):return error_code(error)
+    fd=None
+    try:
+        parent=work.lstat()
+        require(stat.S_ISDIR(parent.st_mode) and parent.st_uid==os.geteuid() and stat.S_IMODE(parent.st_mode)==0o700)
+        fd=os.open(work/'build.private.log',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+        before=os.fstat(fd)
+        require(stat.S_ISREG(before.st_mode) and before.st_uid==os.geteuid() and before.st_nlink==1 and stat.S_IMODE(before.st_mode)==0o600)
+        if before.st_size>DIAGNOSTIC_BYTES:return 'diagnostic_truncated'
+        chunks=[];size=0
+        while size<=DIAGNOSTIC_BYTES:
+            chunk=os.read(fd,min(65536,DIAGNOSTIC_BYTES+1-size))
+            if not chunk:break
+            size+=len(chunk);chunks.append(chunk)
+        after=os.fstat(fd)
+        fields=('st_dev','st_ino','st_uid','st_mode','st_nlink','st_size','st_mtime_ns','st_ctime_ns')
+        require(size==before.st_size and all(getattr(before,k)==getattr(after,k) for k in fields))
+        current=(work/'build.private.log').lstat()
+        require(current.st_dev==before.st_dev and current.st_ino==before.st_ino)
+        return classify_command_output(b''.join(chunks))
+    except (OSError,ValueError):return 'diagnostic_unavailable'
+    finally:
+        if fd is not None:os.close(fd)
+
+
+def owned_command(native,argv,work,deadline,cancel,*,capture=False,receipt):
+    try:return native.owned_client(argv,work,deadline,cancel,capture=capture,receipt=receipt)
+    except Exception as error:
+        receipt['failureCode']=command_failure(error,work,receipt)
+        raise
 
 
 def require(ok,code='ci_preparation_refused'):
@@ -72,6 +186,20 @@ def build_arguments(builder,context,name,source,lock,nonce):
             '--build-arg','MEMLIA_LOCK_SHA256='+lock,'--label','org.memlia.durable-ci='+nonce,
             *(['--build-arg','NEXT_PUBLIC_APP_URL='+ORIGIN] if name=='web' else []),
             '--tag',prefix(nonce)+'/'+name+':candidate','--file',str(context/'Dockerfile'),str(context)]
+
+
+def build_image(name,builder,context,source,lock,nonce,*,docker,one,guard,step):
+    require(name in APPS)
+    def advance(operation):step('image-'+name+'-'+operation)
+    advance('build');docker(build_arguments(builder,context,name,source,lock,nonce),seconds=5400 if name=='web' else 1200)
+    advance('guard');guard()
+    tag=prefix(nonce)+'/'+name+':candidate'
+    advance('push');docker(['push',tag],seconds=300)
+    advance('inspect-tag');item=image_record(one(['image','inspect',tag]),name,source,lock,nonce)
+    advance('pull');docker(['pull','--platform','linux/amd64',item['reference']],seconds=120)
+    advance('inspect-digest');row=one(['image','inspect',item['reference']])
+    advance('verify-digest');require(image_record(row,name,source,lock,nonce)==item)
+    return item
 
 
 def image_record(row,name,source,lock,nonce):
@@ -115,7 +243,7 @@ def project(record):
     if record['status']=='passed':require(record['phase']=='complete' and record['cleanup'] and set(record['images'])==set(APPS) and record.get('durableQualified') is True)
     step=record.get('step',record['phase']);code=record.get('errorCode','none' if record['status']=='passed' else 'unexpected_failure')
     require(step in STEPS and code in ERROR_CODES)
-    require(step==record['phase'] or record['phase']=='contexts' and step in {'cron-assets',*('context-'+name for name in APPS)})
+    require(valid_step(record['phase'],step))
     require((code=='none') == (record['status']=='passed'))
     return {'status':record['status'],'phase':record['phase'],'step':step,'errorCode':code,'cleanup':record['cleanup'],
             'imagesBuilt':len(record['images']),'durableQualified':record.get('durableQualified') is True}
@@ -158,8 +286,12 @@ def run(expected,output,node,wheelhouse):
         count+=1;work=private/('command-%03d'%count);work.mkdir(mode=0o700);write_private(work/'build.private.log',b'')
         item={};record['clientSessions'].append(item)
         if not closing:disk();require(not cancel.is_set())
-        return native.owned_client(argv,work,min(time.monotonic()+seconds,deadline+(240 if closing else 0)),
-            threading.Event() if closing else cancel,capture=capture,receipt=item)
+        try:
+            return owned_command(native,argv,work,min(time.monotonic()+seconds,deadline+(240 if closing else 0)),
+                threading.Event() if closing else cancel,capture=capture,receipt=item)
+        except Exception:
+            if not closing:record['errorCode']=item['failureCode']
+            raise
     def docker(args,**kw):return command(['/usr/bin/env','DOCKER_CONFIG='+str(private/'docker-config'),*native.DOCKER,*args],**kw)
     def swap_command(args,data=None):
         require(data is None,'swap_input_refused')  # Disk-only; no zram tee path.
@@ -193,6 +325,8 @@ def run(expected,output,node,wheelhouse):
                 and info['DockerRootDir']=='/var/lib/docker' and info['MemTotal']>=14*1024**3)
         # No existing UID authority is changed. setpriv and the host peer verify UID1001 natively.
         record['phase']='tools';record['step']='tools'
+        record['buildxCli']=probe_buildx(docker,lambda value:record.update(step=value))
+        record['step']='tools'
         shutil.copyfile(node.resolve(strict=True),tools/'node');(tools/'node').chmod(0o755)
         require(command([str(tools/'node'),'--version'],capture=True).strip()==b'v24.22.0')
         command(['/usr/bin/curl','--fail','--location','--silent','--show-error','--max-time','120',
@@ -312,14 +446,9 @@ def run(expected,output,node,wheelhouse):
                 require(docker(['container','exec',builder_id,'cat','/sys/fs/cgroup/'+path],capture=True).decode().strip()==value)
         kernel()
         for name in APPS:
-            record['phase']='images';record['step']='images';source();disk()
-            docker(build_arguments(builder,private/name,name,expected,lock,nonce),seconds=5400 if name=='web' else 1200)
-            kernel()
-            tag=prefix(nonce)+'/'+name+':candidate'
-            docker(['push',tag],seconds=300)
-            item=image_record(one(['image','inspect',tag]),name,expected,lock,nonce)
-            docker(['pull','--platform','linux/amd64',item['reference']],seconds=120)
-            require(image_record(one(['image','inspect',item['reference']]),name,expected,lock,nonce)==item)
+            record['phase']='images';record['step']='image-'+name+'-preflight';source();disk()
+            item=build_image(name,builder,private/name,expected,lock,nonce,docker=docker,one=one,guard=kernel,
+                             step=lambda value:record.update(step=value))
             images[name]=item;record['images'][name]=item
         # The builder is stopped before runtime services compete for memory.
         docker(['container','stop','--time','10',builder_id])
@@ -385,7 +514,7 @@ proxy_set_header X-Forwarded-Proto https; proxy_set_header X-Forwarded-For $remo
         record['durableQualified']=True;record['phase']='complete';record['step']='complete';record['status']='passed'
     except Exception as error:
         write_private(private/'failure.private.log',traceback.format_exc(limit=12).encode()[:32768])
-        record['errorCode']=error_code(error)
+        record['errorCode']=record.get('errorCode',error_code(error))
     finally:
         # Only packaging/proxy resources are retired here. The native recipe owns its
         # DB/volumes; unknown application state remains retained, never compose down.

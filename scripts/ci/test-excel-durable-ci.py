@@ -146,7 +146,13 @@ class Preparation(unittest.TestCase):
                 path.write_text(json.dumps(good));output=io.StringIO()
                 with contextlib.redirect_stdout(output):exec(code,{})
                 self.assertEqual(json.loads(output.getvalue()),good)
+                image=good|{'phase':'images','step':'image-web-build','errorCode':'observed_cli_flag_refused'}
+                for value in [image,good|{'phase':'tools','step':'buildx-cli-help','errorCode':'cli_option_unavailable'}]:
+                    path.write_text(json.dumps(value));output=io.StringIO()
+                    with contextlib.redirect_stdout(output):exec(code,{})
+                    self.assertEqual(json.loads(output.getvalue()),value)
                 for change in ({'errorCode':'PRIVATE_CANARY'},{'step':'PRIVATE_CANARY'},
+                               {'phase':'images','step':'context-web'},{'phase':'contexts','step':'image-web-build'},
                                {'extra':'PRIVATE_CANARY'},{'errorCode':'none'}):
                     path.write_text(json.dumps(good|change));output=io.StringIO()
                     with contextlib.redirect_stdout(output),self.assertRaises(AssertionError):exec(code,{})
@@ -159,5 +165,136 @@ class Preparation(unittest.TestCase):
             p=Path(d)/'private';ci.write_private(p,b'first')
             with self.assertRaises(FileExistsError):ci.write_private(p,b'second')
             self.assertEqual(p.read_bytes(),b'first');self.assertEqual(p.stat().st_mode&0o777,0o600)
+
+class ImageDiagnostics(unittest.TestCase):
+    def test_image_operation_survives_closed_projection_without_free_data(self):
+        source={'status':'failed','phase':'images','step':'image-web-build','errorCode':'observed_cli_flag_refused','cleanup':True,'images':{},'stderr':'PRIVATE_CANARY'}
+        got=ci.project(source)
+        self.assertEqual(got['step'],'image-web-build')
+        self.assertEqual(got['errorCode'],'observed_cli_flag_refused')
+        self.assertEqual(len(got),7);self.assertNotIn('PRIVATE_CANARY',json.dumps(got))
+        for phase,step in [('contexts','image-web-build'),('images','image-foreign-build'),('images','image-web-PRIVATE_CANARY'),('complete','image-web-build')]:
+            with self.subTest(phase=phase,step=step),self.assertRaises(ValueError):ci.project(source|{'phase':phase,'step':step})
+
+    def test_each_real_image_operation_is_identified_and_first_failure_stops(self):
+        import subprocess
+        operations=['build','guard','push','inspect-tag','pull','inspect-digest','verify-digest']
+        row={'Id':'sha256:'+'d'*64,'Os':'linux','Architecture':'amd64','RepoDigests':['127.0.0.1:15000/c'+('c'*32)+'/web@sha256:'+'e'*64],'Config':{'Labels':{'org.memlia.source':'a'*40,'org.memlia.lock':'b'*64,'org.memlia.durable-ci':'c'*32}}}
+        for failure in [None,*operations]:
+            stages=[];commands=[]
+            def check():
+                if stages[-1]=='image-web-'+str(failure):raise subprocess.CalledProcessError(1,['PRIVATE_CANARY'])
+            def docker(args,**kw):commands.append(args);check()
+            def one(args):
+                commands.append(args)
+                if failure=='verify-digest' and stages[-1]=='image-web-inspect-digest':return row|{'Id':'sha256:'+'f'*64}
+                check();return row
+            def execute():return ci.build_image('web','owned',Path('/context'),'a'*40,'b'*64,'c'*32,docker=docker,one=one,guard=check,step=stages.append)
+            if failure is None:
+                self.assertEqual(execute()['imageId'],row['Id']);self.assertEqual(stages,['image-web-'+op for op in operations])
+                self.assertEqual(commands[0][0:2],['buildx','build']);self.assertEqual(commands[1][0],'push')
+                self.assertEqual(commands[3][0],'pull')
+            else:
+                with self.subTest(failure=failure),self.assertRaises((subprocess.CalledProcessError,ValueError)):execute()
+                self.assertEqual(stages,['image-web-'+op for op in operations[:operations.index(failure)+1]])
+
+    def test_recognized_cli_buildkit_and_runtime_observations_never_echo_raw(self):
+        cases=[(b'unknown flag: --cgroup-parent\n','observed_cli_flag_refused'),
+               (b'ERROR: failed to build: failed to solve: write PRIVATE_CANARY: no space left on device\n','observed_no_space'),
+               (b'Error response from daemon: PRIVATE_CANARY: x509: certificate signed by unknown authority\n','observed_tls_refused'),
+               (b'Error response from daemon: PRIVATE_CANARY: connect: connection refused\n','observed_connection_refused'),
+               (b'#17 12.34 error: lockfile had changes, but lockfile is frozen\n','observed_lockfile_frozen'),
+               (b'#17 1.25 FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory\n','observed_js_heap_limit'),
+               (b'ERROR: failed to build: failed to solve: process "PRIVATE_CANARY" did not complete successfully: exit code: 137\n','observed_exit_137'),
+               (b'ERROR: failed to build: failed to solve: process "PRIVATE_CANARY" did not complete successfully: exit code: 1\n','observed_process_exit')]
+        for raw,expected in cases:
+            with self.subTest(expected=expected):
+                got=ci.classify_command_output(raw);self.assertEqual(got,expected)
+                self.assertNotIn('PRIVATE_CANARY',got);self.assertIn(got,ci.ERROR_CODES)
+
+    def test_arbitrary_substrings_ansi_splices_contradictions_and_bounds_remain_unknown(self):
+        for raw in [b'PRIVATE_CANARY unknown flag: --cgroup-parent',b'RUN echo "no space left on device"',b'unknown flag: --PRIVATE_CANARY',b'unknown flag: --cgroup-parent;PRIVATE_CANARY',b'unkno\x1b[31mwn flag: --cgroup-parent\n',b'\xffunknown flag: --cgroup-parent',b'\x00unknown flag: --cgroup-parent',b'PRIVATE_CANARY\vunknown flag: --cgroup-parent',b'unknown flag: --cgroup-parent\vPRIVATE_CANARY',b'PRIVATE_CANARY\xe2\x80\xa8unknown flag: --cgroup-parent',b'unknown flag: --cgroup-parent\nERROR: failed to build: no space left on device\n']:
+            with self.subTest(raw=raw):self.assertEqual(ci.classify_command_output(raw),'diagnostic_unknown')
+        self.assertEqual(ci.classify_command_output(b'\x1b[31munknown flag: --cgroup-parent\x1b[0m\n'),'observed_cli_flag_refused')
+        self.assertEqual(ci.classify_command_output(b'x'*(ci.DIAGNOSTIC_BYTES+1)),'diagnostic_truncated')
+        self.assertEqual(ci.classify_command_output(b'x'*8193),'diagnostic_unknown')
+
+    def test_private_log_requires_closed_owner_exact_file_and_full_capture(self):
+        import os
+        with tempfile.TemporaryDirectory() as d:
+            work=Path(d);work.chmod(0o700);p=work/'build.private.log'
+            closed={'pid':123,'waited':True,'groupClosed':True}
+            error=ValueError('recipe_build_failed')
+            self.assertEqual(ci.command_failure(error,work,closed),'diagnostic_unavailable')
+            ci.write_private(p,b'unknown flag: --cgroup-parent\n')
+            self.assertEqual(ci.command_failure(error,work,closed),'observed_cli_flag_refused')
+            self.assertEqual(ci.command_failure(error,work,{'waited':True,'groupClosed':False}),'diagnostic_unavailable')
+            self.assertEqual(ci.command_failure(ValueError('recipe_build_log_limit'),work,closed),'diagnostic_truncated')
+            self.assertEqual(ci.command_failure(ValueError('recipe_build_interrupted'),work,closed),'command_interrupted')
+            self.assertEqual(ci.command_failure(ValueError('PRIVATE_CANARY'),work,closed),'preparation_refused')
+            p.chmod(0o644);self.assertEqual(ci.command_failure(error,work,closed),'diagnostic_unavailable')
+            p.chmod(0o600);other=work/'link';os.link(p,other)
+            self.assertEqual(ci.command_failure(error,work,closed),'diagnostic_unavailable');other.unlink()
+            p.unlink();p.symlink_to('/dev/null');self.assertEqual(ci.command_failure(error,work,closed),'diagnostic_unavailable')
+
+    def test_failure_transport_keeps_raw_before_classification_nonzero_and_no_retry(self):
+        import threading,time
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as d:
+            work=Path(d);work.chmod(0o700);ci.write_private(work/'build.private.log',b'')
+            calls=[];raw=b'PRIVATE_CANARY\nunknown flag: --cgroup-parent\n';receipt={}
+            def client(argv,target,deadline,cancel,**kwargs):
+                calls.append(argv)
+                with (target/'build.private.log').open('ab') as out:out.write(raw)
+                kwargs['receipt'].update(pid=123,waited=True,groupClosed=True)
+                raise ValueError('recipe_build_failed')
+            original=ci.classify_command_output
+            def observed(data):self.assertEqual((work/'build.private.log').read_bytes(),raw);return original(data)
+            with patch.object(ci,'classify_command_output',observed),self.assertRaisesRegex(ValueError,'recipe_build_failed'):
+                ci.owned_command(SimpleNamespace(owned_client=client),['PRIVATE_CANARY'],work,time.monotonic()+3,threading.Event(),receipt=receipt)
+            self.assertEqual(len(calls),1);self.assertEqual(receipt['failureCode'],'observed_cli_flag_refused')
+            self.assertEqual((work/'build.private.log').read_bytes(),raw);self.assertNotIn('PRIVATE_CANARY',receipt['failureCode'])
+
+    def test_buildx_probe_checks_real_usage_exact_option_before_any_build(self):
+        calls=[];steps=[]
+        outputs=[b'github.com/docker/buildx v0.29.1 '+b'a'*40+b'\n',b'Usage:  docker buildx build [OPTIONS] PATH | URL | -\n\n      --cgroup-parent string   Parent cgroup\n']
+        def execute(args,**kw):calls.append((args,kw));return outputs[len(calls)-1]
+        result=ci.probe_buildx(execute,steps.append)
+        self.assertEqual(steps,['buildx-cli-version','buildx-cli-help'])
+        self.assertEqual([r[0] for r in calls],[['buildx','version'],['buildx','build','--help']])
+        self.assertTrue(all(r[1]=={'capture':True,'seconds':15} for r in calls))
+        self.assertTrue(result['realUsage']);self.assertTrue(result['cgroupParentListed'])
+        self.assertEqual(set(result),{'realUsage','cgroupParentListed','versionBytes','helpBytes'})
+        self.assertTrue(ci.valid_step('tools','buildx-cli-help'))
+        self.assertFalse(ci.valid_step('images','buildx-cli-help'))
+
+    def test_buildx_probe_refuses_missing_option_or_unknown_help_without_building(self):
+        version=b'github.com/docker/buildx v0.29.1 '+b'a'*40+b'\n'
+        real=b'Usage:  docker buildx build [OPTIONS] PATH | URL | -\n'
+        for help_text,code in [(real+b'      --load Load\n','cli_option_unavailable'),
+                               (real+b'      --cgroup-parent-fake string nope\n','cli_option_unavailable'),
+                               (b'Usage: docker [OPTIONS] COMMAND\n      --cgroup-parent string PRIVATE_CANARY\n','diagnostic_unknown'),
+                               (real+b'\x1b[31m      --cgroup-parent string nope\n','diagnostic_unknown'),
+                               (real+b'      --cgroup-parent string one\n      --cgroup-parent string two\n','diagnostic_unknown'),
+                               (b'PRIVATE_CANARY'+b'x'*65536,'diagnostic_unknown')]:
+            calls=[]
+            def execute(args,**kw):calls.append(args);return version if len(calls)==1 else help_text
+            with self.subTest(code=code),self.assertRaises(ValueError) as caught:ci.probe_buildx(execute,lambda _:None)
+            self.assertEqual(ci.error_code(caught.exception),code)
+            self.assertEqual(len(calls),2);self.assertNotIn('PRIVATE_CANARY',ci.error_code(caught.exception))
+
+    @unittest.skipUnless(hasattr(__import__('os'),'waitid'),'native WNOWAIT port unavailable on this interpreter')
+    def test_linux_native_nonzero_subprocess_capture_without_docker(self):
+        import sys,time,threading
+        native=ci.load(ci.ROOT/'scripts/ci/workflow-worker-image.py','native_failed_diagnostic')
+        with tempfile.TemporaryDirectory() as d:
+            work=Path(d);work.chmod(0o700);ci.write_private(work/'build.private.log',b'');receipt={}
+            argv=[sys.executable,'-c',"import sys;print('PRIVATE_CANARY');print('unknown flag: --cgroup-parent',file=sys.stderr);sys.exit(7)"]
+            with self.assertRaisesRegex(ValueError,'recipe_build_failed'):
+                ci.owned_command(native,argv,work,time.monotonic()+5,threading.Event(),receipt=receipt)
+            self.assertEqual(receipt['failureCode'],'observed_cli_flag_refused')
+            self.assertTrue(receipt['waited']);self.assertTrue(receipt['groupClosed'])
+            self.assertIn(b'PRIVATE_CANARY',(work/'build.private.log').read_bytes())
 
 if __name__=='__main__':unittest.main()
