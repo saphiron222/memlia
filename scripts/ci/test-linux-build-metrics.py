@@ -944,5 +944,248 @@ class UIPhaseAdmissionTests(unittest.TestCase):
                     self.assertFalse(marker.exists())
 
 
+class UINetworkPublicationTests(unittest.TestCase):
+    def inspect(self, mode='realtime', networks=None, effective=None):
+        source=(HERE/'run-linux-build.sh').read_text().split('ui_inspect() {',1)[1]
+        code=source.split("<<'PYUI'\n",1)[1].split('\nPYUI',1)[0]
+        prefix='memlia-build-abc123'
+        port='3000' if mode=='web' else '3002'
+        ports={} if mode=='cache' else {port+'/tcp':[{'HostIp':'127.0.0.1','HostPort':port}]}
+        expected={prefix+'-ui':{}}
+        if mode!='cache':expected[prefix+'-ui-front']={}
+        raw={'State':{'Running':True,'OOMKilled':False},
+             'Config':{'User':'1000:1000','Labels':{'org.memlia.ci':prefix}},
+             'HostConfig':{'ReadonlyRootfs':True,'CapDrop':['ALL'],'SecurityOpt':['no-new-privileges:true'],
+                           'Memory':128,'MemorySwap':128,'NanoCpus':500,'PidsLimit':16,'Init':True,'PortBindings':ports},
+             'NetworkSettings':{'Networks':expected if networks is None else networks,
+                                'Ports':ports if effective is None else effective}}
+        with tempfile.TemporaryDirectory() as temporary:
+            path=Path(temporary)/'inspect.json';path.write_text(json.dumps([raw]))
+            with patch.object(sys,'argv',['-',str(path),prefix,mode,'128','500','16','1000:1000']):
+                exec(compile(code,'<native-ui-inspect>','exec'),{})
+
+    def test_services_require_both_networks_and_effective_loopback_publication(self):
+        self.inspect();self.inspect('web');self.inspect('cache')
+        for mode in ('web','realtime'):
+            for effective in ({},{('3000' if mode=='web' else '3002')+'/tcp':None}):
+                with self.subTest(mode=mode,effective=effective),self.assertRaises(AssertionError):
+                    self.inspect(mode,effective=effective)
+
+    def test_internal_only_services_and_frontend_cache_are_refused(self):
+        with self.assertRaises(AssertionError):self.inspect(networks={'memlia-build-abc123-ui':{}})
+        with self.assertRaises(AssertionError):self.inspect('cache',networks={'memlia-build-abc123-ui':{},'memlia-build-abc123-ui-front':{}})
+        with self.assertRaises(AssertionError):self.inspect(networks={'foreign':{}})
+
+    def test_service_start_attaches_only_owned_backend_and_frontend(self):
+        source=(HERE/'run-linux-build.sh').read_text()
+        function=source[source.index('ui_service() {'):source.index('ui_inspect() {')]
+        with tempfile.TemporaryDirectory() as temporary:
+            script='set -euo pipefail\n'+function+"""
+prefix=memlia-build-abc123
+private="$1";root=/owned/source;image=owned-image
+containers=();ui_resources=()
+ui_docker() { printf '%s\\n' "$@" >> "$private/argv"; }
+ui_owns() { return 0; }
+ui_inspect() { return 0; }
+ui_service realtime 256m .5 96 /work/apps/realtime 3002 bun src/index.ts
+"""
+            result=subprocess.run(['bash','-c',script,'-',temporary],capture_output=True,timeout=3)
+            self.assertEqual(result.returncode,0,result.stderr)
+            args=(Path(temporary)/'argv').read_text().splitlines()
+            networks=[args[i+1] for i,x in enumerate(args) if x=='--network']
+            self.assertEqual(networks,['name=memlia-build-abc123-ui,alias=realtime','name=memlia-build-abc123-ui-front'])
+            self.assertEqual(args[args.index('--publish')+1],'127.0.0.1:3002:3002')
+
+
+    def test_frontend_gateway_is_the_only_host_rate_limit_scope(self):
+        source=(HERE/'run-linux-build.sh').read_text().split('  current_stage=ui_network_identity',1)[1]
+        code=source.split("<<'PYUI'\n",1)[1].split('\nPYUI',1)[0]
+        prefix='memlia-build-abc123'
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);(root/'ui').mkdir()
+            (root/'ui/credentials.private.json').write_text('{}')
+            (root/'ui-network.log').write_text('a'*64+'\n')
+            (root/'ui-front-network.log').write_text('b'*64+'\n')
+            rows=[{'Id':'a'*64,'Internal':True,'Labels':{'org.memlia.ci':prefix},'IPAM':{'Config':[{'Gateway':'172.20.0.1'}]}},
+                  {'Id':'b'*64,'Internal':False,'Labels':{'org.memlia.ci':prefix},'IPAM':{'Config':[{'Gateway':'172.21.0.1'}]}}]
+            for foreign in (False,True):
+                if foreign:rows[1]['Labels']={'org.memlia.ci':'foreign'}
+                (root/'ui-networks-inspect.private.json').write_text(json.dumps(rows))
+                with patch.object(sys,'argv',['-',str(root),prefix+'-ui',prefix+'-ui-front']):
+                    if foreign:
+                        with self.assertRaises(AssertionError):exec(compile(code,'<native-network-identity>','exec'),{})
+                    else:exec(compile(code,'<native-network-identity>','exec'),{})
+            self.assertEqual(json.loads((root/'ui/credentials.private.json').read_text())['socketBucketKeys'],
+                             ['route:socket-token-ip:ip:172.21.0.1','route:socket-token-ip:ip:::ffff:172.21.0.1'])
+
+    def test_frontend_cleanup_requires_recorded_id_and_owner(self):
+        source=(HERE/'run-linux-build.sh').read_text()
+        code=source[source.index('  if [[ "${ui_front_created:-0}"'):source.index('  if [[ "${ui_network_created:-0}"')]
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);(root/'ui-front-network.log').write_text('a'*64+'\n')
+            for foreign in (False,True):
+                script="""set -euo pipefail
+private="$1"; prefix=memlia-build-abc123; ui_front_created=1; cleanup_ok=1
+record="$2"
+docker() { if [[ "$2" == inspect ]]; then printf '%s\\n' "$record"; else printf '%s\\n' "$@" > "$private/removed"; fi; }
+"""+code+"\nprintf '%s' \"$cleanup_ok\"\n"
+                record=('b' if foreign else 'a')*64+' memlia-build-abc123'
+                removal=root/'removed';removal.unlink(missing_ok=True)
+                result=subprocess.run(['bash','-c',script,'-',temporary,record],capture_output=True,timeout=3)
+                self.assertEqual(result.returncode,0,result.stderr)
+                self.assertEqual(result.stdout,b'0' if foreign else b'1')
+                self.assertEqual(removal.exists(),not foreign)
+
+
+class RealtimeConnectionDiagnostics(unittest.TestCase):
+    def fragment(self):
+        import ast
+        source=(HERE/'run-linux-build.sh').read_text()
+        block=source.split('  python3 - "$readiness_seconds"',1)[1].split("<<'PYUI'\n",1)[1].split('\nPYUI',1)[0]
+        tree=ast.parse(block)
+        helper=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='diagnose_realtime')
+        return block,compile(ast.Module(body=[helper],type_ignores=[]),'<native-readiness>','exec')
+
+    def exercise(self, mutation=None, expired=False, local_extra=False, symlink=False, whole=False, late_owner=False, command_timeout=False, command_failure=None):
+        import contextlib,io,time,stat,http.client
+        block,helper=self.fragment()
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);identity='a'*64;prefix='memlia-build-abc123'
+            (root/'ui-realtime-start.log').write_text(identity+'\n')
+            foreign=root/'foreign';foreign.write_text('untouched')
+            if symlink:(root/'ui-realtime-connection.private.json').symlink_to(foreign)
+            clock=[10.0];calls=[];connections=[]
+            owner={'id':identity,'image':'image@sha256:'+'b'*64,'owner':prefix,'running':True,
+                   'networks':{prefix+'-ui':{'NetworkID':'c'*64},prefix+'-ui-front':{'NetworkID':'d'*64}},
+                   'ports':{'3002/tcp':[{'HostIp':'127.0.0.1','HostPort':'3002'}]}}
+            if mutation:mutation(owner)
+            def run(argv,**kwargs):
+                calls.append((argv,kwargs));self.assertGreater(kwargs['timeout'],0);self.assertLessEqual(kwargs['timeout'],2)
+                if command_timeout:raise subprocess.TimeoutExpired(argv,kwargs['timeout'],output=b'PRIVATE_CANARY_timeout_stdout',stderr=b'PRIVATE_CANARY_timeout_stderr')
+                if command_failure:
+                    stdout,stderr,code=command_failure
+                    return SimpleNamespace(returncode=code,stdout=stdout,stderr=stderr)
+                if argv[1]=='inspect':
+                    data=dict(owner)
+                    if late_owner and len(calls)>1:data['owner']='replaced'
+                else:
+                    self.assertEqual(argv[1:4],['exec',identity,'/usr/local/bin/node'])
+                    data={'httpStatus':200,'errorCode':None}
+                    if local_extra:data['message']='PRIVATE_CANARY_DSN'
+                return SimpleNamespace(returncode=0,stdout=json.dumps(data).encode(),stderr=b'')
+            class Connection:
+                def __init__(self,host,port,timeout):connections.append(host);self.host=host;self.sock=None
+                def request(self,*args):
+                    if self.host=='localhost':raise ConnectionRefusedError(61,'PRIVATE_CANARY_DSN')
+                def getresponse(self):return SimpleNamespace(status=200)
+                def close(self):pass
+            argv=['-', '1', str(root/'readiness.json'), str(root),prefix,owner['image']]
+            # Expected image is independently captured, never taken from mutated inspect.
+            argv[-1]='image@sha256:'+'b'*64
+            ns={'http':__import__('http'),'json':json,'time':time,'sys':SimpleNamespace(argv=argv),
+                'Path':Path,'os':os,'stat':stat,'subprocess':subprocess,'re':__import__('re'),
+                'started':10.0,'end':10.0 if expired else 20.0}
+            output=io.StringIO();native_loads=json.loads
+            def guarded_loads(data,*args,**kwargs):
+                if isinstance(data,bytes):
+                    captured=root/('ui-realtime-command-'+str(len(calls))+'.private.json')
+                    self.assertTrue(captured.exists(),'command trace must precede JSON parsing')
+                return native_loads(data,*args,**kwargs)
+            with patch.object(subprocess,'run',run),patch.object(http.client,'HTTPConnection',Connection), \
+                 patch.object(time,'monotonic',lambda:clock[0]),patch.object(time,'sleep',lambda n:clock.__setitem__(0,clock[0]+n)), \
+                 patch.object(sys,'argv',argv),patch.object(json,'loads',guarded_loads),contextlib.redirect_stdout(output):
+                if whole:
+                    with self.assertRaises(SystemExit):exec(compile(block,'<native-readiness>','exec'),ns)
+                else:
+                    exec(helper,ns);ns['diagnose_realtime'](ConnectionRefusedError(61,'PRIVATE_CANARY_DSN'))
+            public=output.getvalue();self.assertNotIn('PRIVATE_CANARY',public)
+            records=[json.loads((root/'ui-realtime-connection.json').read_text())]
+            self.assertNotIn('PRIVATE_CANARY',json.dumps(records))
+            target=root/'ui-realtime-connection.private.json'
+            evidence=None if target.is_symlink() or not target.exists() else json.loads(target.read_text())
+            mode=None if evidence is None else stat.S_IMODE(target.stat().st_mode)
+            result=json.loads((root/'readiness.json').read_text()) if whole else None
+            if evidence is not None:
+                evidence['commands']=[json.loads(p.read_text()) for p in sorted(root.glob('ui-realtime-command-*.private.json'))]
+                self.assertTrue(all(stat.S_IMODE(p.stat().st_mode)==0o600 for p in root.glob('ui-realtime-command-*.private.json')))
+            self.assertEqual(foreign.read_text(),'untouched')
+            return records,calls,connections,evidence,mode,result
+
+    def test_real_fragment_preserves_private_error_before_closed_pair(self):
+        records,calls,connections,private,mode,_=self.exercise()
+        self.assertEqual(len(records),1);r=records[0]
+        self.assertEqual(r['status'],'observed');self.assertEqual(r['hostHttpStatus'],200)
+        self.assertEqual(r['localHttpStatus'],200);self.assertTrue(r['publishedIPv4Matched'])
+        self.assertTrue(r['namespaceMatched']);self.assertTrue(r['ownerVerified'])
+        self.assertIn('PRIVATE_CANARY',private['message']);self.assertEqual(mode,0o600)
+        self.assertEqual(connections,['127.0.0.1']);self.assertEqual(len(calls),3)
+
+    def test_foreign_identity_image_label_or_namespace_never_executes_probe(self):
+        for key,value in [('id','d'*64),('image','foreign'),('owner','foreign'),('networks',{'foreign':{}})]:
+            with self.subTest(key=key):
+                records,calls,connections,_,_,_=self.exercise(lambda o:o.update({key:value}))
+                self.assertEqual(records[0]['status'],'refused');self.assertEqual(connections,[])
+                self.assertFalse(any(c[0][1]=='exec' for c in calls))
+
+    def test_expired_budget_preserves_error_without_any_external_call(self):
+        records,calls,connections,private,_,_=self.exercise(expired=True)
+        self.assertEqual(records[0]['status'],'budget_expired');self.assertEqual(calls,[])
+        self.assertEqual(connections,[]);self.assertIsNotNone(private)
+
+    def test_effective_port_mismatch_is_evidence_not_owner_bypass(self):
+        records,calls,connections,*_=self.exercise(lambda o:o.update(ports={}))
+        self.assertEqual(records[0]['status'],'refused');self.assertFalse(records[0]['publishedIPv4Matched'])
+        self.assertEqual(connections,[]);self.assertEqual(len(calls),1)
+
+    def test_foreign_local_output_and_preexisting_private_symlink_refuse(self):
+        records,*_=self.exercise(local_extra=True);self.assertEqual(records[0]['status'],'refused')
+        records,calls,connections,*_=self.exercise(symlink=True)
+        self.assertEqual(records[0]['status'],'refused');self.assertEqual(calls,[]);self.assertEqual(connections,[])
+
+    def test_owner_change_after_exec_and_external_timeout_are_not_observed(self):
+        records,*_=self.exercise(late_owner=True)
+        self.assertEqual(records[0]['status'],'refused');self.assertIsNone(records[0]['localHttpStatus'])
+        records,calls,connections,*_=self.exercise(command_timeout=True)
+        self.assertEqual(records[0]['status'],'budget_expired');self.assertEqual(connections,[])
+        self.assertEqual(len(calls),1)
+        import base64
+        records,_,_,private,_,_=self.exercise(command_timeout=True)
+        command=private['commands'][0];self.assertTrue(command['timedOut'])
+        self.assertIn(b'PRIVATE_CANARY_timeout',base64.b64decode(command['stdoutBase64']))
+        self.assertIn(b'PRIVATE_CANARY_timeout',base64.b64decode(command['stderrBase64']))
+        for stdout,stderr,code in [(b'PRIVATE_CANARY_bad_json',b'PRIVATE_CANARY_stderr',0),
+                                   (b'PRIVATE_CANARY_nonzero',b'PRIVATE_CANARY_stderr',2),
+                                   (b'x'*9000,b'y'*2000,0)]:
+            records,_,connections,private,_,_=self.exercise(command_failure=(stdout,stderr,code))
+            self.assertEqual(records[0]['status'],'refused');self.assertEqual(connections,[])
+            command=private['commands'][0]
+            self.assertEqual(base64.b64decode(command['stdoutBase64']),stdout[:8193])
+            self.assertEqual(base64.b64decode(command['stderrBase64']),stderr[:1025])
+            self.assertEqual(command['stdoutTruncated'],len(stdout)>8192)
+            self.assertEqual(command['stderrTruncated'],len(stderr)>1024)
+            self.assertEqual(command['returnCode'],code)
+
+    def test_both_existing_readers_reject_canaries_unknown_fields_and_bounds(self):
+        spec=importlib.util.spec_from_file_location('chat_ci_projection',HERE/'test-linux-chat-ci.py')
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        value=self.exercise()[0][0]
+        readers=[lambda value=None,**kw:module.ClosedPublication().emit(value,name='ui-realtime-connection',**kw),
+                 lambda value=None,**kw:module.ClosedReadinessPublication().emit('ui-realtime-connection.json',value,**kw)]
+        for emit in readers:
+            accepted=emit(value);self.assertEqual(accepted.returncode,0);self.assertEqual(json.loads(accepted.stdout),value)
+            for bad in [[],{**value,'secret':'PRIVATE_CANARY'}, {**value,'phase':'PRIVATE_CANARY'},
+                        {**value,'hostErrorCode':'PRIVATE_CANARY'},{**value,'elapsedMs':True},
+                        {**value,'elapsedMs':180001},{**value,'hostHttpStatus':True},
+                        {**value,'ownerVerified':False},{**value,'namespaceMatched':1},
+                        {**value,'localHttpStatus':None},{**value,'status':'passed'}]:
+                rejected=emit(bad);self.assertNotEqual(rejected.returncode,0)
+                self.assertNotIn('PRIVATE_CANARY',rejected.stdout+rejected.stderr)
+            for kw in ({'raw':' '*4097},{'link':True}):self.assertNotEqual(emit(value,**kw).returncode,0)
+
+    def test_pair_success_does_not_replace_failed_readiness_and_runs_once(self):
+        records,_,_,_,_,result=self.exercise(whole=True)
+        self.assertEqual(len(records),1);self.assertEqual(records[0]['localHttpStatus'],200)
+        self.assertEqual(result['status'],'failed');self.assertEqual(result['errorClass'],'connection')
+
 if __name__ == '__main__':
     unittest.main()

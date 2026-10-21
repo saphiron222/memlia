@@ -6,7 +6,7 @@ umask 077
 scope=build
 ui_selected=${MEMLIA_CI_CHAT_UI:-0}
 [[ "$ui_selected" == 0 || "$ui_selected" == 1 ]] || exit 2
-ui_verified=0; ui_cleanup_failed=0; ui_seeded=0; ui_network_created=0; ui_resources=()
+ui_verified=0; ui_cleanup_failed=0; ui_seeded=0; ui_network_created=0; ui_front_created=0; ui_resources=()
 swap_variant=''
 if [[ "$#" != 0 ]]; then
   if [[ "$#" == 1 && "$1" == --validation-only ]]; then
@@ -56,6 +56,11 @@ cleanup() {
     remaining="$(docker ps -a --filter "name=^/${name}$" --format '{{.Names}}' 2>/dev/null)"
     [[ $? == 0 && -z "$remaining" ]] || cleanup_ok=0
   done
+  if [[ "${ui_front_created:-0}" == 1 ]]; then
+    if [[ "$(docker network inspect --format '{{.Id}} {{index .Labels "org.memlia.ci"}}' "$prefix-ui-front" 2>/dev/null)" == "$(cat "$private/ui-front-network.log") $prefix" ]]; then
+      docker network rm "$prefix-ui-front" > /dev/null 2>&1 || cleanup_ok=0
+    else cleanup_ok=0; fi
+  fi
   if [[ "${ui_network_created:-0}" == 1 ]]; then
     if [[ "$(docker network inspect --format '{{.Id}} {{index .Labels "org.memlia.ci"}}' "$prefix-ui" 2>/dev/null)" == "$(cat "$private/ui-network.log") $prefix" ]]; then
       docker network rm "$prefix-ui" > /dev/null 2>&1 || cleanup_ok=0
@@ -108,7 +113,7 @@ PY
 import json,sys
 from pathlib import Path
 for path in sorted(Path(sys.argv[1]).glob('*.json')):
-    if path.name in ('chat-ui.json','ui-readiness.json','ui-service-web.json','ui-service-realtime.json','ui-service-cache.json','ui-realtime-startup.json'):
+    if path.name in ('chat-ui.json','ui-readiness.json','ui-service-web.json','ui-service-realtime.json','ui-service-cache.json','ui-realtime-startup.json','ui-realtime-connection.json'):
         import os,stat
         if Path(sys.argv[1]).is_symlink() or path.is_symlink(): raise SystemExit('Invalid UI receipt')
         fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
@@ -130,6 +135,20 @@ for path in sorted(Path(sys.argv[1]).glob('*.json')):
             if receipt['httpStatus'] is not None and (type(receipt['httpStatus'])is not int or not 100<=receipt['httpStatus']<=599):raise SystemExit('Invalid UI receipt')
             if receipt['errorClass'] not in (None,'timeout','connection','http','os','unexpected'):raise SystemExit('Invalid UI receipt')
             if receipt['status']=='passed' and (receipt['service']!='web' or receipt['httpStatus']!=200 or receipt['errorClass']is not None):raise SystemExit('Invalid UI receipt')
+        elif path.name=='ui-realtime-connection.json':
+            try:
+                if type(receipt)is not dict or set(receipt)!={'phase','status','elapsedMs','ownerVerified','namespaceMatched','publishedIPv4Matched','hostHttpStatus','hostErrorCode','localHttpStatus','localErrorCode'} or receipt['phase']!='ui-realtime-connection':raise ValueError()
+                if receipt['status'] not in ('observed','refused','budget_expired'):raise ValueError()
+                if type(receipt['elapsedMs'])is not int or not 0<=receipt['elapsedMs']<=180000:raise ValueError()
+                if any(type(receipt[k])is not bool for k in ('ownerVerified','namespaceMatched','publishedIPv4Matched')):raise ValueError()
+                if receipt['status']=='observed' and not (receipt['ownerVerified'] and receipt['namespaceMatched']):raise ValueError()
+                for side in ('host','local'):
+                    status,code=receipt[side+'HttpStatus'],receipt[side+'ErrorCode']
+                    if status is not None and (type(status)is not int or not 100<=status<=599):raise ValueError()
+                    if code not in (None,'ECONNREFUSED','ECONNRESET','ETIMEDOUT','EHOSTUNREACH','ENETUNREACH','EACCES','OTHER'):raise ValueError()
+                    if status is not None and code is not None:raise ValueError()
+                    if receipt['status']=='observed' and status is None and code is None:raise ValueError()
+            except (ValueError,TypeError,KeyError):raise SystemExit('Invalid UI receipt') from None
         elif path.name=='ui-realtime-startup.json':
             if set(receipt)!={'phase','service','logStatus','lastMarker','errorCode'} or receipt['phase']!='ui-realtime-startup' or receipt['service']!='realtime':raise SystemExit('Invalid UI receipt')
             if receipt['logStatus'] not in ('observed','empty','unavailable','refused'):raise SystemExit('Invalid UI receipt')
@@ -400,15 +419,24 @@ a=Path("/work/apps/sim");m.verify_artifacts(a,True);p=Path("/scratch/ui-stage");
   current_stage=ui_network_create
   ui_docker network create --internal --label "org.memlia.ci=$prefix" "$prefix-ui" > "$private/ui-network.log" 2>&1
   ui_network_created=1
+  # Docker does not publish host ports for services attached only to internal networks.
+  # Only web/realtime join this frontend; database/cache keep their existing networks.
+  ui_docker network create --label "org.memlia.ci=$prefix" "$prefix-ui-front" > "$private/ui-front-network.log" 2>&1
+  ui_front_created=1
   current_stage=ui_network_connect
   ui_docker network connect --alias database "$prefix-ui" "$prefix-database" > "$private/ui-network-connect.log" 2>&1
   current_stage=ui_network_identity
-  python3 - "$private" "$prefix-ui" <<'PYUI'
-import json,subprocess,sys
+  ui_docker network inspect "$prefix-ui" "$prefix-ui-front" > "$private/ui-networks-inspect.private.json" 2> "$private/ui-networks-inspect-error.private.log"
+  python3 - "$private" "$prefix-ui" "$prefix-ui-front" <<'PYUI'
+import json,sys
 from pathlib import Path
-p=Path(sys.argv[1]);raw=json.loads(subprocess.check_output(['docker','network','inspect',sys.argv[2]],timeout=10))[0]
+p=Path(sys.argv[1]);raw,front=json.loads((p/'ui-networks-inspect.private.json').read_text())
 assert raw['Internal'] and raw['Labels']=={'org.memlia.ci':sys.argv[2].removesuffix('-ui')}
-gateway=raw['IPAM']['Config'][0]['Gateway']
+# Browser host connections enter through the published frontend's gateway.
+assert front['Internal'] is False and front['Labels']==raw['Labels']
+assert front['Id']==(p/'ui-front-network.log').read_text().strip()
+assert raw['Id']==(p/'ui-network.log').read_text().strip()
+gateway=front['IPAM']['Config'][0]['Gateway']
 assert all(c in '0123456789.' for c in gateway)
 f=p/'ui/credentials.private.json';value=json.loads(f.read_text());value['socketBucketKeys']=['route:socket-token-ip:ip:'+gateway,'route:socket-token-ip:ip:::ffff:'+gateway];f.write_text(json.dumps(value)+'\n')
 PYUI
@@ -428,10 +456,12 @@ PYUI
   current_stage=ui_readiness
   local readiness_seconds
   readiness_seconds="$(ui_remaining 180 150)" || return 1
-  python3 - "$readiness_seconds" "$metrics/ui-readiness.json" <<'PYUI'
+  python3 - "$readiness_seconds" "$metrics/ui-readiness.json" "$private" "$prefix" "$image" <<'PYUI'
 import http.client,json,time,sys
 from pathlib import Path
-end=time.monotonic()+int(sys.argv[1])
+started=time.monotonic()
+end=started+int(sys.argv[1])
+diagnosed=False
 receipt={'phase':'ui-readiness','status':'failed','service':'realtime','httpStatus':None,'errorClass':None}
 def error_class(error):
     if isinstance(error,TimeoutError):return 'timeout'
@@ -439,6 +469,106 @@ def error_class(error):
     if isinstance(error,http.client.HTTPException):return 'http'
     if isinstance(error,OSError):return 'os'
     return 'unexpected'
+def diagnose_realtime(error):
+    # Diagnostic only: never changes readiness or extends its deadline.
+    import os,re,stat,subprocess
+    result={'phase':'ui-realtime-connection','status':'refused','elapsedMs':0,
+            'ownerVerified':False,'namespaceMatched':False,'publishedIPv4Matched':False,
+            'hostHttpStatus':None,'hostErrorCode':None,'localHttpStatus':None,'localErrorCode':None}
+    # Time of the initial connection failure, relative to readiness start.
+    result['elapsedMs']=max(0,min(180000,int((time.monotonic()-started)*1000)))
+    limit=min(end,time.monotonic()+6)
+    codes={'ECONNREFUSED','ECONNRESET','ETIMEDOUT','EHOSTUNREACH','ENETUNREACH','EACCES'}
+    def remaining():
+        left=limit-time.monotonic()
+        if left<=0:raise TimeoutError()
+        return min(2,left)
+    command_number=0
+    def command(args):
+        import base64
+        nonlocal command_number
+        timeout=remaining()
+        command_number+=1
+        if command_number>3:raise ValueError()
+        stdout=stderr=b'';returncode=None;failure=None
+        try:
+            p=subprocess.run(['docker',*args],stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=timeout)
+            stdout,stderr,returncode=p.stdout,p.stderr,p.returncode
+        except subprocess.TimeoutExpired as error:
+            stdout,stderr=error.stdout or b'',error.stderr or b'';failure=error
+        except OSError as error:failure=error
+        # Preserve bounded bytes before exit-code checks, JSON parsing or public projection.
+        trace={'returnCode':returncode,'timedOut':isinstance(failure,subprocess.TimeoutExpired),
+               'errorType':type(failure).__name__ if failure is not None else None,
+               'errorMessage':str(failure)[:1024] if failure is not None else None,
+               'stdoutBase64':base64.b64encode(stdout[:8193]).decode('ascii'),
+               'stderrBase64':base64.b64encode(stderr[:1025]).decode('ascii'),
+               'stdoutTruncated':len(stdout)>8192,'stderrTruncated':len(stderr)>1024}
+        target=Path(private)/('ui-realtime-command-'+str(command_number)+'.private.json')
+        fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+        with os.fdopen(fd,'w') as f:f.write(json.dumps(trace,sort_keys=True)+'\n')
+        if failure is not None:raise failure
+        if returncode or trace['stdoutTruncated'] or trace['stderrTruncated']:raise ValueError()
+        return json.loads(stdout)
+    try:
+        private,prefix,image=sys.argv[3:6]
+        # The first primitive error stays private, even when ownership/probing refuses.
+        payload=json.dumps({'type':type(error).__name__[:80],'message':str(error)[:1024]},ensure_ascii=True).encode()
+        fd=os.open(Path(private)/'ui-realtime-connection.private.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+        with os.fdopen(fd,'wb') as f:f.write(payload)
+        remaining()
+        if not re.fullmatch(r'memlia-build-[a-f0-9]+',prefix):raise ValueError()
+        fd=os.open(Path(private)/'ui-realtime-start.log',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+        with os.fdopen(fd,'rb') as f:
+            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):raise ValueError()
+            identity=f.read(66).decode().strip()
+        if not re.fullmatch(r'[a-f0-9]{64}',identity):raise ValueError()
+        template='{"id":{{json .Id}},"image":{{json .Config.Image}},"owner":{{json (index .Config.Labels "org.memlia.ci")}},"running":{{json .State.Running}},"networks":{{json .NetworkSettings.Networks}},"ports":{{json .NetworkSettings.Ports}}}'
+        def inspect_owned():
+            state=command(['inspect','--format',template,identity])
+            if (state['id']!=identity or state['image']!=image or state['owner']!=prefix
+                or state['running'] is not True or set(state['networks'])!={prefix+'-ui',prefix+'-ui-front'}):raise ValueError()
+            if any(not re.fullmatch(r'[a-f0-9]{64}',n['NetworkID']) for n in state['networks'].values()):raise ValueError()
+            return state
+        state=inspect_owned();result.update(ownerVerified=True,namespaceMatched=True)
+        result['publishedIPv4Matched']=state['ports']=={'3002/tcp':[{'HostIp':'127.0.0.1','HostPort':'3002'}]}
+        if not result['publishedIPv4Matched']:raise ValueError() # Never probe an unowned host port.
+        c=http.client.HTTPConnection('127.0.0.1',3002,timeout=remaining())
+        try:
+            c.request('GET','/health')
+            c.timeout=remaining()
+            if c.sock is not None:c.sock.settimeout(c.timeout)
+            response=c.getresponse()
+            if type(response.status)is not int or not 100<=response.status<=599:raise ValueError()
+            result['hostHttpStatus']=response.status
+        except (OSError,http.client.HTTPException) as failure:
+            import errno
+            code=errno.errorcode.get(getattr(failure,'errno',None))
+            result['hostErrorCode']=code if code in codes else 'ETIMEDOUT' if isinstance(failure,TimeoutError) else 'OTHER'
+        finally:c.close()
+        milliseconds=max(1,int(remaining()*1000))
+        # Fixed URL and no body collection. The remote timer also closes the exec child
+        # if the Docker client reaches its deadline; all resources belong to this container.
+        probe="""const http=require('node:http');const ms=Number(process.argv[1]);let done=false;
+const codes=new Set(['ECONNREFUSED','ECONNRESET','ETIMEDOUT','EHOSTUNREACH','ENETUNREACH','EACCES']);
+let request;const finish=(httpStatus,errorCode)=>{if(done)return;done=true;clearTimeout(timer);request?.destroy();console.log(JSON.stringify({httpStatus,errorCode}));};
+const timer=setTimeout(()=>finish(null,'ETIMEDOUT'),ms);
+request=http.get('http://127.0.0.1:3002/health',response=>{const status=response.statusCode;response.destroy();finish(status,null);});
+request.on('error',e=>finish(null,codes.has(e.code)?e.code:'OTHER'));"""
+        local=command(['exec',identity,'/usr/local/bin/node','-e',probe,str(milliseconds)])
+        if type(local)is not dict or set(local)!={'httpStatus','errorCode'}:raise ValueError()
+        status,code=local['httpStatus'],local['errorCode']
+        if status is not None and (type(status)is not int or not 100<=status<=599):raise ValueError()
+        if code not in codes|{'OTHER',None} or (status is None)==(code is None):raise ValueError()
+        inspect_owned() # No result is accepted from a replaced or no-longer-owned service.
+        result.update(localHttpStatus=status,localErrorCode=code,status='observed')
+    except (TimeoutError,subprocess.TimeoutExpired):result['status']='budget_expired'
+    except Exception:result['status']='refused'
+    finally:
+        target=Path(sys.argv[2]).with_name('ui-realtime-connection.json')
+        fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+        with os.fdopen(fd,'w') as f:f.write(json.dumps(result,sort_keys=True)+'\n')
+
 try:
     for service,port,path in (('realtime',3002,'/health'),('web',3000,'/login')):
         receipt.update(service=service,httpStatus=None,errorClass=None)
@@ -450,7 +580,12 @@ try:
                 if type(r.status)is not int or not 100<=r.status<=599:raise http.client.HTTPException()
                 receipt.update(httpStatus=r.status,errorClass=None)
                 if r.status==200:break
-            except (OSError,TimeoutError) as error:receipt['errorClass']=error_class(error)
+            except (OSError,TimeoutError) as error:
+                receipt['errorClass']=error_class(error)
+                if service=='realtime' and isinstance(error,ConnectionError) and not diagnosed:
+                    diagnosed=True
+                    try:diagnose_realtime(error)
+                    except Exception:raise SystemExit(1) from None # Preserve the original readiness failure.
             finally:c.close()
             time.sleep(.5)
     receipt['status']='passed'
@@ -473,7 +608,7 @@ PYUI
 ui_service() {
   local mode="$1" memory="$2" cpu="$3" pids="$4" cwd="$5" port="$6"; shift 6
   local name="$prefix-ui-$mode"; containers+=("$name"); ui_resources+=("$name")
-  ui_docker run -d --name "$name" --label "org.memlia.ci=$prefix" --platform linux/amd64 --network "$prefix-ui" --network-alias "$mode" \
+  ui_docker run -d --name "$name" --label "org.memlia.ci=$prefix" --platform linux/amd64 --network "name=$prefix-ui,alias=$mode" --network "name=$prefix-ui-front" \
     --publish "127.0.0.1:$port:$port" --init --user "$(id -u):$(id -g)" --read-only --cap-drop ALL --security-opt no-new-privileges:true \
     --memory "$memory" --memory-swap "$memory" --cpus "$cpu" --pids-limit "$pids" \
     --env-file "$private/ui-$mode.env" --mount "type=bind,src=$root,dst=/work,readonly" --mount "type=bind,src=$private/ui-runtime,dst=/scratch" --mount "type=bind,src=$private/ui-policy.json,dst=/etc/memlia/chat-policy.json,readonly" \
@@ -493,12 +628,13 @@ assert raw['State']['Running'] and not raw['State']['OOMKilled']
 assert raw['Config']['User']==sys.argv[7] and raw['Config']['Labels']['org.memlia.ci']==sys.argv[2]
 assert h['ReadonlyRootfs'] and 'ALL' in h['CapDrop'] and 'no-new-privileges:true' in h['SecurityOpt']
 assert (h['Memory'],h['MemorySwap'],h['NanoCpus'],h['PidsLimit'])==(int(sys.argv[4]),int(sys.argv[4]),int(sys.argv[5]),int(sys.argv[6]))
-assert set(raw['NetworkSettings']['Networks'])=={sys.argv[2]+'-ui'}
+assert set(raw['NetworkSettings']['Networks'])==({sys.argv[2]+'-ui'} if mode=='cache' else {sys.argv[2]+'-ui',sys.argv[2]+'-ui-front'})
 ports=h['PortBindings'] or {}
 if mode=='cache': assert not ports
 else:
     port='3000' if mode=='web' else '3002'
     assert ports=={port+'/tcp':[{'HostIp':'127.0.0.1','HostPort':port}]} and h['Init'] is True
+    assert raw['NetworkSettings']['Ports']==ports # Requested bindings alone do not prove host publication.
 PYUI
 }
 ui_owns() {
