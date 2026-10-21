@@ -36,6 +36,28 @@ IMAGE_STEPS={'image-'+name+'-'+operation for name in APPS for operation in IMAGE
 CLI_STEPS={'buildx-cli-version','buildx-cli-help'}
 STEPS=PHASES|{'cron-assets'}|{'context-'+name for name in APPS}|IMAGE_STEPS|CLI_STEPS
 DIAGNOSTIC_BYTES=8*1024**2  # Same bound as the existing owned_client capture.
+# Families of the RUN instructions of the five images built by build_image, recognized by the
+# start of the normalized '/bin/sh -c' argument (the RUN text without its --mount flags). Each
+# real RUN, by file:line, is pinned by the tests; anything else, or two families, is 'other'.
+PROCESS_EXIT_FAMILIES=(
+    ('provenance',('set -eu; test "${#MEMLIA_SOURCE_COMMIT}" -eq 40; test "${#MEMLIA_LOCK_SHA256}" -eq 64;',)),
+    ('apt',('apt-get update && apt-get install',)),
+    ('apk',('apk add','test "$(cat /tmp/memlia-build/architecture)" = "$TARGETARCH" && case "$TARGETARCH" in arm64|amd64) ;; '
+            '*) exit 1;; esac && cd /tmp/apk && sha256sum -c SHA256SUMS && apk add')),
+    ('prune',('bun -e \'const fs=require("node:fs"),p="bun.lock"',)),
+    ('install',('HUSKY=0 bun install','bun install','sha256sum bun.lock > /tmp/lock.sha256 && bun install')),
+    ('native_rebuild',('node apps/sim/scripts/verify-oracledb-patch.cjs && node apps/sim/scripts/oracledb-patch-self-test.cjs '
+                       '&& cd node_modules/isolated-vm',)),
+    ('next_build',('bun run build',)),
+    ('bundles',('bun --no-env-file run build:cli-runtime',)),
+    ('bootstrap',('bun build apps/sim/bootstrap.ts',)),
+    ('oracledb_selftest',('node apps/sim/scripts/oracledb-patch-self-test.cjs --worker',)),
+    ('pinned_binary',('test "$TARGETARCH" = amd64 && test "$(node --version)" = v24.22.0 && curl','case "$TARGETARCH" in arm64)')),
+    ('runtime_setup',('groupadd','addgroup','mkdir -p apps/sim/.next/cache','chmod 0755 /usr/local/bin/cron-entrypoint.sh')))
+# 137 keeps observed_exit_137. 134 is SIGABRT (a Node heap abort among others): a class, not a cause.
+PROCESS_EXIT_CLASSES=('1','2','127','134','139')
+PROCESS_EXIT_CODES=frozenset('observed_process_exit_'+family+'_'+kind for family in (*dict(PROCESS_EXIT_FAMILIES),'other')
+                             for kind in (*PROCESS_EXIT_CLASSES,'other'))
 ERROR_CODES={'none','source_refused','file_missing','command_failed','timeout','preparation_refused','unexpected_failure',
              'diagnostic_unknown','diagnostic_unavailable','diagnostic_truncated','command_interrupted','client_ownership_refused',
              'observed_cli_flag_refused','observed_no_space','observed_tls_refused','observed_connection_refused',
@@ -47,7 +69,7 @@ ERROR_CODES={'none','source_refused','file_missing','command_failed','timeout','
              'diagnostic_unknown_control_nul','diagnostic_unknown_control_sgr','diagnostic_unknown_control_escape',
              'diagnostic_unknown_control_escape_csi','diagnostic_unknown_control_sgr_after_prefix',
              'diagnostic_unknown_control_cr','diagnostic_unknown_control_backspace','diagnostic_unknown_control_del',
-             'diagnostic_unknown_control_other','diagnostic_unknown_control_mixed'}
+             'diagnostic_unknown_control_other','diagnostic_unknown_control_mixed'}|PROCESS_EXIT_CODES
 
 def error_code(error):
     # Exact allowlist only: exception text/path/argv never enter the public receipt.
@@ -147,6 +169,10 @@ def classify_command_output(raw,*,buildx_client=False):
             if process_exit is not None and process_exit!=value:return 'diagnostic_unknown_ambiguous'
             process_exit=value
     if len(observed)>1:return 'diagnostic_unknown_ambiguous'
+    if not observed and process_exit=='observed_process_exit' and buildx_client:
+        # Detail from the client's own final line only: raw, unprefixed, no SGR normalization.
+        final=next((line.removesuffix('\r') for line in reversed(lines) if line.removesuffix('\r')),'')
+        return process_exit_detail(final) or process_exit
     return next(iter(observed)) if observed else process_exit or 'diagnostic_unknown_no_marker'
 
 
@@ -168,6 +194,53 @@ def line_markers(line):
     return observed,process_exit
 
 
+def go_unquoted(body):
+    """Inverse of Go strconv.Quote, buildkit's %q, on the text between the quotes; None otherwise.
+
+    Quote only emits these escapes, never octal or \\'. A \\x byte from 0x80 is invalid UTF-8.
+    """
+    named={'a':'\a','b':'\b','f':'\f','n':'\n','r':'\r','t':'\t','v':'\v','\\':'\\','"':'"'}
+    parts=[];pos=0
+    for match in re.finditer(r'\\(?:([abfnrtv\\"])|x([0-9a-fA-F]{2})|u([0-9a-fA-F]{4})|U([0-9a-fA-F]{8}))',body):
+        parts.append(body[pos:match.start()]);pos=match.end()
+        if match[1]:parts.append(named[match[1]]);continue
+        point=int(match[2] or match[3] or match[4],16)
+        if match[2] and point>=0x80 or 0xd800<=point<0xe000 or point>0x10ffff:return None
+        parts.append(chr(point))
+    parts.append(body[pos:])
+    if any('\\' in part or '"' in part for part in parts[::2]):return None
+    return ''.join(parts)
+
+
+def process_exit_family(args):
+    """Closed family of a decoded buildkit process argument string; never returns its text.
+
+    Printable ASCII only. Space and tab runs (joined continuation lines) collapse to one space.
+    A prefix must end at a separator, so 'bun run build:x' is not 'bun run build'.
+    """
+    if not all(32<=ord(c)<127 or c=='\t' for c in args):return 'other'
+    words=re.sub('[ \t]+',' ',args).strip()
+    if not words.startswith('/bin/sh -c '):return 'other'
+    command=words[len('/bin/sh -c '):]
+    found={family for family,prefixes in PROCESS_EXIT_FAMILIES for prefix in prefixes
+           if command.startswith(prefix) and (not prefix[-1].isalnum() or command[len(prefix):len(prefix)+1] in ('',' ',';','&','|'))}
+    return next(iter(found)) if len(found)==1 else 'other'
+
+
+def process_exit_detail(line):
+    """Family and exit class of the buildx client's own final process line, or None.
+
+    Applies only to a line that line_markers already reads as observed_process_exit (so never
+    to 137, a prefixed child line or another marker); the caller passes the final clean line.
+    """
+    if line_markers(line)!=(set(),'observed_process_exit'):return None
+    code=line.rsplit(' ',1)[1]
+    quoted=re.fullmatch(r'ERROR: failed to build: failed to solve: process "((?:[^"\\]|\\.)*)" did not complete successfully: exit code: [0-9]+',line)
+    args=go_unquoted(quoted[1]) if quoted else None
+    family='other' if args is None else process_exit_family(args)
+    return 'observed_process_exit_'+family+'_'+(code if code in PROCESS_EXIT_CLASSES else 'other')
+
+
 def final_client_marker(rest):
     """After a refused line, read only the client's own final line; None keeps the control class.
 
@@ -177,23 +250,25 @@ def final_client_marker(rest):
     client's ('ERROR: %v', buildx cmd/buildx/main.go). So: no prefix stripping and no SGR
     normalization here; the final line must itself be a known marker, and any other distinct
     marker on a clean line after the refusal makes the result ambiguous. Lines seen before the
-    refusal are not used. An oversize line keeps today's control answer.
+    refusal are not used. An oversize line keeps today's control answer. A process exit other
+    than 137 on that final line gets its closed RUN family and exit class (process_exit_detail).
 
     The 'ERROR: is last' invariant is that of buildx v0.29.1 vendoring buildkit v0.25.0, with
     the Docker Desktop build backend inactive (HOME and DOCKER_CONFIG are private). A future
     version printing a line after 'ERROR:' degrades silently to the control class, never to a
     false observation.
     """
-    seen=set();final=set()
+    seen=set();final=set();last=''
     for line in rest:
         line=line.removesuffix('\r')
         if len(line)>8192:return None
         if not line:continue
-        final=set()
+        final=set();last=line
         if any(ord(c)<32 and c!='\t' for c in line) or '\x7f' in line:continue
         found,value=line_markers(line);final=found|({value} if value else set());seen|=final
     if len(final)!=1:return None
-    return next(iter(final)) if seen==final else 'diagnostic_unknown_ambiguous'
+    if seen!=final:return 'diagnostic_unknown_ambiguous'
+    return process_exit_detail(last) or next(iter(final))
 
 
 def command_failure(error,work,receipt,*,buildx_client=False):

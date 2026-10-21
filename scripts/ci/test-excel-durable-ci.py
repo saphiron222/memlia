@@ -455,7 +455,7 @@ class ClientLineAfterRefusal(unittest.TestCase):
         self.assertTrue(all('buildx_client' not in kw for _,kw in seen[1:]))
 
     def test_final_client_line_after_a_refusal_names_the_observation(self):
-        for final,expected in [(FINAL_137,'observed_exit_137'),(FINAL_1,'observed_process_exit'),
+        for final,expected in [(FINAL_137,'observed_exit_137'),(FINAL_1,'observed_process_exit_next_build_1'),
                                (FINAL_137+b'\r','observed_exit_137'),
                                (b'ERROR: failed to build: failed to solve: write PRIVATE_CANARY: no space left on device','observed_no_space')]:
             with self.subTest(expected=expected):self.assertClosed(buildx_failure(final),expected)
@@ -492,10 +492,10 @@ class ClientLineAfterRefusal(unittest.TestCase):
         self.assertClosed(FINAL_137+b'\n#9 1.0 x\rPRIVATE_CANARY\n','diagnostic_unknown_control_cr')
         self.assertClosed(b'unknown flag: --load\n#9 x\ry\n------\n','diagnostic_unknown_control_cr')
         # Observations before the refusal are neither added to nor compared with the final line.
-        self.assertClosed(b'unknown flag: --cgroup-parent\n#9 x\ry\n'+FINAL_1+b'\n','observed_process_exit')
+        self.assertClosed(b'unknown flag: --cgroup-parent\n#9 x\ry\n'+FINAL_1+b'\n','observed_process_exit_next_build_1')
         # Without any refusal, recognition (prefix stripping, priority over the exit) is unchanged.
         clean=buildx_failure(FINAL_1,refused=b'#15 3.210 PRIVATE_CANARY 10%')
-        self.assertClosed(clean,'observed_process_exit')
+        self.assertClosed(clean,'observed_process_exit_next_build_1')
         self.assertClosed(clean.replace(b'#15 3.210 PRIVATE_CANARY 10%',b'#15 3.210 error: lockfile had changes, but lockfile is frozen'),'observed_lockfile_frozen')
 
     def test_bounds_nul_and_utf8_keep_priority_over_the_final_line(self):
@@ -513,6 +513,229 @@ class ClientLineAfterRefusal(unittest.TestCase):
         self.assertClosed(b'#9 x\ry\n','diagnostic_unknown_control_cr')
         self.assertClosed(b'#9 x\ry\n\n\n','diagnostic_unknown_control_cr')
         self.assertClosed(b'#9 x\ry\n'+FINAL_137+b'\n\n','observed_exit_137')
+
+def go_quoted(text):
+    # Independent oracle of Go strconv.Quote (buildkit's %q): named escapes, \xNN for C0/DEL,
+    # \u/\U for other non-printable runes, printable runes verbatim.
+    named={'\a':'\\a','\b':'\\b','\f':'\\f','\n':'\\n','\r':'\\r','\t':'\\t','\v':'\\v','\\':'\\\\','"':'\\"'}
+    out=[]
+    for c in text:
+        if c in named:out.append(named[c])
+        elif ord(c)<32 or ord(c)==0x7f:out.append('\\x%02x'%ord(c))
+        elif c.isprintable():out.append(c)
+        else:out.append('\\u%04x'%ord(c) if ord(c)<0x10000 else '\\U%08x'%ord(c))
+    return '"'+''.join(out)+'"'
+assert go_quoted('a"b\\c\td\x1b\u2028')=='"a\\"b\\\\c\\td\\x1b\\u2028"'
+
+def client_process(args,code):
+    # buildx 'ERROR: %v' of buildkit's errors.Wrapf(err, "process %q did not complete successfully",
+    # strings.Join(e.op.Meta.Args, " ")) around ExitError "exit code: %d" (v0.25.0 ops/exec.go).
+    return (b'ERROR: failed to build: failed to solve: process '+go_quoted(args).encode()
+            +b' did not complete successfully: exit code: '+str(code).encode())
+
+def dockerfile_runs(path):
+    """RUN commands as buildkit v0.25.0 builds Meta.Args: parser.go continuation regex
+    `([^\\])\\[ \t]*$|^\\[ \t]*$` -> `$1`, comment and empty continuation lines skipped, next
+    lines NOT left-stripped; extractBuilderFlags drops leading --flags; withShell appends the
+    command joined to the default /bin/sh -c. Whitespace is kept raw, never normalized here."""
+    import re
+    continuation=re.compile(r'([^\\])\\[ \t]*$|^\\[ \t]*$')
+    lines=path.read_text().split('\n');runs=[];i=0
+    while i<len(lines):
+        line=lines[i].lstrip();start=i+1;i+=1
+        if not line or line.startswith('#'):continue
+        joined=continuation.sub(r'\1',line);more=continuation.search(line) is not None
+        while more and i<len(lines):
+            raw=lines[i];i+=1
+            if raw.lstrip().startswith('#') or not raw.strip():continue
+            more=continuation.search(raw) is not None;joined+=continuation.sub(r'\1',raw)
+        word,_,rest=joined.strip().partition(' ')
+        if word.upper()!='RUN':continue
+        rest=rest.lstrip()
+        while rest.startswith('--'):rest=rest.split(None,1)[1]
+        assert not rest.startswith('[') and '<<' not in rest,(path,start)
+        runs.append((start,' '.join(['/bin/sh','-c',rest])))
+    return runs
+
+# Every RUN of the five images built through build_image (buildx_client=True), in Dockerfile order.
+# Pinned by order, not line number: an edit inside a RUN must not redden this check, an added,
+# removed or reordered RUN must. Line numbers only label failures.
+RUN_FAMILIES={
+    'docker/app.Dockerfile':['provenance','apt','apt','prune','install','next_build','bootstrap','runtime_setup',
+                             'oracledb_selftest','runtime_setup'],
+    'docker/realtime.Dockerfile':['provenance','apk','prune','install','runtime_setup'],
+    'deploy/memlia/images/migrations.Dockerfile':['provenance','install','runtime_setup'],
+    'deploy/memlia/images/cron.Dockerfile':['provenance','apk','pinned_binary','runtime_setup'],
+    'deploy/memlia/images/workflow-worker.Dockerfile':['provenance','pinned_binary','install','native_rebuild','bundles',
+                                                       'install','runtime_setup','oracledb_selftest']}
+
+class ProcessExitDetail(unittest.TestCase):
+    def assertClosed(self,raw,expected,buildx_client=True):
+        value=ci.classify_command_output(raw,buildx_client=buildx_client)
+        self.assertEqual(value,expected);self.assertIn(value,ci.ERROR_CODES);self.assertNotIn('CANARY',value)
+
+    def both_paths(self,final,expected):
+        # Same final client line, after a refused child line and in an entirely clean log.
+        self.assertClosed(buildx_failure(final),expected)
+        self.assertClosed(buildx_failure(final,refused=b'#15 3.210 PRIVATE_CANARY 10%'),expected)
+
+    def test_every_real_run_of_the_five_images_is_one_closed_family(self):
+        source=(ci.ROOT/'deploy/memlia/images/tests/prepare_context.py').read_text()
+        self.assertIn("recipe=source/'docker'/f'{kind}.Dockerfile' if kind in ('app','realtime') else recipes/f'{kind}.Dockerfile'",source)
+        self.assertEqual({'app' if n=='web' else n for n in ci.APPS},{Path(p).name.removesuffix('.Dockerfile') for p in RUN_FAMILIES})
+        for path,expected in RUN_FAMILIES.items():
+            text=(ci.ROOT/path).read_text()
+            self.assertNotRegex(text,r'(?im)^\s*(SHELL|#\s*escape=)')
+            runs=dockerfile_runs(ci.ROOT/path)
+            self.assertEqual(len(runs),len(expected),[f'{path}:{line}' for line,_ in runs])  # a new or removed RUN must be classified
+            for (line,args),family in zip(runs,expected):
+                for code,kind in ((1,'1'),(134,'134'),(255,'other')):
+                    with self.subTest(run=f'{path}:{line}',code=code):
+                        self.both_paths(client_process(args,code),'observed_process_exit_'+family+'_'+kind)
+        used={family for families in RUN_FAMILIES.values() for family in families}
+        self.assertEqual(used,{family for family,_ in ci.PROCESS_EXIT_FAMILIES})  # no dead family
+
+    def test_web_next_build_heap_abort_through_the_private_log(self):
+        final=client_process('/bin/sh -c bun run build',134)
+        with tempfile.TemporaryDirectory() as name:
+            work=Path(name);work.chmod(0o700);ci.write_private(work/'build.private.log',buildx_failure(final))
+            closed={'pid':123,'waited':True,'groupClosed':True};error=ValueError('recipe_build_failed')
+            got=ci.command_failure(error,work,closed,buildx_client=True)
+            self.assertEqual(got,'observed_process_exit_next_build_134')
+            self.assertEqual(ci.command_failure(error,work,closed),'diagnostic_unknown_control_cr')
+            projected=ci.project({'status':'failed','phase':'images','step':'image-web-build','errorCode':got,'cleanup':True,'images':{}})
+            self.assertEqual(len(projected),7);self.assertEqual(projected['errorCode'],got)
+
+    def test_exit_classes_are_closed_and_137_keeps_its_code(self):
+        for code,kind in [(1,'1'),(2,'2'),(127,'127'),(134,'134'),(139,'139'),(3,'other'),(126,'other'),(128,'other'),
+                          (130,'other'),(135,'other'),(136,'other'),(138,'other'),(140,'other'),(143,'other'),(255,'other')]:
+            with self.subTest(code=code):self.both_paths(client_process('/bin/sh -c bun run build',code),'observed_process_exit_next_build_'+kind)
+        self.both_paths(client_process('/bin/sh -c bun run build',137),'observed_exit_137')
+        self.both_paths(client_process('/bin/sh -c PRIVATE_CANARY',137),'observed_exit_137')
+        # Outside the existing exit grammar nothing changes: no marker, so the refusal or no_marker stays.
+        for code in (0,256,999,'01','1x'):
+            with self.subTest(code=code):
+                self.assertClosed(buildx_failure(client_process('/bin/sh -c bun run build',code)),'diagnostic_unknown_control_cr')
+                self.assertClosed(client_process('/bin/sh -c bun run build',code)+b'\n','diagnostic_unknown_no_marker')
+
+    def test_unrecognized_malformed_or_foreign_commands_are_other_and_never_echo(self):
+        build=b'ERROR: failed to build: failed to solve: process '
+        tail=b' did not complete successfully: exit code: 2'
+        for body in ['/bin/sh -c echo PRIVATE_CANARY','/bin/sh -c bun run build:PRIVATE_CANARY','/bin/sh -c bun run buildPRIVATE_CANARY',
+                     '/bin/sh -c bun run build-x','/bin/sh -c bun run build.CANARY','/bin/sh -c bun run build/x','/bin/sh -c bun run build=1',
+                     '/bin/bash -c bun run build','bun run build','/bin/sh -cbun run build','/bin/sh -c CANARY bun run build',
+                     '/bin/sh -c bun run build\nPRIVATE_CANARY','/bin/sh -c bun run build\x1bCANARY','/bin/sh -c bun run build\x7f',
+                     '/bin/sh -c apk  add\x00x','/bin/sh -c','',
+                     '/bin/sh -c groupadd\u00a0CANARY','/bin/sh -c bun run build \x1b[31mCANARY','/bin/sh -c bun run build caf\u00e9',
+                     '/bin/sh -c bun run build \u2028','/bin/sh -c bun run build ;\x00','/bin/sh -c apt-get autoremove']:
+            with self.subTest(body=body):self.both_paths(client_process(body,2),'observed_process_exit_other_2')
+        for literal in [b'"/bin/sh -c bun run build" PRIVATE_CANARY "x"',b'"/bin/sh -c bun run build\\q"',b'"/bin/sh -c bun run build\\xff"',
+                        b'"/bin/sh -c bun run build\\ud800"',b'"/bin/sh -c bun run build\\U00110000"',b'"/bin/sh -c bun run build\\"',
+                        b'"/bin/sh -c bun run build\\',b'/bin/sh -c bun run build',b"'/bin/sh -c bun run build'",
+                        b'"/bin/sh -c bun run build\\x2"',b'"/bin/sh -c bun \\101run build"',b'"/bin/sh -c bun run build\\\'"',
+                        b'"/bin/sh -c bun run build \\q"',b'"/bin/sh -c bun run build \\101"',b'"/bin/sh -c bun run build \\xff"',
+                        b'"/bin/sh -c bun run build \\x"',b'"/bin/sh -c bun run build \\u00e9"']:
+            with self.subTest(literal=literal):self.both_paths(build+literal+tail,'observed_process_exit_other_2')
+        # Faithful Go escapes and whitespace from joined continuation lines are decoded, never refused.
+        for literal in [b'"/bin/sh -c bun run build"',b'"/bin/sh -c  bun\\trun   build "',b'"\\x2fbin/sh -c bun run build"',
+                        b'"/bin/sh -c bun run \\u0062uild"',b'"/bin/sh -c bun run \\U00000062uild"',b'"/bin/sh\\t-c bun run build"']:
+            with self.subTest(literal=literal):self.both_paths(build+literal+tail,'observed_process_exit_next_build_2')
+        self.both_paths(client_process('/bin/sh -c bun run build && echo "PRIVATE_CANARY \\\\ x"',2),'observed_process_exit_next_build_2')
+        self.both_paths(client_process('/bin/sh -c bun run build;PRIVATE_CANARY',2),'observed_process_exit_next_build_2')
+
+    def test_go_unquoted_is_the_exact_inverse_of_strconv_quote(self):
+        for text in ['/bin/sh -c bun run build','a"b\\c\td\x1b\x7f','tab\there "q" \\\\','é \U0001f600','']:
+            with self.subTest(text=text):self.assertEqual(ci.go_unquoted(go_quoted(text)[1:-1]),text)
+        for body in ['a"b','a\\','a\\q','a\\101','a\\xff','a\\x8','a\\ud800','a\\U00110000','a\\\'','a\\0']:
+            with self.subTest(body=body):self.assertIsNone(ci.go_unquoted(body))
+
+    def test_two_recognized_families_are_other(self):
+        families=dict(ci.PROCESS_EXIT_FAMILIES)
+        overlapping={**families,'bundles':families['bundles']+('bun run',)}
+        with patch.object(ci,'PROCESS_EXIT_FAMILIES',tuple(overlapping.items())):
+            self.both_paths(client_process('/bin/sh -c bun run build',1),'observed_process_exit_other_1')
+            self.both_paths(client_process('/bin/sh -c bun --no-env-file run build:cli-runtime',1),'observed_process_exit_bundles_1')
+        same={**families,'bootstrap':families['bootstrap']+('bun run build',)}
+        with patch.object(ci,'PROCESS_EXIT_FAMILIES',tuple(same.items())):
+            self.both_paths(client_process('/bin/sh -c bun run build',1),'observed_process_exit_other_1')
+        # The real table never recognizes one prefix inside another family's.
+        prefixes=[(family,prefix) for family,values in ci.PROCESS_EXIT_FAMILIES for prefix in values]
+        for family,prefix in prefixes:
+            self.assertEqual(prefix,' '.join(prefix.split()))
+            self.assertEqual(ci.process_exit_family('/bin/sh -c '+prefix),family)
+
+    def test_forged_child_lines_never_choose_family_or_class(self):
+        final=client_process('/bin/sh -c bun run build',1)
+        forged=client_process('/bin/sh -c apt-get update && apt-get install PRIVATE_CANARY',2)
+        for raw in [buildx_failure(final,quoted=b'12.34 '+forged),buildx_failure(final,quoted=forged),
+                    buildx_failure(final).replace(b'#15 ERROR:',b'#15 4.000 '+forged+b'\n#15 ERROR:'),
+                    buildx_failure(final,refused=b'#15 3.2 PRIVATE_CANARY').replace(b'#15 ERROR:',b'#15 4.000 '+forged+b'\n#15 ERROR:'),
+                    forged+b'\n#9 x\ry\n'+final+b'\n']:
+            with self.subTest(raw=raw[-70:]):self.assertClosed(raw,'observed_process_exit_next_build_1')
+        # A forged line that is last but prefixed, or not last, never becomes the detail.
+        clean=b'#15 3.2 ok\n'
+        for raw in [clean+b'#15 4.000 '+forged+b'\n',clean+forged+b'\n#15 done\n',clean+b'\x1b[31m'+forged+b'\x1b[0m\n',
+                    clean+forged+b'\n   \n']:
+            with self.subTest(raw=raw[-60:]):self.assertClosed(raw,'observed_process_exit')
+        for raw in [b'#9 x\ry\n#15 4.000 '+forged+b'\n',b'#9 x\ry\n'+forged+b'\n#15 done\n']:
+            with self.subTest(raw=raw[-60:]):self.assertClosed(raw,'diagnostic_unknown_control_cr')
+
+    def test_detail_never_applies_outside_the_declared_client_or_another_marker(self):
+        final=client_process('/bin/sh -c bun run build',1)
+        self.assertClosed(final+b'\n','observed_process_exit',buildx_client=False)
+        self.assertClosed(buildx_failure(final,refused=b'#15 PRIVATE_CANARY'),'observed_process_exit',buildx_client=False)
+        self.assertClosed(buildx_failure(final),'diagnostic_unknown_control_cr',buildx_client=False)
+        self.assertEqual(ci.classify_command_output(final+b'\n'),'observed_process_exit')
+        for other,expected in [(b'#15 1.0 FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory','observed_js_heap_limit'),
+                               (b'#15 1.0 error: lockfile had changes, but lockfile is frozen','observed_lockfile_frozen')]:
+            self.assertClosed(other+b'\n'+final+b'\n',expected)
+        self.assertClosed(buildx_failure(final,quoted=b'unknown flag: --load'),'diagnostic_unknown_ambiguous')
+        self.assertClosed(buildx_failure(final,quoted=client_process('/bin/sh -c bun run build',137)),'diagnostic_unknown_ambiguous')
+        self.assertClosed(client_process('/bin/sh -c bun run build',2)+b'\n'+final+b'\n','observed_process_exit_next_build_1')
+        self.assertClosed(client_process('/bin/sh -c bun run build',137)+b'\n'+final+b'\n','diagnostic_unknown_ambiguous')
+        self.assertClosed(final+b'\r\n','observed_process_exit_next_build_1')
+        self.assertClosed(final+b'\n\n\n','observed_process_exit_next_build_1')
+
+    def test_run_transport_publishes_detail_only_for_the_declared_build(self):
+        raw=buildx_failure(client_process('/bin/sh -c bun run build',134))
+        command,docker,record,calls=ClientLineAfterRefusal.run_transport(self,raw)
+        for call,expected in [(lambda:command(['/usr/bin/bun','install']),'diagnostic_unknown_control_cr'),
+                              (lambda:docker(['buildx','build','.']),'diagnostic_unknown_control_cr'),
+                              (lambda:docker(['buildx','build','.'],buildx_client=True),'observed_process_exit_next_build_134')]:
+            record.pop('errorCode',None)
+            with self.assertRaisesRegex(ValueError,'recipe_build_failed'):call()
+            self.assertEqual(record['errorCode'],expected)
+        self.assertEqual(len(calls),3)
+
+    def test_generated_codes_are_closed_and_accepted_by_the_workflow(self):
+        # Depends on the YAML shape of the workflow's verdict block (its 10-space 'import importlib...'
+        # first line and closing '          PY'), like the projection test above: reindenting that
+        # block fails loudly here (split IndexError or compile error), never silently passes.
+        import contextlib,io,os,re,sys,textwrap
+        from types import SimpleNamespace
+        families=[family for family,_ in ci.PROCESS_EXIT_FAMILIES]
+        self.assertEqual(len(families),len(set(families)));self.assertNotIn('other',families)
+        expected={'observed_process_exit_'+f+'_'+k for f in (*families,'other') for k in ('1','2','127','134','139','other')}
+        self.assertEqual(set(ci.PROCESS_EXIT_CODES),expected);self.assertEqual(len(expected),6*(len(families)+1))
+        self.assertLessEqual(expected,ci.ERROR_CODES)
+        self.assertTrue({'observed_process_exit','observed_exit_137'}<=ci.ERROR_CODES)
+        self.assertTrue(all(re.fullmatch('[a-z0-9_]{1,64}',code) for code in ci.ERROR_CODES))
+        workflow=(ci.ROOT/'.github/workflows/memlia-excel-linux.yml').read_text()
+        start='          import importlib.util,json,os,stat,sys\n'
+        block=start+workflow.split(start,1)[1].split('          PY',1)[0]
+        self.assertIn("value['errorCode'] in module.ERROR_CODES",block)
+        code=compile(textwrap.dedent(block),'workflow-projection','exec')
+        real_fstat=os.fstat
+        def root_owned(fd):
+            value=real_fstat(fd);return SimpleNamespace(st_mode=value.st_mode,st_uid=0,st_nlink=value.st_nlink)
+        with tempfile.TemporaryDirectory() as d,patch.object(sys,'argv',['projection',str(ci.ROOT),d]),patch.object(os,'fstat',root_owned):
+            for value in sorted(expected):
+                summary=ci.project({'status':'failed','phase':'images','step':'image-web-build','errorCode':value,'cleanup':True,'images':{}})
+                (Path(d)/'summary.json').write_text(json.dumps(summary));output=io.StringIO()
+                with contextlib.redirect_stdout(output):exec(code,{})
+                self.assertEqual(json.loads(output.getvalue()),summary)
+            (Path(d)/'summary.json').write_text(json.dumps(summary|{'errorCode':'observed_process_exit_PRIVATE_CANARY_1'}))
+            with contextlib.redirect_stdout(io.StringIO()),self.assertRaises(AssertionError):exec(code,{})
 
 class WebContextCheck(unittest.TestCase):
     def test_check_arguments_preserve_exact_inputs_without_build_outputs(self):
