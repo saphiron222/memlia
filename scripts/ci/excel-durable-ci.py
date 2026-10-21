@@ -40,8 +40,14 @@ ERROR_CODES={'none','source_refused','file_missing','command_failed','timeout','
              'diagnostic_unknown','diagnostic_unavailable','diagnostic_truncated','command_interrupted','client_ownership_refused',
              'observed_cli_flag_refused','observed_no_space','observed_tls_refused','observed_connection_refused',
              'observed_lockfile_frozen','observed_js_heap_limit','observed_exit_137','observed_process_exit','cli_option_unavailable','cli_call_unavailable',
-             'diagnostic_unknown_control','diagnostic_unknown_utf8','diagnostic_unknown_bounds',
-             'diagnostic_unknown_ambiguous','diagnostic_unknown_no_marker'}
+             # Kept for receipts already published (run 39656212157); no longer produced.
+             'diagnostic_unknown_control',
+             'diagnostic_unknown_utf8','diagnostic_unknown_bounds',
+             'diagnostic_unknown_ambiguous','diagnostic_unknown_no_marker',
+             'diagnostic_unknown_control_nul','diagnostic_unknown_control_sgr','diagnostic_unknown_control_escape',
+             'diagnostic_unknown_control_escape_csi','diagnostic_unknown_control_sgr_after_prefix',
+             'diagnostic_unknown_control_cr','diagnostic_unknown_control_backspace','diagnostic_unknown_control_del',
+             'diagnostic_unknown_control_other','diagnostic_unknown_control_mixed'}
 
 def error_code(error):
     # Exact allowlist only: exception text/path/argv never enter the public receipt.
@@ -87,6 +93,30 @@ def probe_buildx(execute,step,*,require_call=False):
     return result
 
 
+def refused_control_kind(line):
+    """Classify only controls already refused; never normalize or return their payload.
+
+    Describes the first refused line only. The caller refuses exactly the lines holding one of
+    the single-character tokens below, so the final 'other' for an empty set is unreachable.
+    """
+    # Only complete SGRs at the edges of the body behind a BuildKit '#N t ' prefix: says whether a
+    # separately reviewed edge normalization could clean this line, not that a marker would then be
+    # recognized. Computed on a copy; recognition itself is unchanged. Inner SGRs stay 'sgr'.
+    body=re.sub(r'^#[0-9]{1,5} (?:[0-9]{1,8}\.[0-9]{1,6} )?','',line)
+    if body!=line:
+        bare=re.sub(r'(?:\x1b\[[0-9;]{0,32}m)*$','',re.sub(r'^(?:\x1b\[[0-9;]{0,32}m)*','',body))
+        if bare!=body and not any(ord(c)<32 and c!='\t' for c in bare) and '\x7f' not in bare:
+            return 'diagnostic_unknown_control_sgr_after_prefix'
+    kinds=set()
+    for match in re.finditer(r'(?P<sgr>\x1b\[[0-9;]{0,32}m)|(?P<csi>\x1b\[[0-9;?]{0,32}[@-~])|[\x00-\x08\x0b-\x1f\x7f]',line):
+        token=match[0]
+        if match['sgr']:kind='sgr'
+        elif match['csi']:kind='escape_csi'
+        else:kind={'\0':'nul','\x1b':'escape','\r':'cr','\b':'backspace','\x7f':'del'}.get(token,'other')
+        kinds.add(kind)
+    return 'diagnostic_unknown_control_'+(next(iter(kinds)) if len(kinds)==1 else 'mixed' if kinds else 'other')
+
+
 def classify_command_output(raw):
     """Closed observations from complete captured output, never a proven root cause.
 
@@ -96,7 +126,7 @@ def classify_command_output(raw):
     if type(raw) is not bytes or not raw:return 'diagnostic_unknown_bounds'
     if len(raw)>DIAGNOSTIC_BYTES:return 'diagnostic_truncated'
     if raw.count(b'\n')>65536:return 'diagnostic_unknown_bounds'
-    if b'\0' in raw:return 'diagnostic_unknown_control'
+    if b'\0' in raw:return 'diagnostic_unknown_control_nul'
     try:text=raw.decode('utf-8')
     except UnicodeError:return 'diagnostic_unknown_utf8'
     observed=set();process_exit=None
@@ -107,7 +137,7 @@ def classify_command_output(raw):
         # binary output or an unrecognized multiplexed prefix are not normalized.
         line=re.sub(r'^(?:\x1b\[[0-9;]{0,32}m)*','',line)
         line=re.sub(r'(?:\x1b\[[0-9;]{0,32}m)*$','',line)
-        if any(ord(c)<32 and c!='\t' for c in line) or '\x7f' in line:return 'diagnostic_unknown_control'
+        if any(ord(c)<32 and c!='\t' for c in line) or '\x7f' in line:return refused_control_kind(line)
         line=re.sub(r'^#[0-9]{1,5} (?:[0-9]{1,8}\.[0-9]{1,6} )?','',line)
         if line in {'unknown flag: '+flag for flag in ('--cgroup-parent','--load','--builder','--provenance','--sbom','--progress')}:
             observed.add('observed_cli_flag_refused')

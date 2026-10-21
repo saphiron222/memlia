@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 spec=importlib.util.spec_from_file_location('ci',Path(__file__).with_name('excel-durable-ci.py'))
 ci=importlib.util.module_from_spec(spec);spec.loader.exec_module(ci)
@@ -225,9 +226,9 @@ class ImageDiagnostics(unittest.TestCase):
     def test_arbitrary_substrings_ansi_splices_contradictions_and_bounds_remain_unknown(self):
         for raw,reason in [(b'PRIVATE_CANARY unknown flag: --cgroup-parent','no_marker'),(b'RUN echo "no space left on device"','no_marker'),
                            (b'unknown flag: --PRIVATE_CANARY','no_marker'),(b'unknown flag: --cgroup-parent;PRIVATE_CANARY','no_marker'),
-                           (b'unkno\x1b[31mwn flag: --cgroup-parent\n','control'),(b'\xffunknown flag: --cgroup-parent','utf8'),
-                           (b'\x00unknown flag: --cgroup-parent','control'),(b'PRIVATE_CANARY\vunknown flag: --cgroup-parent','control'),
-                           (b'unknown flag: --cgroup-parent\vPRIVATE_CANARY','control'),(b'PRIVATE_CANARY\xe2\x80\xa8unknown flag: --cgroup-parent','no_marker'),
+                           (b'unkno\x1b[31mwn flag: --cgroup-parent\n','control_sgr'),(b'\xffunknown flag: --cgroup-parent','utf8'),
+                           (b'\x00unknown flag: --cgroup-parent','control_nul'),(b'PRIVATE_CANARY\vunknown flag: --cgroup-parent','control_other'),
+                           (b'unknown flag: --cgroup-parent\vPRIVATE_CANARY','control_other'),(b'PRIVATE_CANARY\xe2\x80\xa8unknown flag: --cgroup-parent','no_marker'),
                            (b'unknown flag: --cgroup-parent\nERROR: failed to build: no space left on device\n','ambiguous')]:
             with self.subTest(reason=reason):self.assertEqual(ci.classify_command_output(raw),'diagnostic_unknown_'+reason)
         self.assertEqual(ci.classify_command_output(b'\x1b[31munknown flag: --cgroup-parent\x1b[0m\n'),'observed_cli_flag_refused')
@@ -312,6 +313,60 @@ class ImageDiagnostics(unittest.TestCase):
             self.assertTrue(receipt['waited']);self.assertTrue(receipt['groupClosed'])
             self.assertIn(b'PRIVATE_CANARY',(work/'build.private.log').read_bytes())
 
+class ControlDiagnostics(unittest.TestCase):
+    def test_refused_controls_have_only_closed_classes(self):
+        cases=[(b'PRIVATE_CANARY\x00','nul'),(b'PRIV\x1b[31mATE_CANARY','sgr'),
+               (b'PRIVATE_CANARY\x1b[2K','escape_csi'),(b'PRIVATE_CANARY\x1b','escape'),(b'PRIVATE_CANARY\rmore','cr'),
+               (b'PRIVATE_CANARY\x08','backspace'),(b'PRIVATE_CANARY\x7f','del'),
+               (b'PRIVATE_CANARY\x0b','other'),(b'PRIVATE_CANARY\x08\rmore','mixed'),
+               (b'#12 3.456 \x1b[32mPRIVATE CANARY','sgr_after_prefix'),(b'#5 0.3 \x1b[31m\tPRIVATE\x1b[0m','sgr_after_prefix'),
+               (b'#5 0.3 PRIV\x1b[31mATE','sgr'),(b'#5 0.3 \x1b[32mPRIV\x1b[39mATE','sgr'),(b'#12 3.456 PRIV\x1b[2KATE','escape_csi'),
+               (b'PRIV\x1b[31','escape'),(b'PRIV\x1b['+b';'*33+b'mATE','escape'),(b'PRIVATE\r\r\n','cr'),
+               (b'PRIV\x1b[31mATE\x1b[2K','mixed'),(b'#7 \x1b[31mPRIVATE\x1b[0m\rCANARY','mixed')]
+        for raw,kind in cases:
+            with self.subTest(kind=kind):
+                value=ci.classify_command_output(raw)
+                self.assertEqual(value,'diagnostic_unknown_control_'+kind)
+                self.assertIn(value,ci.ERROR_CODES)
+                self.assertNotIn('PRIVATE_CANARY',value)
+    def test_control_splices_remain_unknown_and_other_recognition_is_unchanged(self):
+        self.assertEqual(ci.classify_command_output(b'unkno\x1b[31mwn flag: --cgroup-parent'),'diagnostic_unknown_control_sgr')
+        self.assertEqual(ci.classify_command_output(b'\x1b[31munknown flag: --cgroup-parent\x1b[0m\r\n'),'observed_cli_flag_refused')
+        self.assertEqual(ci.classify_command_output(b'\xffPRIVATE_CANARY'),'diagnostic_unknown_utf8')
+        self.assertEqual(ci.classify_command_output(b'\xffPRIVATE_CANARY\x00'),'diagnostic_unknown_control_nul')
+        self.assertEqual(ci.classify_command_output(b'x'*8193),'diagnostic_unknown_bounds')
+        self.assertEqual(ci.classify_command_output(b'PRIVATE_CANARY unknown flag: --cgroup-parent'),'diagnostic_unknown_no_marker')
+        self.assertEqual(ci.classify_command_output(b'unknown flag: --cgroup-parent\nerror: lockfile had changes, but lockfile is frozen'),'diagnostic_unknown_ambiguous')
+    def test_refusal_and_classification_agree_for_every_code_point(self):
+        # The refusal rule is unchanged; every refused character yields a closed control class, and only those.
+        for point in range(0x200):
+            if point==10:continue
+            value=ci.classify_command_output(('x'+chr(point)+'y').encode())
+            refused=(point<32 and point!=9) or point==0x7f
+            with self.subTest(point=point):
+                self.assertEqual(value.startswith('diagnostic_unknown_control_'),refused)
+                self.assertNotEqual(value,'diagnostic_unknown_control')
+    def test_inner_sgr_splices_behind_a_prefix_never_claim_edge_normalization(self):
+        for raw in (b'#5 0.3 unkno\x1b[31mwn flag: --cgroup-parent',b'#5 0.3 e\x1b[31mrror: lockfile had changes, but lockfile is frozen'):
+            with self.subTest(raw=raw):self.assertEqual(ci.classify_command_output(raw),'diagnostic_unknown_control_sgr')
+    def test_first_refused_line_decides_and_later_clean_markers_stay_hidden(self):
+        raw=b'#9 1.2 PRIV\x08ATE\n#9 1.3 x\rCANARY\nERROR: failed to build: failed to solve: process "x" did not complete successfully: exit code: 137\n'
+        self.assertEqual(ci.classify_command_output(raw),'diagnostic_unknown_control_backspace')
+    def test_the_public_projection_is_still_seven_closed_fields(self):
+        for kind in ['nul','sgr','escape','escape_csi','sgr_after_prefix','cr','backspace','del','other','mixed']:
+            code='diagnostic_unknown_control_'+kind
+            got=ci.project({'status':'failed','phase':'images','step':'image-web-build','errorCode':code,'cleanup':True,'images':{},'privateText':'PRIVATE_CANARY'})
+            self.assertEqual(len(got),7);self.assertEqual(got['errorCode'],code)
+            self.assertNotIn('PRIVATE_CANARY',json.dumps(got));self.assertFalse(got['durableQualified'])
+    def test_owned_capture_keeps_raw_private_and_open_capture_stays_unavailable(self):
+        raw=b'PRIV\x1b[31mATE_CANARY\n'
+        with tempfile.TemporaryDirectory() as name:
+            work=Path(name);work.chmod(0o700);path=work/'build.private.log';ci.write_private(path,raw)
+            self.assertEqual(ci.command_failure(ValueError('recipe_build_failed'),work,{'pid':123,'waited':True,'groupClosed':True}),'diagnostic_unknown_control_sgr')
+            self.assertEqual(path.read_bytes(),raw);self.assertEqual(path.stat().st_mode&0o777,0o600)
+            with patch.object(ci,'classify_command_output',side_effect=AssertionError('must not read open producer')):
+                self.assertEqual(ci.command_failure(ValueError('recipe_build_failed'),work,{'pid':123,'waited':True,'groupClosed':False}),'diagnostic_unavailable')
+
 class WebContextCheck(unittest.TestCase):
     def test_check_arguments_preserve_exact_inputs_without_build_outputs(self):
         args=ci.web_check_arguments('owned',Path('/context'),'a'*40,'b'*64,'c'*32)
@@ -380,8 +435,8 @@ class WebContextCheck(unittest.TestCase):
 
     def test_unknown_reasons_are_closed_and_do_not_weaken_recognition(self):
         cases=[(b'PRIVATE_CANARY', 'diagnostic_unknown_no_marker'),(b'','diagnostic_unknown_bounds'),
-               (b'\xffPRIVATE_CANARY','diagnostic_unknown_utf8'),(b'PRIVATE_CANARY\x00','diagnostic_unknown_control'),
-               (b'unkno\x1b[31mwn flag: --cgroup-parent','diagnostic_unknown_control'),
+               (b'\xffPRIVATE_CANARY','diagnostic_unknown_utf8'),(b'PRIVATE_CANARY\x00','diagnostic_unknown_control_nul'),
+               (b'unkno\x1b[31mwn flag: --cgroup-parent','diagnostic_unknown_control_sgr'),
                (b'x'*8193,'diagnostic_unknown_bounds'),(b'\n'*65537,'diagnostic_unknown_bounds'),
                (b'unknown flag: --cgroup-parent\nerror: lockfile had changes, but lockfile is frozen\n','diagnostic_unknown_ambiguous'),
                (b'ERROR: failed to build: failed to solve: process "x" did not complete successfully: exit code: 1\nERROR: failed to build: failed to solve: process "x" did not complete successfully: exit code: 137\n','diagnostic_unknown_ambiguous')]
