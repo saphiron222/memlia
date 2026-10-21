@@ -117,11 +117,13 @@ def refused_control_kind(line):
     return 'diagnostic_unknown_control_'+(next(iter(kinds)) if len(kinds)==1 else 'mixed' if kinds else 'other')
 
 
-def classify_command_output(raw):
+def classify_command_output(raw,*,buildx_client=False):
     """Closed observations from complete captured output, never a proven root cause.
 
     Build output is untrusted. No substring, argv, path, URL, credential, exit text
-    or arbitrary field is returned. Conflicting observations stay unknown.
+    or arbitrary field is returned. Conflicting observations stay unknown. Only a caller
+    that declares a `docker buildx build` client may have its final line read after a refusal;
+    any other command (bun, apt-get, curl, Python helpers) owns its last line itself.
     """
     if type(raw) is not bytes or not raw:return 'diagnostic_unknown_bounds'
     if len(raw)>DIAGNOSTIC_BYTES:return 'diagnostic_truncated'
@@ -129,36 +131,72 @@ def classify_command_output(raw):
     if b'\0' in raw:return 'diagnostic_unknown_control_nul'
     try:text=raw.decode('utf-8')
     except UnicodeError:return 'diagnostic_unknown_utf8'
-    observed=set();process_exit=None
-    for line in text.split('\n'):
+    observed=set();process_exit=None;lines=text.split('\n')
+    for index,line in enumerate(lines):
         line=line.removesuffix('\r')
         if len(line)>8192:return 'diagnostic_unknown_bounds'
         # SGR only at complete line boundaries. Interior splices, cursor controls,
         # binary output or an unrecognized multiplexed prefix are not normalized.
         line=re.sub(r'^(?:\x1b\[[0-9;]{0,32}m)*','',line)
         line=re.sub(r'(?:\x1b\[[0-9;]{0,32}m)*$','',line)
-        if any(ord(c)<32 and c!='\t' for c in line) or '\x7f' in line:return refused_control_kind(line)
+        if any(ord(c)<32 and c!='\t' for c in line) or '\x7f' in line:
+            return buildx_client and final_client_marker(lines[index+1:]) or refused_control_kind(line)
         line=re.sub(r'^#[0-9]{1,5} (?:[0-9]{1,8}\.[0-9]{1,6} )?','',line)
-        if line in {'unknown flag: '+flag for flag in ('--cgroup-parent','--load','--builder','--provenance','--sbom','--progress')}:
-            observed.add('observed_cli_flag_refused')
-        if line=='error: lockfile had changes, but lockfile is frozen':observed.add('observed_lockfile_frozen')
-        if line in ('FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory',
-                    'FATAL ERROR: Ineffective mark-compacts near heap limit Allocation failed - JavaScript heap out of memory'):
-            observed.add('observed_js_heap_limit')
-        if line.startswith(('ERROR: ','Error response from daemon: ')):
-            if line.endswith(': no space left on device'):observed.add('observed_no_space')
-            if line.endswith(': x509: certificate signed by unknown authority'):observed.add('observed_tls_refused')
-            if line.endswith(': connect: connection refused'):observed.add('observed_connection_refused')
-        match=re.fullmatch(r'ERROR: failed to build: failed to solve: process .{1,4096} did not complete successfully: exit code: ([1-9][0-9]{0,2})',line)
-        if match and int(match[1])<=255:
-            value='observed_exit_137' if match[1]=='137' else 'observed_process_exit'
+        found,value=line_markers(line);observed|=found
+        if value:
             if process_exit is not None and process_exit!=value:return 'diagnostic_unknown_ambiguous'
             process_exit=value
     if len(observed)>1:return 'diagnostic_unknown_ambiguous'
     return next(iter(observed)) if observed else process_exit or 'diagnostic_unknown_no_marker'
 
 
-def command_failure(error,work,receipt):
+def line_markers(line):
+    """Closed markers of one admitted line: (observations, process exit). Never returns text."""
+    observed=set();process_exit=None
+    if line in {'unknown flag: '+flag for flag in ('--cgroup-parent','--load','--builder','--provenance','--sbom','--progress')}:
+        observed.add('observed_cli_flag_refused')
+    if line=='error: lockfile had changes, but lockfile is frozen':observed.add('observed_lockfile_frozen')
+    if line in ('FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory',
+                'FATAL ERROR: Ineffective mark-compacts near heap limit Allocation failed - JavaScript heap out of memory'):
+        observed.add('observed_js_heap_limit')
+    if line.startswith(('ERROR: ','Error response from daemon: ')):
+        if line.endswith(': no space left on device'):observed.add('observed_no_space')
+        if line.endswith(': x509: certificate signed by unknown authority'):observed.add('observed_tls_refused')
+        if line.endswith(': connect: connection refused'):observed.add('observed_connection_refused')
+    match=re.fullmatch(r'ERROR: failed to build: failed to solve: process .{1,4096} did not complete successfully: exit code: ([1-9][0-9]{0,2})',line)
+    if match and int(match[1])<=255:process_exit='observed_exit_137' if match[1]=='137' else 'observed_process_exit'
+    return observed,process_exit
+
+
+def final_client_marker(rest):
+    """After a refused line, read only the client's own final line; None keeps the control class.
+
+    With --progress=plain BuildKit streams child output behind '#N ' and quotes it in its
+    '------' summary behind a timestamp, but a partial child line resumed later is quoted there
+    bare (progressui printer.go keeps l[logsOffset:]). Only the last non-empty line is the
+    client's ('ERROR: %v', buildx cmd/buildx/main.go). So: no prefix stripping and no SGR
+    normalization here; the final line must itself be a known marker, and any other distinct
+    marker on a clean line after the refusal makes the result ambiguous. Lines seen before the
+    refusal are not used. An oversize line keeps today's control answer.
+
+    The 'ERROR: is last' invariant is that of buildx v0.29.1 vendoring buildkit v0.25.0, with
+    the Docker Desktop build backend inactive (HOME and DOCKER_CONFIG are private). A future
+    version printing a line after 'ERROR:' degrades silently to the control class, never to a
+    false observation.
+    """
+    seen=set();final=set()
+    for line in rest:
+        line=line.removesuffix('\r')
+        if len(line)>8192:return None
+        if not line:continue
+        final=set()
+        if any(ord(c)<32 and c!='\t' for c in line) or '\x7f' in line:continue
+        found,value=line_markers(line);final=found|({value} if value else set());seen|=final
+    if len(final)!=1:return None
+    return next(iter(final)) if seen==final else 'diagnostic_unknown_ambiguous'
+
+
+def command_failure(error,work,receipt,*,buildx_client=False):
     # ownership/capture state is supplied only by the existing native port, never
     # from the command's output. Do not parse a file while a producer is uncertain.
     if isinstance(error,ValueError) and error.args==('client_ownership_refused',):return 'client_ownership_refused'
@@ -186,16 +224,16 @@ def command_failure(error,work,receipt):
         require(size==before.st_size and all(getattr(before,k)==getattr(after,k) for k in fields))
         current=(work/'build.private.log').lstat()
         require(current.st_dev==before.st_dev and current.st_ino==before.st_ino)
-        return classify_command_output(b''.join(chunks))
+        return classify_command_output(b''.join(chunks),buildx_client=buildx_client)
     except (OSError,ValueError):return 'diagnostic_unavailable'
     finally:
         if fd is not None:os.close(fd)
 
 
-def owned_command(native,argv,work,deadline,cancel,*,capture=False,receipt):
+def owned_command(native,argv,work,deadline,cancel,*,capture=False,receipt,buildx_client=False):
     try:return native.owned_client(argv,work,deadline,cancel,capture=capture,receipt=receipt)
     except Exception as error:
-        receipt['failureCode']=command_failure(error,work,receipt)
+        receipt['failureCode']=command_failure(error,work,receipt,buildx_client=buildx_client)
         raise
 
 
@@ -241,7 +279,7 @@ def check_web_context(prepare,root,private,expected,lock,nonce,builder,*,docker,
     prepare.prepare('app',root,root/'deploy/memlia/images',private/'web',source_commit=expected,architecture='amd64')
     source();guard=start_builder()
     record['phase']='web-check';record['step']='web-check'
-    docker(web_check_arguments(builder,private/'web',expected,lock,nonce),seconds=180)
+    docker(web_check_arguments(builder,private/'web',expected,lock,nonce),seconds=180,buildx_client=True)
     guard();source()
     record.update(status='passed',durableQualified=False)
 
@@ -249,7 +287,7 @@ def check_web_context(prepare,root,private,expected,lock,nonce,builder,*,docker,
 def build_image(name,builder,context,source,lock,nonce,*,docker,one,guard,step):
     require(name in APPS)
     def advance(operation):step('image-'+name+'-'+operation)
-    advance('build');docker(build_arguments(builder,context,name,source,lock,nonce),seconds=5400 if name=='web' else 1200)
+    advance('build');docker(build_arguments(builder,context,name,source,lock,nonce),seconds=5400 if name=='web' else 1200,buildx_client=True)
     advance('guard');guard()
     tag=prefix(nonce)+'/'+name+':candidate'
     advance('push');docker(['push',tag],seconds=300)
@@ -346,18 +384,21 @@ def run(expected,output,node,wheelhouse,*,mode='durable'):
         free=min(shutil.disk_usage(output).free,shutil.disk_usage('/var/lib/docker').free)
         record['minimumDiskBytes']=min(record.get('minimumDiskBytes',free),free)
         require(free>=12*1024**3,'ci_disk_refused')
-    def command(argv,*,seconds=120,capture=False,closing=False):
+    def command(argv,*,seconds=120,capture=False,closing=False,buildx_client=False):
         nonlocal count
         count+=1;work=private/('command-%03d'%count);work.mkdir(mode=0o700);write_private(work/'build.private.log',b'')
         item={};record['clientSessions'].append(item)
         if not closing:disk();require(not cancel.is_set())
         try:
             return owned_command(native,argv,work,min(time.monotonic()+seconds,deadline+(240 if closing else 0)),
-                threading.Event() if closing else cancel,capture=capture,receipt=item)
+                threading.Event() if closing else cancel,capture=capture,receipt=item,buildx_client=buildx_client)
         except Exception:
             if not closing:record['errorCode']=item['failureCode']
             raise
-    def docker(args,**kw):return command(['/usr/bin/env','DOCKER_CONFIG='+str(private/'docker-config'),*native.DOCKER,*args],**kw)
+    def docker(args,*,buildx_client=False,**kw):
+        # Declared by the image/web-check build callers only; never inferred from output.
+        require(not buildx_client or args[:2]==['buildx','build'])
+        return command(['/usr/bin/env','DOCKER_CONFIG='+str(private/'docker-config'),*native.DOCKER,*args],buildx_client=buildx_client,**kw)
     def swap_command(args,data=None):
         require(data is None,'swap_input_refused')  # Disk-only; no zram tee path.
         return command([shutil.which(args[0]) or args[0],*args[1:]],seconds=30,capture=True,closing=swap_closing).decode().strip()

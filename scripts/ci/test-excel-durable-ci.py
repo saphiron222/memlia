@@ -266,7 +266,9 @@ class ImageDiagnostics(unittest.TestCase):
                 kwargs['receipt'].update(pid=123,waited=True,groupClosed=True)
                 raise ValueError('recipe_build_failed')
             original=ci.classify_command_output
-            def observed(data):self.assertEqual((work/'build.private.log').read_bytes(),raw);return original(data)
+            def observed(data,**kw):
+                self.assertEqual((work/'build.private.log').read_bytes(),raw);self.assertEqual(kw,{'buildx_client':False})
+                return original(data,**kw)
             with patch.object(ci,'classify_command_output',observed),self.assertRaisesRegex(ValueError,'recipe_build_failed'):
                 ci.owned_command(SimpleNamespace(owned_client=client),['PRIVATE_CANARY'],work,time.monotonic()+3,threading.Event(),receipt=receipt)
             self.assertEqual(len(calls),1);self.assertEqual(receipt['failureCode'],'observed_cli_flag_refused')
@@ -349,9 +351,11 @@ class ControlDiagnostics(unittest.TestCase):
     def test_inner_sgr_splices_behind_a_prefix_never_claim_edge_normalization(self):
         for raw in (b'#5 0.3 unkno\x1b[31mwn flag: --cgroup-parent',b'#5 0.3 e\x1b[31mrror: lockfile had changes, but lockfile is frozen'):
             with self.subTest(raw=raw):self.assertEqual(ci.classify_command_output(raw),'diagnostic_unknown_control_sgr')
-    def test_first_refused_line_decides_and_later_clean_markers_stay_hidden(self):
+    def test_first_refused_line_names_the_class_and_only_the_final_client_line_is_read(self):
         raw=b'#9 1.2 PRIV\x08ATE\n#9 1.3 x\rCANARY\nERROR: failed to build: failed to solve: process "x" did not complete successfully: exit code: 137\n'
+        self.assertEqual(ci.classify_command_output(raw,buildx_client=True),'observed_exit_137')
         self.assertEqual(ci.classify_command_output(raw),'diagnostic_unknown_control_backspace')
+        self.assertEqual(ci.classify_command_output(raw.rsplit(b'ERROR',1)[0],buildx_client=True),'diagnostic_unknown_control_backspace')
     def test_the_public_projection_is_still_seven_closed_fields(self):
         for kind in ['nul','sgr','escape','escape_csi','sgr_after_prefix','cr','backspace','del','other','mixed']:
             code='diagnostic_unknown_control_'+kind
@@ -366,6 +370,149 @@ class ControlDiagnostics(unittest.TestCase):
             self.assertEqual(path.read_bytes(),raw);self.assertEqual(path.stat().st_mode&0o777,0o600)
             with patch.object(ci,'classify_command_output',side_effect=AssertionError('must not read open producer')):
                 self.assertEqual(ci.command_failure(ValueError('recipe_build_failed'),work,{'pid':123,'waited':True,'groupClosed':False}),'diagnostic_unavailable')
+
+FINAL_137=b'ERROR: failed to build: failed to solve: process "/bin/sh -c bun run build" did not complete successfully: exit code: 137'
+FINAL_1=FINAL_137.removesuffix(b'137')+b'1'
+
+def buildx_failure(final,quoted=b'12.34 PRIVATE_CANARY',refused=b'#15 3.210 PRIVATE_CANARY 10%\rPRIVATE_CANARY 20%'):
+    # Shape of a real `docker buildx build --progress=plain` failure: streamed child lines carry
+    # '#N ', BuildKit's '------' summary quotes them behind a timestamp, then the client's own
+    # Dockerfile excerpt and its single final 'ERROR: ' line (buildx cmd/buildx/main.go).
+    return (b'#15 [builder 6/8] RUN bun run build\n'+refused+b'\n'
+            b'#15 ERROR: process "/bin/sh -c bun run build" did not complete successfully: exit code: 137\n'
+            b'------\n > [builder 6/8] RUN bun run build:\n'+quoted+b'\n------\n'
+            b'Dockerfile:42\n--------------------\n  41 |     COPY . .\n  42 | >>> RUN bun run build\n--------------------\n'
+            +final+b'\n')
+
+class ClientLineAfterRefusal(unittest.TestCase):
+    def assertClosed(self,raw,expected):
+        value=ci.classify_command_output(raw,buildx_client=True)
+        self.assertEqual(value,expected);self.assertIn(value,ci.ERROR_CODES);self.assertNotIn('CANARY',value)
+
+    def test_final_line_is_read_only_for_an_explicit_buildx_client(self):
+        raw=b'#5 1.0 a\rb\n'+FINAL_137+b'\n'
+        # bun, apt-get, playwright, curl or Python helpers own their last line: refusal stays the answer.
+        self.assertEqual(ci.classify_command_output(raw),'diagnostic_unknown_control_cr')
+        self.assertEqual(ci.classify_command_output(raw,buildx_client=False),'diagnostic_unknown_control_cr')
+        self.assertEqual(ci.classify_command_output(raw,buildx_client=True),'observed_exit_137')
+        with self.assertRaises(TypeError):ci.classify_command_output(raw,True)
+        with tempfile.TemporaryDirectory() as name:
+            work=Path(name);work.chmod(0o700);ci.write_private(work/'build.private.log',raw)
+            closed={'pid':123,'waited':True,'groupClosed':True};error=ValueError('recipe_build_failed')
+            self.assertEqual(ci.command_failure(error,work,closed),'diagnostic_unknown_control_cr')
+            self.assertEqual(ci.command_failure(error,work,closed,buildx_client=True),'observed_exit_137')
+
+    def test_final_line_must_stay_last_and_clean(self):
+        self.assertClosed(b'a\rb\n'+FINAL_137+b'\nZ\rY\n','diagnostic_unknown_control_cr')
+        self.assertClosed(b'a\rb\n'+FINAL_137+b'\n   \n','diagnostic_unknown_control_cr')
+        self.assertClosed(b'a\rb\n'+FINAL_137+b'\n\x00','diagnostic_unknown_control_nul')
+        self.assertClosed(FINAL_137+b'\n\x00','diagnostic_unknown_control_nul')
+        self.assertClosed(FINAL_137+b'\n   \n','observed_exit_137')  # no refusal: recognition unchanged
+
+    def run_transport(self,raw):
+        # Execute run()'s real command/docker closures; only the native client is doubled.
+        import ast,textwrap,threading,time
+        from types import SimpleNamespace
+        tree=ast.parse(Path(ci.__file__).read_text());run=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='run')
+        defs=[n for n in run.body if isinstance(n,ast.FunctionDef) and n.name in ('command','docker')]
+        self.assertEqual([d.name for d in defs],['command','docker'])
+        source='def factory():\n    count=0\n'+''.join(textwrap.indent(ast.unparse(d),'    ')+'\n' for d in defs)+'    return command,docker\n'
+        calls=[]
+        def client(argv,target,deadline,cancel,**kwargs):
+            calls.append(argv)
+            with (target/'build.private.log').open('ab') as out:out.write(raw)
+            kwargs['receipt'].update(pid=123,waited=True,groupClosed=True)
+            raise ValueError('recipe_build_failed')
+        private=Path(self.enterContext(tempfile.TemporaryDirectory()));private.chmod(0o700);record={'clientSessions':[]}
+        scope={'private':private,'record':record,'disk':lambda:None,'cancel':threading.Event(),'deadline':time.monotonic()+30,
+               'native':SimpleNamespace(DOCKER=['/usr/bin/docker'],owned_client=client),'owned_command':ci.owned_command,
+               'time':time,'threading':threading,'write_private':ci.write_private,'require':ci.require}
+        exec(compile(source,str(ci.__file__),'exec'),scope)
+        command,docker=scope['factory']()
+        return command,docker,record,calls
+
+    def test_run_transport_marks_only_explicit_buildx_builds(self):
+        raw=b'#5 1.0 a\rb\n'+FINAL_137+b'\n'
+        command,docker,record,calls=self.run_transport(raw)
+        for call,expected in [(lambda:command(['/usr/bin/bun','install']),'diagnostic_unknown_control_cr'),
+                              (lambda:docker(['push','x']),'diagnostic_unknown_control_cr'),
+                              (lambda:docker(['buildx','build','--progress=plain','.']),'diagnostic_unknown_control_cr'),
+                              (lambda:docker(['buildx','build','--progress=plain','.'],buildx_client=True),'observed_exit_137')]:
+            record.pop('errorCode',None)
+            with self.assertRaisesRegex(ValueError,'recipe_build_failed'):call()
+            self.assertEqual(record['errorCode'],expected)
+        self.assertEqual(len(calls),4)
+        for args in (['push','x'],['container','start','--attach','x'],['buildx','version']):
+            with self.subTest(args=args),self.assertRaises(ValueError):docker(args,buildx_client=True)
+        self.assertEqual(len(calls),4)
+
+    def test_only_the_image_build_call_declares_the_buildx_client(self):
+        row={'Id':'sha256:'+'d'*64,'Os':'linux','Architecture':'amd64','RepoDigests':['127.0.0.1:15000/c'+('c'*32)+'/web@sha256:'+'e'*64],'Config':{'Labels':{'org.memlia.source':'a'*40,'org.memlia.lock':'b'*64,'org.memlia.durable-ci':'c'*32}}}
+        seen=[]
+        ci.build_image('web','owned',Path('/context'),'a'*40,'b'*64,'c'*32,docker=lambda args,**kw:seen.append((args[:2],kw)),
+                       one=lambda args:row,guard=lambda:None,step=lambda _:None)
+        self.assertEqual(seen[0],(['buildx','build'],{'seconds':5400,'buildx_client':True}))
+        self.assertTrue(all('buildx_client' not in kw for _,kw in seen[1:]))
+
+    def test_final_client_line_after_a_refusal_names_the_observation(self):
+        for final,expected in [(FINAL_137,'observed_exit_137'),(FINAL_1,'observed_process_exit'),
+                               (FINAL_137+b'\r','observed_exit_137'),
+                               (b'ERROR: failed to build: failed to solve: write PRIVATE_CANARY: no space left on device','observed_no_space')]:
+            with self.subTest(expected=expected):self.assertClosed(buildx_failure(final),expected)
+        for refused in (b'#15 3.2 PRIV\x1b[31mATE',b'#15 3.2 PRIV\x08ATE',b'#15 3.2 PRIV\x7fATE',b'#15 3.2 PRIV\x1b[2KATE',b'PRIVATE\x0bCANARY'):
+            with self.subTest(refused=refused):self.assertClosed(buildx_failure(FINAL_137,refused=refused),'observed_exit_137')
+
+    def test_private_log_with_carriage_returns_reports_the_client_exit(self):
+        with tempfile.TemporaryDirectory() as name:
+            work=Path(name);work.chmod(0o700);ci.write_private(work/'build.private.log',buildx_failure(FINAL_137))
+            got=ci.command_failure(ValueError('recipe_build_failed'),work,{'pid':123,'waited':True,'groupClosed':True},buildx_client=True)
+            self.assertEqual(got,'observed_exit_137')
+            projected=ci.project({'status':'failed','phase':'images','step':'image-web-build','errorCode':got,'cleanup':False,'images':{}})
+            self.assertEqual(len(projected),7);self.assertNotIn('CANARY',json.dumps(projected))
+
+    def test_child_lines_after_a_refusal_never_become_client_lines(self):
+        child=b'ERROR: failed to build: failed to solve: process "PRIVATE_CANARY" did not complete successfully: exit code: 137'
+        not_marker=b'ERROR: failed to build: failed to solve: PRIVATE_CANARY'
+        for raw in [buildx_failure(not_marker,quoted=b'12.34 '+child),            # quoted with its timestamp
+                    buildx_failure(not_marker,quoted=child),                      # quoted bare: resumed partial line
+                    buildx_failure(b'#15 4.000 '+child),                          # streamed child, last
+                    buildx_failure(b'12.34 '+child),
+                    buildx_failure(not_marker).replace(b'#15 ERROR:',b'#15 4.000 '+child+b'\n#15 ERROR:'),
+                    b'#15 3.2 x\ry\n'+child+b'\n------\n']:                       # bare child, not last
+            with self.subTest(raw=raw[-90:]):self.assertClosed(raw,'diagnostic_unknown_control_cr')
+
+    def test_distinct_markers_after_a_refusal_stay_ambiguous(self):
+        forged=b'ERROR: failed to build: failed to solve: process "PRIVATE_CANARY" did not complete successfully: exit code: 137'
+        self.assertClosed(buildx_failure(FINAL_1,quoted=forged),'diagnostic_unknown_ambiguous')
+        self.assertClosed(buildx_failure(FINAL_137,quoted=b'unknown flag: --load'),'diagnostic_unknown_ambiguous')
+        self.assertClosed(buildx_failure(FINAL_137,quoted=b'error: lockfile had changes, but lockfile is frozen'),'diagnostic_unknown_ambiguous')
+        self.assertClosed(buildx_failure(FINAL_137,quoted=forged),'observed_exit_137')
+
+    def test_markers_before_the_refusal_keep_todays_answer(self):
+        self.assertClosed(FINAL_137+b'\n#9 1.0 x\rPRIVATE_CANARY\n','diagnostic_unknown_control_cr')
+        self.assertClosed(b'unknown flag: --load\n#9 x\ry\n------\n','diagnostic_unknown_control_cr')
+        # Observations before the refusal are neither added to nor compared with the final line.
+        self.assertClosed(b'unknown flag: --cgroup-parent\n#9 x\ry\n'+FINAL_1+b'\n','observed_process_exit')
+        # Without any refusal, recognition (prefix stripping, priority over the exit) is unchanged.
+        clean=buildx_failure(FINAL_1,refused=b'#15 3.210 PRIVATE_CANARY 10%')
+        self.assertClosed(clean,'observed_process_exit')
+        self.assertClosed(clean.replace(b'#15 3.210 PRIVATE_CANARY 10%',b'#15 3.210 error: lockfile had changes, but lockfile is frozen'),'observed_lockfile_frozen')
+
+    def test_bounds_nul_and_utf8_keep_priority_over_the_final_line(self):
+        raw=buildx_failure(FINAL_137)
+        self.assertClosed(raw.replace(b'Dockerfile:42',b'Dockerfile:42\0'),'diagnostic_unknown_control_nul')
+        self.assertClosed(raw.replace(b'Dockerfile:42',b'Dockerfile:\xff'),'diagnostic_unknown_utf8')
+        self.assertClosed(raw+b'\n'*65537,'diagnostic_unknown_bounds')
+        self.assertEqual(ci.classify_command_output(raw+b'x'*ci.DIAGNOSTIC_BYTES),'diagnostic_truncated')
+        self.assertClosed(raw.replace(b'Dockerfile:42',b'x'*8193),'diagnostic_unknown_control_cr')
+        self.assertClosed(raw.replace(b'#15 [builder',b'x'*8193+b'\n#15 [builder'),'diagnostic_unknown_bounds')
+
+    def test_no_normalization_after_a_refusal(self):
+        for final in (b'\x1b[31m'+FINAL_137+b'\x1b[0m',b'PRIVATE_CANARY\r'+FINAL_137,FINAL_137+b'\t',b' '+FINAL_137):
+            with self.subTest(final=final[:20]):self.assertClosed(buildx_failure(final),'diagnostic_unknown_control_cr')
+        self.assertClosed(b'#9 x\ry\n','diagnostic_unknown_control_cr')
+        self.assertClosed(b'#9 x\ry\n\n\n','diagnostic_unknown_control_cr')
+        self.assertClosed(b'#9 x\ry\n'+FINAL_137+b'\n\n','observed_exit_137')
 
 class WebContextCheck(unittest.TestCase):
     def test_check_arguments_preserve_exact_inputs_without_build_outputs(self):
@@ -397,7 +544,7 @@ class WebContextCheck(unittest.TestCase):
             ci.check_web_context(helper,root,private,source,lock,'c'*32,'owned',docker=docker,start_builder=start,
                                  source=lambda:seen.append('source'),disk=lambda:seen.append('disk'),record=record)
             self.assertTrue((private/'web/Dockerfile').is_file());self.assertFalse((private/'assets').exists())
-            self.assertEqual(len(commands),1);self.assertEqual(commands[0][1],{'seconds':180})
+            self.assertEqual(len(commands),1);self.assertEqual(commands[0][1],{'seconds':180,'buildx_client':True})
             self.assertIn('--call=check',commands[0][0]);self.assertEqual(seen,['source','disk','source','builder','check','guard','source'])
             self.assertEqual(record['phase'],'web-check');self.assertEqual(record['step'],'web-check')
             self.assertEqual(record['status'],'passed');self.assertFalse(record['durableQualified']);self.assertEqual(record['images'],{})
