@@ -59,9 +59,13 @@ COPY . .
 # Read the package name from the app manifest. The published CLI also owns the
 # `sim` package name, so a hard-coded historical name can silently prune the CLI
 # instead of the application after either package is renamed.
-RUN APP_PACKAGE_NAME="$(bun -e "console.log(require('./apps/sim/package.json').name)")" && \
+# Turbo cannot parse the leading attribution comment accepted by Bun. Derive
+# only its prune input; preserve the admitted lock and restore it for deps/build.
+RUN bun -e 'const fs=require("node:fs"),p="bun.lock",b=fs.readFileSync(p),o=fs.readFileSync("/tmp/memlia-build/bun.lock"),h=Buffer.from("// Modified by Memlia in 2026. Upstream Apache-2.0 license and notices retained.\n");if(!b.equals(o)||!b.subarray(0,h.length).equals(h)||b[h.length]!==123)throw new Error("prune_lock_refused");fs.writeFileSync(p,b.subarray(h.length));' && \
+    APP_PACKAGE_NAME="$(bun -e "console.log(require('./apps/sim/package.json').name)")" && \
     TURBO_VERSION="$(bun -e "console.log(require('./package.json').devDependencies.turbo)")" && \
-    bunx --bun "turbo@${TURBO_VERSION}" prune "$APP_PACKAGE_NAME" --docker
+    bunx --bun "turbo@${TURBO_VERSION}" prune "$APP_PACKAGE_NAME" --docker && \
+    cp /tmp/memlia-build/bun.lock ./bun.lock
 
 # ========================================
 # Dependencies Stage: Install Dependencies

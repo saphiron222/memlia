@@ -7,6 +7,8 @@ import subprocess
 import hashlib
 import os
 import re
+import shutil
+import sys
 import unittest
 
 spec = importlib.util.spec_from_file_location('prepare_context', Path(__file__).with_name('prepare_context.py'))
@@ -162,6 +164,74 @@ class CronArchitectureTests(unittest.TestCase):
             if name.startswith('apk/'):
                 self.assertIn('/x86_64/',amd[name][0]);self.assertNotEqual(amd[name][1],arm[name][1])
         with self.assertRaises(ValueError):module.asset_pins('amd64\n')
+
+class TurboLockTests(unittest.TestCase):
+    HEADER = b'// Modified by Memlia in 2026. Upstream Apache-2.0 license and notices retained.\n'
+    BODY = b'{"lockfileVersion":1,"workspaces":{},"packages":{}}\n'
+
+    def prune(self, recipe, original=None, provenance=None):
+        """Execute the actual RUN with native Bun; only Turbo is substituted.
+
+        Native Turbo parsing/pruning is a separate opt-in diagnostic. This small
+        oracle checks its exact input and that downstream stages get the original.
+        """
+        bun = shutil.which('bun')
+        if not bun:
+            self.skipTest('native Bun required for Docker RUN input check')
+        text = (Path(__file__).resolve().parents[4] / 'docker' / recipe).read_text()
+        command = next(line[4:] for line in text.replace('\\\n', '').splitlines()
+                       if line.startswith('RUN ') and ' prune ' in line)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            lock = self.HEADER + self.BODY if original is None else original
+            (root / 'bun.lock').write_bytes(lock)
+            source = root / 'provenance'; source.mkdir()
+            (source / 'bun.lock').write_bytes(lock if provenance is None else provenance)
+            (root / 'package.json').write_text('{"devDependencies":{"turbo":"2.9.14"}}')
+            (root / 'apps/sim').mkdir(parents=True)
+            (root / 'apps/sim/package.json').write_text('{"name":"@sim/app"}')
+            binary = root / 'bin'; binary.mkdir()
+            (binary / 'bun').symlink_to(bun)
+            fake = binary / 'bunx'
+            fake.write_text('#!' + sys.executable + '\n'
+                'from pathlib import Path\n'
+                'import json\n'
+                'data=Path("bun.lock").read_bytes()\n'
+                'assert data==' + repr(self.BODY) + '\n'
+                'assert json.loads(data)["lockfileVersion"]==1\n'
+                'Path("prune-called").write_text("called")\n')
+            fake.chmod(0o700)
+            result = subprocess.run(['/bin/sh', '-ec', command.replace('/tmp/memlia-build', str(source))],
+                cwd=root, env={'PATH': str(binary) + ':/usr/bin:/bin'},
+                capture_output=True, timeout=10)
+            return result, (root / 'bun.lock').read_bytes(), (root / 'prune-called').exists()
+
+    def test_pruner_receives_only_lock_body_then_restores_original_notice_and_bytes(self):
+        for recipe in ('app.Dockerfile', 'realtime.Dockerfile'):
+            with self.subTest(recipe=recipe):
+                result, lock, called = self.prune(recipe)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue(called)
+                self.assertEqual(lock, self.HEADER + self.BODY)
+
+    def test_unexpected_header_is_refused_before_turbo_or_lock_mutation(self):
+        for lock in (self.BODY, b'// another header\n' + self.BODY,
+                     self.HEADER + b'\n' + self.BODY):
+            for recipe in ('app.Dockerfile', 'realtime.Dockerfile'):
+                with self.subTest(recipe=recipe, lock=lock):
+                    result, after, called = self.prune(recipe, original=lock)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertFalse(called)
+                    self.assertEqual(after, lock)
+
+    def test_mismatched_admitted_lock_is_refused_before_turbo_or_mutation(self):
+        for recipe in ('app.Dockerfile', 'realtime.Dockerfile'):
+            with self.subTest(recipe=recipe):
+                result, lock, called = self.prune(recipe, provenance=b'different source')
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(called)
+                self.assertEqual(lock, self.HEADER + self.BODY)
+
 
 class DockerProvenanceTests(unittest.TestCase):
     def test_real_guard_rejects_missing_malformed_or_mismatched_arguments(self):

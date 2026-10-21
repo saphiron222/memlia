@@ -27,8 +27,12 @@ WORKDIR /app
 
 COPY . .
 
-RUN TURBO_VERSION="$(bun -e "console.log(require('./package.json').devDependencies.turbo)")" && \
-    bunx --bun "turbo@${TURBO_VERSION}" prune @sim/realtime --docker
+# Turbo needs a comment-free prune input; the admitted lock and notice stay
+# byte-identical outside this temporary derivation, as in the app pruner.
+RUN bun -e 'const fs=require("node:fs"),p="bun.lock",b=fs.readFileSync(p),o=fs.readFileSync("/tmp/memlia-build/bun.lock"),h=Buffer.from("// Modified by Memlia in 2026. Upstream Apache-2.0 license and notices retained.\n");if(!b.equals(o)||!b.subarray(0,h.length).equals(h)||b[h.length]!==123)throw new Error("prune_lock_refused");fs.writeFileSync(p,b.subarray(h.length));' && \
+    TURBO_VERSION="$(bun -e "console.log(require('./package.json').devDependencies.turbo)")" && \
+    bunx --bun "turbo@${TURBO_VERSION}" prune @sim/realtime --docker && \
+    cp /tmp/memlia-build/bun.lock ./bun.lock
 
 # ========================================
 # Dependencies Stage: Install Dependencies
