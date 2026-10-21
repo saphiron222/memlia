@@ -242,15 +242,18 @@ jobs:
           module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
           path=Path(sys.argv[2])/'summary.json'
           if not path.exists():
-              print(json.dumps({'status':'failed','phase':'preflight','cleanup':False,'imagesBuilt':0,'durableQualified':False}))
+              print(json.dumps({'status':'failed','phase':'preflight','step':'preflight','errorCode':'unexpected_failure','cleanup':False,'imagesBuilt':0,'durableQualified':False}))
           else:
               fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
               with os.fdopen(fd,'rb') as f:
                   info=os.fstat(f.fileno());assert stat.S_ISREG(info.st_mode) and info.st_uid==0 and info.st_nlink==1
                   raw=f.read(4097)
               assert len(raw)<=4096
-              value=json.loads(raw);assert set(value)=={'status','phase','cleanup','imagesBuilt','durableQualified'}
+              value=json.loads(raw);assert set(value)=={'status','phase','step','errorCode','cleanup','imagesBuilt','durableQualified'}
               assert value['status'] in ('passed','failed') and value['phase'] in module.PHASES
+              assert value['step'] in module.STEPS and value['errorCode'] in module.ERROR_CODES
+              assert value['step']==value['phase'] or value['phase']=='contexts' and value['step'] in {'cron-assets',*('context-'+name for name in module.APPS)}
+              assert (value['errorCode']=='none') == (value['status']=='passed')
               assert type(value['imagesBuilt']) is int and 0<=value['imagesBuilt']<=5
               assert type(value['cleanup']) is bool and type(value['durableQualified']) is bool
               if value['status']=='passed':

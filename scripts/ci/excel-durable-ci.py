@@ -17,6 +17,7 @@ import shutil
 import signal
 import socket
 import stat
+import subprocess
 import sys
 import threading
 import time
@@ -30,6 +31,19 @@ ORIGIN='https://localhost:18443'
 REGISTRY='registry:3.0.0@sha256:6c5666b861f3505b116bb9aa9b25175e71210414bd010d92035ff64018f9457e'
 TYPE_IMAGE='node:24.22.0-bookworm@sha256:14078204b6bb268c107ceff6d3c43f45a888105e5c2b18b14c32b3409d93a1b0'
 PHASES={'preflight','tools','typegen','typecheck','contexts','registry','builder','images','tls','qualification','complete'}
+STEPS=PHASES|{'cron-assets'}|{'context-'+name for name in APPS}
+ERROR_CODES={'none','source_refused','file_missing','command_failed','timeout','preparation_refused','unexpected_failure'}
+
+def error_code(error):
+    # Exact allowlist only: exception text/path/argv never enter the public receipt.
+    if isinstance(error,FileNotFoundError):return 'file_missing'
+    if isinstance(error,(TimeoutError,subprocess.TimeoutExpired)):return 'timeout'
+    if isinstance(error,subprocess.CalledProcessError):return 'command_failed'
+    if isinstance(error,ValueError):
+        if error.args==('source_refused',):return 'source_refused'
+        if error.args==('recipe_build_failed',):return 'command_failed'
+        return 'preparation_refused'
+    return 'unexpected_failure'
 
 
 def require(ok,code='ci_preparation_refused'):
@@ -99,7 +113,11 @@ def project(record):
     require(type(record.get('images')) is dict and set(record['images'])<=set(APPS))
     require(record['phase'] in PHASES and record['status'] in ('passed','failed') and type(record['cleanup'])is bool)
     if record['status']=='passed':require(record['phase']=='complete' and record['cleanup'] and set(record['images'])==set(APPS) and record.get('durableQualified') is True)
-    return {'status':record['status'],'phase':record['phase'],'cleanup':record['cleanup'],
+    step=record.get('step',record['phase']);code=record.get('errorCode','none' if record['status']=='passed' else 'unexpected_failure')
+    require(step in STEPS and code in ERROR_CODES)
+    require(step==record['phase'] or record['phase']=='contexts' and step in {'cron-assets',*('context-'+name for name in APPS)})
+    require((code=='none') == (record['status']=='passed'))
+    return {'status':record['status'],'phase':record['phase'],'step':step,'errorCode':code,'cleanup':record['cleanup'],
             'imagesBuilt':len(record['images']),'durableQualified':record.get('durableQualified') is True}
 
 
@@ -174,7 +192,7 @@ def run(expected,output,node,wheelhouse):
         require(info['OSType']=='linux' and info['Architecture']=='x86_64' and info['CgroupVersion']=='2'
                 and info['DockerRootDir']=='/var/lib/docker' and info['MemTotal']>=14*1024**3)
         # No existing UID authority is changed. setpriv and the host peer verify UID1001 natively.
-        record['phase']='tools'
+        record['phase']='tools';record['step']='tools'
         shutil.copyfile(node.resolve(strict=True),tools/'node');(tools/'node').chmod(0o755)
         require(command([str(tools/'node'),'--version'],capture=True).strip()==b'v24.22.0')
         command(['/usr/bin/curl','--fail','--location','--silent','--show-error','--max-time','120',
@@ -220,7 +238,7 @@ def run(expected,output,node,wheelhouse):
         type_image_id=one(['image','inspect',TYPE_IMAGE])['Id']
         def type_phase(phase,argv):
             nonlocal type_pending
-            record['phase']=phase;name='memlia-excel-'+phase+'-'+nonce
+            record['phase']=phase;record['step']=phase;name='memlia-excel-'+phase+'-'+nonce
             work=private/phase;work.mkdir(mode=0o700)
             require(not docker(['container','ls','-aq','--filter','name=^/'+name+'$'],capture=True).strip())
             type_pending=name
@@ -245,13 +263,16 @@ def run(expected,output,node,wheelhouse):
             require(not row['State']['Running'] and not row['State']['OOMKilled'] and row['State']['ExitCode']==0
                     and result['status']=='passed' and result['normalCompletion'] is True)
             record[phase]=result;source()
-        check_types(type_phase)
-        record['phase']='contexts'
+        record['phase']='contexts';record['step']='cron-assets'
         command([sys.executable,'-B',str(ROOT/'deploy/memlia/images/tests/fetch_cron_assets.py'),str(private/'assets'),'--architecture','amd64'],seconds=300)
         for name in APPS:
+            record['step']='context-'+name
             prepare.prepare('app' if name=='web' else name,ROOT,ROOT/'deploy/memlia/images',private/name,
                             private/'assets' if name=='cron' else None,source_commit=expected,architecture='amd64')
-        record['phase']='registry';(private/'registry').mkdir(mode=0o700)
+        # Capture admitted source before Next generates ignored next-env.d.ts.
+        # Complete type checks still precede every registry/image build operation.
+        check_types(type_phase)
+        record['phase']='registry';record['step']='registry';(private/'registry').mkdir(mode=0o700)
         require(not docker(['container','ls','-aq','--filter','name=^/'+registry+'$'],capture=True).strip())
         docker(['pull','--platform','linux/amd64',REGISTRY],seconds=180)
         registry_image=one(['image','inspect',REGISTRY])['Id']
@@ -265,7 +286,7 @@ def run(expected,output,node,wheelhouse):
         registry_owned(one(['container','inspect',registry_id]),registry_id,registry,registry_image,nonce,private/'registry')
         docker(['container','start',registry_id])
         # Loopback only, not a registry login/publication; no daemon insecure-registry setting is changed.
-        record['phase']='builder'
+        record['phase']='builder';record['step']='builder'
         require(not docker(['container','ls','-aq','--filter','name=^/buildx_buildkit_'+builder+'0$'],capture=True).strip()
                 and not docker(['volume','ls','-q','--filter','name=^buildx_buildkit_'+builder+'0_state$'],capture=True).strip())
         write_private(private/'buildkit.toml',b'[worker.oci]\n  max-parallelism = 1\n')
@@ -291,7 +312,7 @@ def run(expected,output,node,wheelhouse):
                 require(docker(['container','exec',builder_id,'cat','/sys/fs/cgroup/'+path],capture=True).decode().strip()==value)
         kernel()
         for name in APPS:
-            record['phase']='images';source();disk()
+            record['phase']='images';record['step']='images';source();disk()
             docker(build_arguments(builder,private/name,name,expected,lock,nonce),seconds=5400 if name=='web' else 1200)
             kernel()
             tag=prefix(nonce)+'/'+name+':candidate'
@@ -305,7 +326,7 @@ def run(expected,output,node,wheelhouse):
         for name,ref in (('db',app.POSTGRES),('redis',app.CACHE)):
             docker(['pull','--platform','linux/amd64',ref],seconds=180)
             row=one(['image','inspect',ref]);images[name]={'reference':ref,'imageId':row['Id']}
-        record['phase']='tls'
+        record['phase']='tls';record['step']='tls'
         command(['/usr/bin/openssl','req','-x509','-newkey','rsa:3072','-nodes','-days','1','-subj','/CN=Memlia CI synthetic localhost',
                  '-addext','subjectAltName=DNS:localhost','-addext','basicConstraints=critical,CA:TRUE',
                  '-keyout',str(private/'localhost.key'),'-out',str(private/'localhost.pem')])
@@ -352,7 +373,7 @@ proxy_set_header X-Forwarded-Proto https; proxy_set_header X-Forwarded-For $remo
         app.durable_configuration(qualification)
         for name in images:app.verify_durable_image(one(['image','inspect',images[name]['reference']]),name,qualification)
         write_private(private/'qualification.json',qualification)
-        record['phase']='qualification';source()
+        record['phase']='qualification';record['step']='qualification';source()
         command([sys.executable,'-B',str(ROOT/'runtimes/excel/linux/qualification.py'),'--wheelhouse',str(wheelhouse),
                  '--output',str(private/'qualification'),'--exercise-host','--exercise-application',
                  '--durable-compose-config',str(private/'qualification.json')],seconds=2100)
@@ -361,9 +382,10 @@ proxy_set_header X-Forwarded-Proto https; proxy_set_header X-Forwarded-For $remo
         durable=result['hostConsumer']['durableApplication']
         require(durable['passed'] is True and durable['businessPassed'] is True and durable['drainPassed'] is True
                 and durable['browserClosedBeforeWorker'] is True and durable['cleanupComplete'] is True)
-        record['durableQualified']=True;record['phase']='complete';record['status']='passed'
-    except Exception:
+        record['durableQualified']=True;record['phase']='complete';record['step']='complete';record['status']='passed'
+    except Exception as error:
         write_private(private/'failure.private.log',traceback.format_exc(limit=12).encode()[:32768])
+        record['errorCode']=error_code(error)
     finally:
         # Only packaging/proxy resources are retired here. The native recipe owns its
         # DB/volumes; unknown application state remains retained, never compose down.
