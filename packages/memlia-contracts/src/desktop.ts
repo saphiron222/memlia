@@ -29,7 +29,7 @@ export const SessionCapabilitySchema = z.strictObject({
   qualification: ArtifactRef,
 })
 export const AgentCommandSchema = z.strictObject({
-  schemaVersion: z.literal('memlia.desktop-command/v1'),
+  schemaVersion: z.literal('memlia.desktop-command/v2'),
   ...session,
   commandId: Id,
   runId: Id,
@@ -46,6 +46,7 @@ export const AgentCommandSchema = z.strictObject({
     }),
     z.strictObject({
       kind: z.literal('procedure.run'),
+      mode: z.enum(['test', 'production']),
       procedure: ArtifactRef,
       parameters: ArtifactRef,
     }),

@@ -1,3 +1,4 @@
+// Modified by Memlia: immutable private Office copies reuse native storage and accounting.
 /**
  * Workspace file storage system
  * Files uploaded at workspace level persist indefinitely and are accessible across all workflows
@@ -326,7 +327,7 @@ interface WorkspaceFileMetadataInsert {
   originalName: string
   contentType: string
   size: number
-  context?: 'workspace' | OwnedFileContext
+  context?: 'workspace' | OwnedFileContext | 'office-backup'
 }
 
 /**
@@ -550,12 +551,25 @@ export async function stageFileContent(args: {
   content: Buffer
   folderId?: string | null
   signal?: AbortSignal
+  /** Only an in-process server reservation can select the reserved private namespace. */
+  officeBackupIdentity?: OfficeBackupFileIdentity
 }): Promise<StagedFileContent> {
   args.signal?.throwIfAborted()
   const name = normalizeWorkspaceFileItemName(args.name, 'File')
   const owner = Object.freeze({ ...args.owner })
-  const key =
-    owner.entityType === 'workspace'
+  const backup = args.officeBackupIdentity
+  if (
+    backup &&
+    (!officeBackupIdentities.has(backup) ||
+      owner.entityType !== 'workspace' ||
+      owner.entityId !== backup.workspaceId ||
+      args.userId !== backup.userId)
+  ) {
+    throw new Error('office_backup_identity_refused')
+  }
+  const key = backup
+    ? backup.key
+    : owner.entityType === 'workspace'
       ? generateWorkspaceFileKey(owner.entityId, name)
       : `project/${owner.entityId}/${buildStorageKeySegment(`${Date.now()}-${generateShortId(16)}-`, name)}`
   const staged = Object.freeze({
@@ -567,6 +581,7 @@ export async function stageFileContent(args: {
     contentHash: sha256Hex(args.content),
   })
   stagedFileContents.add(staged)
+  if (backup) privateOfficeStagedContents.add(staged)
   try {
     const uploaded = await uploadFile({
       file: args.content,
@@ -586,10 +601,12 @@ export async function stageFileContent(args: {
         ...(args.folderId ? { folderId: args.folderId } : {}),
       },
       persistMetadata: false,
+      ...(backup ? { createOnly: true } : {}),
       signal: args.signal,
     })
     if (uploaded.key !== key) throw new Error('Storage returned an unexpected file key')
   } catch (error) {
+    if (backup) throw new OfficeBackupStorageUnknownError(backup)
     await discardStagedFileContent(staged)
     throw error
   }
@@ -651,6 +668,9 @@ async function finalizeStagedFileContent<T>(
       return result
     })
   } catch (error) {
+    // Private backup objects are retained even after a known rollback. Only explicit
+    // reconciliation may decide their lifecycle; the adapter must never retry/delete.
+    if (privateOfficeStagedContents.has(staged)) throw error
     if (preparedForCommit && !isPostgresCommitRejection(error)) {
       logger.error(
         'File commit outcome is uncertain; retaining staged content for reconciliation',
@@ -940,6 +960,173 @@ export async function createOwnedWorkspaceFile<T>(params: {
   })
   void maybeNotifyStorageLimitForBillingContext(billing, updatedUsage)
   return { fileId, owner }
+}
+
+export const MAX_OFFICE_BACKUP_BYTES = 10_000_000
+const officeBackupIdentities = new WeakSet<OfficeBackupFileIdentity>()
+const attemptedOfficeBackups = new WeakSet<OfficeBackupFileIdentity>()
+const privateOfficeStagedContents = new WeakSet<StagedFileContent>()
+const privateSegment = /^[A-Za-z0-9_-]{1,128}$/
+
+export interface OfficeBackupFileIdentity {
+  readonly id: string
+  readonly key: string
+  readonly workspaceId: string
+  readonly userId: string
+}
+
+export interface OfficeBackupFileRecord extends OfficeBackupFileIdentity {
+  readonly size: number
+  /** Canonical content_updated_at in milliseconds, not a workbook revision. */
+  readonly version: number
+}
+
+/** Server-only reservation, not authority. The caller must authorize the native use case. */
+export function planOfficeBackupFileIdentity(workspaceId: string, userId: string) {
+  if (!privateSegment.test(workspaceId) || !privateSegment.test(userId)) {
+    throw new Error('office_backup_identity_refused')
+  }
+  const id = `wf_${generateShortId(32)}`
+  const identity: OfficeBackupFileIdentity = Object.freeze({
+    id,
+    workspaceId,
+    userId,
+    key: `workspace/${workspaceId}/office-backups/${id}.xlsx`,
+  })
+  officeBackupIdentities.add(identity)
+  return identity
+}
+
+export class OfficeBackupStorageUnknownError extends Error {
+  readonly code = 'office_backup_storage_unknown'
+  constructor(readonly identity: OfficeBackupFileIdentity) {
+    super('office_backup_storage_unknown')
+    this.name = 'OfficeBackupStorageUnknownError'
+  }
+}
+
+function officeBackupRecord(
+  row: WorkspaceFileRow | undefined,
+  expected: Pick<OfficeBackupFileIdentity, 'id' | 'workspaceId' | 'userId'>
+): OfficeBackupFileRecord | null {
+  if (
+    !row ||
+    row.id !== expected.id ||
+    row.workspaceId !== expected.workspaceId ||
+    row.userId !== expected.userId ||
+    row.context !== 'office-backup' ||
+    row.key !== `workspace/${expected.workspaceId}/office-backups/${expected.id}.xlsx` ||
+    row.projectId !== null ||
+    row.organizationId !== null ||
+    row.chatId !== null ||
+    row.folderId !== null ||
+    row.deletedAt !== null ||
+    row.contentType !== 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
+    !Number.isSafeInteger(row.sizeBytes) ||
+    row.sizeBytes === null ||
+    row.sizeBytes < 1 ||
+    row.sizeBytes > MAX_OFFICE_BACKUP_BYTES ||
+    !(row.contentUpdatedAt instanceof Date) ||
+    !Number.isSafeInteger(row.contentUpdatedAt.getTime()) ||
+    row.contentUpdatedAt.getTime() < 0
+  )
+    return null
+  return Object.freeze({
+    id: row.id,
+    key: row.key,
+    workspaceId: expected.workspaceId,
+    userId: row.userId,
+    size: row.sizeBytes,
+    version: row.contentUpdatedAt.getTime(),
+  })
+}
+
+/** Private canonical metadata only; generic workspace/VFS lookups never admit this category. */
+export async function readOfficeBackupFileRecord(
+  expected: Pick<OfficeBackupFileIdentity, 'id' | 'workspaceId' | 'userId'>
+): Promise<OfficeBackupFileRecord | null> {
+  const [row] = await db
+    .select()
+    .from(workspaceFiles)
+    .where(
+      and(
+        eq(workspaceFiles.id, expected.id),
+        eq(workspaceFiles.workspaceId, expected.workspaceId),
+        eq(workspaceFiles.userId, expected.userId),
+        eq(workspaceFiles.context, 'office-backup'),
+        isNull(workspaceFiles.projectId),
+        isNull(workspaceFiles.organizationId),
+        isNull(workspaceFiles.chatId),
+        isNull(workspaceFiles.folderId),
+        isNull(workspaceFiles.deletedAt)
+      )
+    )
+    .limit(1)
+  return officeBackupRecord(row, expected)
+}
+
+/** Native creation primitive: binary, create-only, accounted, no retry or compensation. */
+export async function createOfficeBackupFile(params: {
+  identity: OfficeBackupFileIdentity
+  content: Buffer
+  signal?: AbortSignal
+  authorizeBeforeCommit(): Promise<void>
+}): Promise<OfficeBackupFileRecord> {
+  const { identity, signal } = params
+  const authorizeBeforeCommit = params.authorizeBeforeCommit
+  if (
+    !officeBackupIdentities.has(identity) ||
+    attemptedOfficeBackups.has(identity) ||
+    typeof authorizeBeforeCommit !== 'function' ||
+    !Buffer.isBuffer(params.content) ||
+    params.content.length < 1 ||
+    params.content.length > MAX_OFFICE_BACKUP_BYTES
+  )
+    throw new Error('office_backup_refused')
+  const content = Buffer.from(params.content)
+  signal?.throwIfAborted()
+  attemptedOfficeBackups.add(identity)
+  try {
+    const staged = await stageFileContent({
+      owner: { entityType: 'workspace', entityId: identity.workspaceId },
+      userId: identity.userId,
+      name: 'office-backup.xlsx',
+      content,
+      contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      officeBackupIdentity: identity,
+      signal,
+    })
+    // This native authorization uses the global pool. Keep it immediately before
+    // opening the transaction: it is a revocation recheck, not an atomic grant.
+    signal?.throwIfAborted()
+    await authorizeBeforeCommit()
+    signal?.throwIfAborted()
+    return await finalizeStagedFileContent(staged, async (tx) => {
+      signal?.throwIfAborted()
+      const accounting = await prepareFileAccountingInTx(tx, {
+        entityType: 'workspace',
+        entityId: identity.workspaceId,
+      })
+      const row = await insertWorkspaceFileMetadataInTx(tx, {
+        id: identity.id,
+        key: identity.key,
+        workspaceId: identity.workspaceId,
+        userId: identity.userId,
+        folderId: null,
+        originalName: 'office-backup.xlsx',
+        contentType: staged.contentType,
+        size: content.length,
+        context: 'office-backup',
+      })
+      const record = officeBackupRecord(row, identity)
+      if (!record || record.size !== content.length) throw new Error('office_backup_refused')
+      await accounting.mutation.applyDelta(content.length)
+      signal?.throwIfAborted()
+      return record
+    })
+  } catch {
+    throw new OfficeBackupStorageUnknownError(identity)
+  }
 }
 
 /**

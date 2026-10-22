@@ -1,3 +1,4 @@
+// Modified by Memlia: explicit disposal of process-owned execution-signal hubs.
 import { createLogger } from '@sim/logger'
 import { toError } from '@sim/utils/errors'
 import { isRecordLike } from '@sim/utils/object'
@@ -37,6 +38,7 @@ interface ReadySignal {
 }
 
 export interface ExecutionSignalHub {
+  dispose(): void
   subscribe(executionId: string, handler: ExecutionSignalHandler): Promise<() => void>
 }
 
@@ -61,6 +63,7 @@ class RedisExecutionSignalHub implements ExecutionSignalHub {
   private readonly subscriptions = new Map<string, ChannelSubscription>()
   private readySignal: ReadySignal | undefined
   private connectedOnce = false
+  private disposed = false
 
   constructor(redisUrl: string) {
     const options = {
@@ -103,6 +106,7 @@ class RedisExecutionSignalHub implements ExecutionSignalHub {
   }
 
   async subscribe(executionId: string, handler: ExecutionSignalHandler): Promise<() => void> {
+    if (this.disposed) throw new Error('Execution signal hub is closed')
     const channel = getExecutionSignalChannel(executionId)
     let channelHandlers = this.handlers.get(channel)
     if (!channelHandlers) {
@@ -118,6 +122,7 @@ class RedisExecutionSignalHub implements ExecutionSignalHub {
     }
     try {
       await subscription.ready
+      if (this.disposed) throw new Error('Execution signal hub is closed')
     } catch (error) {
       if (this.subscriptions.get(channel) === subscription) {
         this.subscriptions.delete(channel)
@@ -130,6 +135,7 @@ class RedisExecutionSignalHub implements ExecutionSignalHub {
     }
 
     return () => {
+      if (this.disposed) return
       const current = this.handlers.get(channel)
       if (!current) return
       current.delete(handler)
@@ -143,6 +149,15 @@ class RedisExecutionSignalHub implements ExecutionSignalHub {
         })
       })
     }
+  }
+
+  dispose(): void {
+    if (this.disposed) return
+    this.disposed = true
+    this.handlers.clear()
+    this.subscriptions.clear()
+    // Explicit shutdown stops reconnect attempts; it must not create another client.
+    this.subscriber.disconnect()
   }
 
   private createSubscription(channels: string[]): ChannelSubscription {
@@ -162,8 +177,10 @@ class RedisExecutionSignalHub implements ExecutionSignalHub {
    */
   private async subscribeChannels(...channels: string[]): Promise<void> {
     while (this.subscriber.status !== 'ready') {
+      if (this.disposed) throw new Error('Execution signal hub is closed')
       await this.waitForConnectionReady()
     }
+    if (this.disposed) throw new Error('Execution signal hub is closed')
     await this.subscriber.subscribe(...channels)
   }
 
@@ -229,6 +246,7 @@ class RedisExecutionSignalHub implements ExecutionSignalHub {
   }
 
   private async handleReady(): Promise<void> {
+    if (this.disposed) return
     const reconnect = this.connectedOnce
     this.connectedOnce = true
     if (!reconnect || this.handlers.size === 0) return
@@ -243,6 +261,7 @@ class RedisExecutionSignalHub implements ExecutionSignalHub {
     }
     try {
       await subscription.ready
+      if (this.disposed) return
       for (const channel of channels) {
         if (this.handlers.has(channel) && this.subscriptions.get(channel) === subscription) {
           this.dispatch(channel, 'reconnected')
@@ -275,8 +294,15 @@ class RedisExecutionSignalHub implements ExecutionSignalHub {
 
 class LocalExecutionSignalHub implements ExecutionSignalHub {
   private readonly handlers = new Map<string, Set<ExecutionSignalHandler>>()
+  private disposed = false
+
+  dispose(): void {
+    this.disposed = true
+    this.handlers.clear()
+  }
 
   async subscribe(executionId: string, handler: ExecutionSignalHandler): Promise<() => void> {
+    if (this.disposed) throw new Error('Execution signal hub is closed')
     const channel = getExecutionSignalChannel(executionId)
     let channelHandlers = this.handlers.get(channel)
     if (!channelHandlers) {
@@ -323,6 +349,13 @@ export function getExecutionSignalHub(): ExecutionSignalHub {
   }
   executionSignalGlobal._executionSignalHub = new RedisExecutionSignalHub(redisUrl)
   return executionSignalGlobal._executionSignalHub
+}
+
+/** Closes the existing process-owned hub without opening a replacement connection. */
+export function closeExecutionSignalHub(): void {
+  const hub = executionSignalGlobal._executionSignalHub
+  executionSignalGlobal._executionSignalHub = undefined
+  hub?.dispose()
 }
 
 /**

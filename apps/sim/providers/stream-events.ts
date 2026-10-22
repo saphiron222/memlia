@@ -1,3 +1,4 @@
+// Modified by Memlia: preserve closed provider turn-finish observations.
 import { isRecordLike } from '@sim/utils/object'
 /**
  * Canonical agent stream event contract (provider → executor).
@@ -15,6 +16,9 @@ export type AgentStreamFormat = 'text' | 'agent-events-v1'
 export type ToolCallEndStatus = 'success' | 'error' | 'cancelled'
 
 export type TextDeltaTurn = 'intermediate' | 'final'
+
+/** Provider observation only; neither workflow success nor a complete synthesis. */
+export type AgentTurnFinishReason = 'end_turn' | 'stop_sequence' | 'max_tokens' | 'tool_use'
 
 /**
  * Classification of a `text_delta`:
@@ -40,6 +44,8 @@ export type AgentStreamEvent =
        */
       type: 'turn_end'
       turn: TextDeltaTurn
+      /** Omitted by legacy adapters; max_tokens explicitly denotes limited output. */
+      finishReason?: AgentTurnFinishReason
     }
   | { type: 'thinking_delta'; text: string }
   | { type: 'tool_call_start'; id: string; name: string }
@@ -65,6 +71,15 @@ export function isTextDeltaTurn(value: unknown): value is TextDeltaTurn {
   return value === 'intermediate' || value === 'final'
 }
 
+export function isAgentTurnFinishReason(value: unknown): value is AgentTurnFinishReason {
+  return (
+    value === 'end_turn' ||
+    value === 'stop_sequence' ||
+    value === 'max_tokens' ||
+    value === 'tool_use'
+  )
+}
+
 export function isTextDeltaClassification(value: unknown): value is TextDeltaClassification {
   return isTextDeltaTurn(value) || value === 'pending'
 }
@@ -81,7 +96,14 @@ export function isAgentStreamEvent(value: unknown): value is AgentStreamEvent {
         (value.turn === undefined || isTextDeltaClassification(value.turn))
       )
     case 'turn_end':
-      return isTextDeltaTurn(value.turn)
+      return (
+        isTextDeltaTurn(value.turn) &&
+        (value.finishReason === undefined ||
+          (isAgentTurnFinishReason(value.finishReason) &&
+            (value.turn === 'intermediate'
+              ? value.finishReason === 'tool_use'
+              : value.finishReason !== 'tool_use')))
+      )
     case 'thinking_delta':
       return typeof value.text === 'string'
     case 'tool_call_start':

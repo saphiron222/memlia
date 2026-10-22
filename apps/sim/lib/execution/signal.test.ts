@@ -1,8 +1,9 @@
+// Modified by Memlia: explicit execution-signal lifecycle regression tests.
 import { EventEmitter } from 'node:events'
 import { redisConfigMockFns } from '@sim/testing/mocks/redis-config.mock'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { connection, mockRedisUrl, mockSubscribe, mockUnsubscribe } = vi.hoisted(() => ({
+const { connection, mockRedisUrl, mockSubscribe, mockUnsubscribe, mockDisconnect } = vi.hoisted(() => ({
   connection: {
     status: 'ready',
     client: undefined as EventEmitter | undefined,
@@ -14,6 +15,7 @@ const { connection, mockRedisUrl, mockSubscribe, mockUnsubscribe } = vi.hoisted(
   },
   mockSubscribe: vi.fn(),
   mockUnsubscribe: vi.fn(),
+  mockDisconnect: vi.fn(),
 }))
 
 vi.mock('ioredis', () => ({
@@ -30,11 +32,13 @@ vi.mock('ioredis', () => ({
 
     subscribe = mockSubscribe
     unsubscribe = mockUnsubscribe
+    disconnect = mockDisconnect
   },
 }))
 
 import { coldConnectionBudgetMs } from '@/lib/core/config/redis-budget'
 import {
+  closeExecutionSignalHub,
   connectExecutionSignalHub,
   getExecutionSignalHub,
   publishLocalExecutionSignal,
@@ -67,6 +71,10 @@ describe('ExecutionSignalHub', () => {
     connection.client = undefined
     mockSubscribe.mockResolvedValue(1)
     mockUnsubscribe.mockResolvedValue(0)
+    mockDisconnect.mockReset().mockImplementation(() => {
+      connection.status = 'end'
+      connection.client?.emit('end')
+    })
     mockRedisUrl.value = 'redis://localhost:6379'
     mockRedisUrl.error = undefined
     const signalGlobal = globalThis as typeof globalThis & { _executionSignalHub?: unknown }
@@ -471,6 +479,79 @@ describe('ExecutionSignalHub', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('closes only an existing Redis hub once without constructing a connection', () => {
+    closeExecutionSignalHub()
+    expect(connection.client).toBeUndefined()
+    expect(mockDisconnect).not.toHaveBeenCalled()
+    const old = getExecutionSignalHub()
+    closeExecutionSignalHub()
+    closeExecutionSignalHub()
+    expect(mockDisconnect).toHaveBeenCalledOnce()
+    connection.status = 'ready'
+    expect(getExecutionSignalHub()).not.toBe(old)
+  })
+
+  it('rejects pending readiness and future subscriptions when explicitly disposed', async () => {
+    connection.status = 'connecting'
+    const old = getExecutionSignalHub()
+    const pending = old.subscribe('execution-pending', vi.fn())
+    const rejected = expect(pending).rejects.toThrow('Redis subscriber connection ended')
+    closeExecutionSignalHub()
+    await rejected
+    await expect(old.subscribe('execution-late', vi.fn())).rejects.toThrow('Execution signal hub is closed')
+    expect(mockSubscribe).not.toHaveBeenCalled()
+    expect(connection.client?.listenerCount('end')).toBe(0)
+  })
+
+  it('does not acknowledge or deliver signals after disposal during a subscription acknowledgement', async () => {
+    let acknowledge!: (value: number) => void
+    mockSubscribe.mockReturnValueOnce(new Promise<number>((resolve) => { acknowledge = resolve }))
+    const handler = vi.fn()
+    const old = getExecutionSignalHub()
+    const pending = old.subscribe('execution-pending', handler)
+    const rejected = expect(pending).rejects.toThrow('Execution signal hub is closed')
+    await vi.waitFor(() => expect(mockSubscribe).toHaveBeenCalledOnce())
+    closeExecutionSignalHub()
+    acknowledge(2)
+    await rejected
+    connection.client?.emit('ready')
+    connection.client?.emit('message', 'execution:signal:execution-pending', 'cancelled')
+    expect(handler).not.toHaveBeenCalled()
+    expect(mockSubscribe).toHaveBeenCalledOnce()
+  })
+
+  it('does not enqueue unsubscribe after disposal while a reconnect acknowledgement is pending', async () => {
+    const hub = getExecutionSignalHub()
+    connection.client?.emit('ready')
+    const handler = vi.fn()
+    await hub.subscribe('execution-live', handler)
+    let acknowledge!: (count: number) => void
+    mockSubscribe.mockReturnValueOnce(new Promise<number>((resolve) => { acknowledge = resolve }))
+    connection.client?.emit('ready')
+    await vi.waitFor(() => expect(mockSubscribe).toHaveBeenCalledTimes(2))
+    closeExecutionSignalHub()
+    acknowledge(2)
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(mockUnsubscribe).not.toHaveBeenCalled()
+    expect(handler).not.toHaveBeenCalledWith('unavailable')
+  })
+
+  it('clears local handlers on close and gives a later caller a fresh usable hub', async () => {
+    mockRedisUrl.value = undefined
+    const old = getExecutionSignalHub()
+    const stale = vi.fn()
+    await old.subscribe('execution-local', stale)
+    closeExecutionSignalHub()
+    await expect(old.subscribe('execution-late', vi.fn())).rejects.toThrow('Execution signal hub is closed')
+    const replacement = getExecutionSignalHub()
+    const current = vi.fn()
+    await replacement.subscribe('execution-local', current)
+    publishLocalExecutionSignal('execution-local', 'cancelled')
+    expect(stale).not.toHaveBeenCalled()
+    expect(current).toHaveBeenCalledExactlyOnceWith('cancelled')
+    expect(mockDisconnect).not.toHaveBeenCalled()
   })
 
   it('begins connecting when asked to connect ahead of a subscription', () => {

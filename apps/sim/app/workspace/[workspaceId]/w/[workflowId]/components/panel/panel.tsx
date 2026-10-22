@@ -1,3 +1,4 @@
+// Modified by Memlia: pass native local profile and preserve refused Chat drafts.
 // Modified by Memlia: delegate persisted diff reads with the captured workflow identity.
 // Modified by Memlia: centralize auto-layout error notification in its shared hook.
 'use client'
@@ -385,6 +386,8 @@ export const Panel = memo(function Panel() {
     isSending: copilotIsSending,
     isReconnecting: copilotIsReconnecting,
     sendMessage: copilotSendMessage,
+    trySubmitMessage: copilotTrySubmitMessage,
+    localChat: copilotLocalChat,
     stopGeneration: copilotStopGeneration,
     resolvedChatId: copilotResolvedChatId,
     messageQueue: copilotMessageQueue,
@@ -476,10 +479,14 @@ export const Panel = memo(function Panel() {
   const handleCopilotSubmit = useCallback(
     (text: string, fileAttachments?: FileAttachmentForApi[], contexts?: ChatContext[]) => {
       const trimmed = text.trim()
-      if (!trimmed && !(fileAttachments && fileAttachments.length > 0)) return
-      copilotSendMessage(trimmed || 'Analyze the attached file(s).', fileAttachments, contexts)
+      if (!trimmed && !(fileAttachments && fileAttachments.length > 0)) return false
+      return copilotTrySubmitMessage(
+        trimmed || 'Analyze the attached file(s).',
+        fileAttachments,
+        contexts
+      )
     },
-    [copilotSendMessage]
+    [copilotTrySubmitMessage]
   )
 
   const openPanel = useCallback(
@@ -1019,6 +1026,7 @@ export const Panel = memo(function Panel() {
                   isSending={copilotIsSending}
                   isReconnecting={copilotIsReconnecting}
                   onSubmit={handleCopilotSubmit}
+                  localChat={copilotLocalChat}
                   onStopGeneration={handleCopilotStopGeneration}
                   messageQueue={copilotMessageQueue}
                   editingQueuedId={copilotEditingQueuedId}

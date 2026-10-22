@@ -1,3 +1,4 @@
+// Modified by Memlia: preserve local provenance when editing a native queue entry.
 import { createLogger } from '@sim/logger'
 import { toError } from '@sim/utils/errors'
 import { toRecord, toRecordOrNull } from '@sim/utils/object'
@@ -214,6 +215,7 @@ export const useMothershipQueueStore = create<MothershipQueueState>()(
             } = next[index]
             next[index] = {
               ...rest,
+              ...(patch.localOrigin === true ? { localOrigin: true as const } : {}),
               ...(queuedSendHandoff?.stopRequired ? { queuedSendHandoff } : {}),
               content: patch.content,
               fileAttachments: patch.fileAttachments,

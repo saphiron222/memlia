@@ -1,3 +1,4 @@
+// Modified by Memlia: scope-bound local Chat capabilities and native composer admission.
 import {
   type Dispatch,
   type SetStateAction,
@@ -121,6 +122,10 @@ import { useNativeActiveTabIds } from '@/app/workspace/[workspaceId]/home/hooks/
 import { useMothershipChatOlderMessages } from '@/app/workspace/[workspaceId]/home/hooks/use-mothership-chat-older-messages'
 import { resolveEffectiveResourceId } from '@/app/workspace/[workspaceId]/home/resource-view-policy'
 import { useFeatureFlag } from '@/app/workspace/[workspaceId]/providers/feature-flags-provider'
+import {
+  type LocalChatPresentation,
+  useLocalChatCapabilities,
+} from '@/hooks/queries/local-chat-capabilities'
 import {
   fetchMothershipChatActiveStreamId,
   fetchMothershipChatHistory,
@@ -264,6 +269,8 @@ interface WithdrawnSendResult {
 type StartSendMessageResult = boolean | WithdrawnSendResult
 
 interface StartSendMessageOptions {
+  /** Ephemeral ownership of an existing native queue entry; never serialized. */
+  localQueueEntryId?: string
   /** Awaited before dispatch. Defaults to the hook's in-flight stop, if any. */
   pendingStop?: Promise<void> | null
   /** Runs once the optimistic user/assistant pair is in the transcript. */
@@ -295,6 +302,7 @@ interface PendingChatAdmission {
 
 /** A send an unmount cleanup withdrew, as handed to the next chat surface. */
 interface WithdrawnSend extends SendPayload {
+  localOrigin?: true
   userMessageId: string
 }
 
@@ -313,6 +321,12 @@ export interface UseChatReturn {
     contexts?: ChatContext[],
     options?: SendMessageOptions
   ) => Promise<void>
+  trySubmitMessage: (
+    message: string,
+    files?: FileAttachmentForApi[],
+    contexts?: ChatContext[]
+  ) => boolean
+  localChat: LocalChatPresentation
   stopGeneration: () => Promise<void>
   resources: MothershipResource[]
   activeResourceId: string | null
@@ -744,6 +758,21 @@ export function useChat(
   const scopeKey = typeof owner === 'string' ? owner : `organization:${owner.organizationId}`
   const session = useSession()
   const viewerId = session.data?.user?.id
+  const localProfile = useLocalChatCapabilities({
+    userId: viewerId,
+    workspaceId,
+    workflowId: options?.workflowId,
+  })
+  const localProfileRef = useRef(localProfile)
+  localProfileRef.current = localProfile
+  const localQueueTicketsRef = useRef(new Map<string, string>())
+  const [adoptedSettings, setAdoptedSettings] = useState<string | null>(null)
+  const adoptedSettingsRef = useRef(adoptedSettings)
+  adoptedSettingsRef.current = adoptedSettings
+  // Subscribe for presentation; send boundaries read the same native store afresh.
+  useMothershipEffortStore((state) => state.modelSelection)
+  useMothershipEffortStore((state) => state.newChatEffort)
+  useMothershipEffortStore((state) => state.chatEfforts)
   const pathname = usePathname()
   const router = useRouter()
   const queryClient = useQueryClient()
@@ -3547,6 +3576,141 @@ export function useChat(
   )
   finalizeRef.current = finalize
 
+  const readLocalSettings = () => {
+    const observed = localProfileRef.current.read()
+    const cid = selectedChatIdRef.current ?? chatIdRef.current
+    const preferences = useMothershipEffortStore.getState()
+    const picked = cid ? preferences.chatEfforts[cid] : null
+    const effort = cid
+      ? (picked?.effort ??
+        queryClient.getQueryData<MothershipChatHistory>(mothershipChatKeys.detail(cid))?.effort)
+      : preferences.newChatEffort
+    return {
+      observed,
+      preferences,
+      effort,
+      token: JSON.stringify([
+        observed.scopeKey,
+        observed.profile,
+        chatKeyRef.current,
+        preferences.modelSelection,
+        effort,
+        picked?.pick,
+      ]),
+    }
+  }
+  const readLocalSettingsRef = useRef(readLocalSettings)
+  readLocalSettingsRef.current = readLocalSettings
+  const localBody = (message: string, userMessageId: string, chatId?: string) => ({
+    message,
+    workspaceId: workspaceIdRef.current,
+    workflowId: workflowIdRef.current,
+    userMessageId,
+    createNewChat: !chatId,
+    ...(chatId ? { chatId } : {}),
+    mode: 'agent' as const,
+  })
+  const checkLocalSend = (
+    message: string,
+    files?: FileAttachmentForApi[],
+    contexts?: ChatContext[],
+    sendOptions?: SendMessageOptions
+  ) => {
+    const { observed, token } = readLocalSettingsRef.current()
+    if (observed.status !== 'ready')
+      return {
+        local: false,
+        token,
+        error:
+          observed.status === 'loading'
+            ? 'Vérification des réglages du cabinet…'
+            : 'Le Chat est indisponible. Réessayez après vérification de vos accès.',
+      }
+    if (observed.profile?.backend === 'legacy') return { local: false, token, error: null }
+    const profile = observed.profile
+    if (
+      profile?.backend !== 'local' ||
+      profile.workspaceId !== workspaceIdRef.current ||
+      profile.workflowId !== workflowIdRef.current
+    )
+      return { local: true, token, error: 'Les réglages ne correspondent plus à ce workflow.' }
+    if (!profile.requestSupported || !workflowIdRef.current)
+      return {
+        local: true,
+        token,
+        error: 'Ouvrez un workflow existant pour utiliser le Chat du cabinet.',
+      }
+    if (
+      (sendOptions?.requestMode ?? requestModeRef.current ?? 'agent') !== 'agent' ||
+      sendOptions?.assistantSearch ||
+      sendOptions?.assistantSearchLevel ||
+      (sendOptions &&
+        ['modelSelection', 'effort', 'desktop'].some((key) => Object.hasOwn(sendOptions, key)))
+    )
+      return {
+        local: true,
+        token,
+        error: 'Ce mode ou ces options ne sont pas disponibles pour le Chat du cabinet.',
+      }
+    if (
+      files?.length ||
+      contexts?.length ||
+      resourcesRef.current.length ||
+      undisplayableResourcesRef.current.length
+    )
+      return {
+        local: true,
+        token,
+        error: 'Retirez explicitement les fichiers, contextes et onglets joints avant cet envoi.',
+      }
+    if (adoptedSettingsRef.current !== token)
+      return { local: true, token, error: 'Choisissez les réglages du cabinet pour continuer.' }
+    if (
+      new TextEncoder().encode(message).byteLength > 64 * 1024 ||
+      new TextEncoder().encode(
+        JSON.stringify(
+          localBody(
+            message,
+            '00000000-0000-0000-0000-000000000000',
+            selectedChatIdRef.current ?? chatIdRef.current
+          )
+        )
+      ).byteLength >
+        96 * 1024
+    )
+      return {
+        local: true,
+        token,
+        error: 'Ce message est trop long. Raccourcissez-le avant de l’envoyer.',
+      }
+    return { local: true, token, error: null }
+  }
+  const checkLocalSendRef = useRef(checkLocalSend)
+  checkLocalSendRef.current = checkLocalSend
+
+  // Presence is fail-closed, including malformed persisted values. The marker is
+  // a refusal boundary; only the current mount owns an ephemeral adoption ticket.
+  const queuedLocalError = (msg: QueuedMothershipMessage) => {
+    const checked = checkLocalSendRef.current(
+      msg.content,
+      msg.fileAttachments,
+      msg.contexts,
+      sendPayload(msg)
+    )
+    if (checked.error) return checked.error
+    if (
+      (Object.hasOwn(msg, 'localOrigin') || checked.local) &&
+      (!checked.local ||
+        msg.localOrigin !== true ||
+        localQueueTicketsRef.current.get(msg.id) !== checked.token)
+    ) {
+      return 'Les réglages ont changé. Modifiez puis renvoyez le message en attente.'
+    }
+    return null
+  }
+  const queuedLocalErrorRef = useRef(queuedLocalError)
+  queuedLocalErrorRef.current = queuedLocalError
+
   const startSendMessage = useCallback(
     async (
       message: string,
@@ -3564,6 +3728,77 @@ export function useChat(
       )
 
       if ((!message.trim() && !fileAttachments?.length) || !scopeKey) return false
+      const localCheck = checkLocalSendRef.current(message, fileAttachments, contexts, options)
+      if (localCheck.error) {
+        setError(localCheck.error)
+        return false
+      }
+      if (options.localQueueEntryId) {
+        const entry = useMothershipQueueStore
+          .getState()
+          .queues[chatKeyRef.current]?.find((item) => item.id === options.localQueueEntryId)
+        const refusal = entry
+          ? queuedLocalErrorRef.current(entry)
+          : 'Le message n’est plus en attente.'
+        if (refusal) {
+          setError(refusal)
+          return false
+        }
+      }
+      const localSend = localCheck.local
+      const localSurface = chatKeyRef.current
+      const localEpoch = queueDispatchEpochRef.current
+      const localIntention = JSON.stringify(
+        sendPayload({
+          content: message,
+          fileAttachments,
+          contexts,
+          requestMode: options.requestMode,
+          assistantSearch: options.assistantSearch,
+          assistantSearchLevel: options.assistantSearchLevel,
+        })
+      )
+      const localStillCurrent = () => {
+        const current = checkLocalSendRef.current(message, fileAttachments, contexts, options)
+        const queuedId = options?.localQueueEntryId
+        const queued = useMothershipQueueStore
+          .getState()
+          .queues[localSurface]?.find((entry) => entry.id === queuedId)
+        const intentionIntact =
+          queuedId &&
+          queued &&
+          !queuedLocalErrorRef.current(queued) &&
+          !userRemovedDuringDispatch.has(queuedId) &&
+          JSON.stringify(sendPayload(queued)) === localIntention
+        return (
+          Boolean(intentionIntact) &&
+          surfaceMountedRef.current &&
+          localSurface === chatKeyRef.current &&
+          localEpoch === queueDispatchEpochRef.current &&
+          current.local &&
+          !current.error &&
+          current.token === localCheck.token
+        )
+      }
+      if (localSend) {
+        // Keep the queue entry and transcript untouched while earlier work settles.
+        try {
+          await (options?.pendingStop ?? pendingStopPromiseRef.current)
+          if (selectedChatIdRef.current ?? chatIdRef.current)
+            await queryClient.cancelQueries({
+              queryKey: mothershipChatKeys.detail(
+                (selectedChatIdRef.current ?? chatIdRef.current)!
+              ),
+            })
+        } catch {
+          setError('L’envoi est en attente. Votre message est conservé.')
+          return false
+        }
+        if (!localStillCurrent()) {
+          setError('Les réglages ont changé. Votre message est conservé.')
+          return false
+        }
+      }
       const { onOptimisticSendApplied } = options ?? {}
       const pendingStop = options?.pendingStop ?? pendingStopPromiseRef.current
       let queuedSendHandoff = options?.queuedSendHandoff
@@ -3587,7 +3822,7 @@ export function useChat(
       let postFailedAtNetwork = false
 
       setError(null)
-      setTransportStreaming()
+      if (!localSend) setTransportStreaming()
 
       /* A retry of a withdrawn send reuses its id so the server deduplicates
          the two attempts; anything else mints a fresh one. */
@@ -3631,7 +3866,7 @@ export function useChat(
          the pick this send's admission stored. A pick changed while the send was pending,
          or a chat an earlier attempt opened with an unknown pick, gets the latest one. */
       const adoptNewChatEffort = (chatId: string, admittedThisSend: boolean) => {
-        if (options?.requestMode === 'assistant') return
+        if (localSend || options?.requestMode === 'assistant') return
         const store = useMothershipEffortStore.getState()
         const latestChoice = store.newChatEffort ?? effortChoice
         if (!latestChoice) return
@@ -3648,7 +3883,7 @@ export function useChat(
         assistantSearchLevel: options?.assistantSearchLevel,
       })
       const writeQueuedSendHandoff = (chatId?: string) => {
-        if (!queuedSendHandoff) return
+        if (localSend || !queuedSendHandoff) return
         if (!chatId && !queuedSendHandoff.supersededStreamId) return
         const { content, ...payloadFields } = payload
         writeQueuedSendHandoffState({
@@ -3665,7 +3900,7 @@ export function useChat(
           requestedAt: Date.now(),
         })
       }
-      if (queuedSendHandoff) {
+      if (queuedSendHandoff && !localSend) {
         writeQueuedSendHandoff(queuedSendHandoff.chatId)
       }
       const messageContexts: ChatMessageContext[] | undefined = contexts?.map((c) => ({
@@ -3718,7 +3953,7 @@ export function useChat(
         ...(storedAttachments && { fileAttachments: storedAttachments }),
         ...(messageContexts && messageContexts.length > 0 ? { contexts: messageContexts } : {}),
       }
-      pendingUserMsgRef.current = cachedUserMsg
+      if (!localSend) pendingUserMsgRef.current = cachedUserMsg
 
       const userAttachments = storedAttachments?.map((f) => ({
         id: f.id,
@@ -3748,12 +3983,17 @@ export function useChat(
         ? queryClient.cancelQueries({ queryKey: mothershipChatKeys.detail(requestChatId) })
         : Promise.resolve()
 
+      const localPublished = new Map<string, string>()
       const applyOptimisticSend = () => {
         const assistantSnapshot = buildAssistantSnapshotMessage({
           id: assistantId,
           content: '',
           contentBlocks: [],
         })
+        if (localSend) {
+          localPublished.set(userMessageId, JSON.stringify(cachedUserMsg))
+          localPublished.set(assistantId, JSON.stringify(assistantSnapshot))
+        }
         if (requestChatId) {
           upsertChatHistory(requestChatId, (current) => ({
             ...current,
@@ -3770,7 +4010,9 @@ export function useChat(
           }))
         }
 
+        if (localSend && !localStillCurrent()) return
         setPendingMessages((prev) => {
+          if (localSend && !localStillCurrent()) return prev
           const nextMessages = prev.filter((m) => m.id !== userMessageId && m.id !== assistantId)
           return [...nextMessages, optimisticUserMessage, optimisticAssistantMessage]
         })
@@ -3782,7 +4024,9 @@ export function useChat(
             ...current,
             messages: current.messages.filter(
               (persistedMessage) =>
-                persistedMessage.id !== userMessageId && persistedMessage.id !== assistantId
+                (persistedMessage.id !== userMessageId && persistedMessage.id !== assistantId) ||
+                (localSend &&
+                  localPublished.get(persistedMessage.id) !== JSON.stringify(persistedMessage))
             ),
             activeStreamId:
               current.activeStreamId === userMessageId ? null : current.activeStreamId,
@@ -3792,7 +4036,14 @@ export function useChat(
         setPendingMessages((prev) =>
           prev.filter(
             (pendingMessage) =>
-              pendingMessage.id !== userMessageId && pendingMessage.id !== assistantId
+              (pendingMessage.id !== userMessageId && pendingMessage.id !== assistantId) ||
+              (localSend &&
+                JSON.stringify(pendingMessage) !==
+                  JSON.stringify(
+                    pendingMessage.id === userMessageId
+                      ? optimisticUserMessage
+                      : optimisticAssistantMessage
+                  ))
           )
         )
       }
@@ -3824,15 +4075,17 @@ export function useChat(
           settled: new Promise((resolve) => {
             resolveAdmission = resolve
           }),
-          send: { ...payload, userMessageId },
+          send: { ...payload, userMessageId, ...(localSend ? { localOrigin: true } : {}) },
         }
         pendingChatAdmissionRef.current = admission
       }
       /** Publish identity before any asynchronous preparation, including query cancellation. */
-      if (!pendingStop && !queuedSendHandoff?.stopRequired) beginSend()
-      applyOptimisticSend()
-      onOptimisticSendApplied?.()
-      consumedByTranscript = true
+      if (!localSend) {
+        if (!pendingStop && !queuedSendHandoff?.stopRequired) beginSend()
+        applyOptimisticSend()
+        onOptimisticSendApplied?.()
+        consumedByTranscript = true
+      }
 
       try {
         if (pendingStop || queuedSendHandoff?.stopRequired) {
@@ -3894,7 +4147,7 @@ export function useChat(
                 queryKey: mothershipChatKeys.detail(requestChatId),
               })
             }
-            applyOptimisticSend()
+            if (!localSend) applyOptimisticSend()
           } catch (err) {
             if (queuedSendHandoff) {
               clearQueuedSendHandoffClaim(queuedSendHandoff.id)
@@ -3912,13 +4165,11 @@ export function useChat(
         }
 
         streamTargetChatId = requestChatId
-        if (!admission) beginSend()
-        if (!admission || gen === undefined) throw new Error('Send admission was not initialized')
-        const abortController = admission.controller
+        if (!localSend && !admission) beginSend()
         await cancelledQuery
 
         const resourceAttachments =
-          options?.requestMode === 'assistant'
+          localSend || options?.requestMode === 'assistant'
             ? undefined
             : buildResourceAttachments(
                 resourcesRef.current,
@@ -3927,7 +4178,7 @@ export function useChat(
                 tableViewContextsRef.current.views
               )
         const desktopChatCapabilities =
-          options?.requestMode === 'assistant'
+          localSend || options?.requestMode === 'assistant'
             ? {}
             : await getDesktopChatCapabilities(
                 desktopScopeIdRef.current,
@@ -3940,52 +4191,95 @@ export function useChat(
                       : null
               )
 
+        if (localSend) {
+          if (
+            !localStillCurrent() ||
+            new TextEncoder().encode(
+              JSON.stringify(localBody(message, userMessageId, requestChatId))
+            ).byteLength >
+              96 * 1024
+          ) {
+            setError('Les réglages ont changé. Votre message est conservé.')
+            return false
+          }
+          setTransportStreaming()
+          pendingUserMsgRef.current = cachedUserMsg
+          if (!admission) beginSend()
+          applyOptimisticSend()
+          // A synchronous subscriber may change the scope or settings during publication.
+          if (!localStillCurrent()) {
+            rollbackOptimisticSend()
+            if (gen === streamGenRef.current && localSurface === chatKeyRef.current) {
+              admission?.controller.abort()
+              if (abortControllerRef.current === admission?.controller)
+                abortControllerRef.current = null
+              if (pendingUserMsgRef.current?.id === userMessageId) pendingUserMsgRef.current = null
+              clearActiveTurn()
+              setTransportIdle()
+              setError('L’envoi a été interrompu. Votre message reste en attente.')
+            }
+            return false
+          }
+        }
+        if (!admission) beginSend()
+        if (!admission || gen === undefined) throw new Error('Send admission was not initialized')
+        const abortController = admission.controller
         admissionUnknown = true
         /** A reload from here on may find the server holding this id. */
         writeQueuedSendHandoff(requestChatId)
-        const response = await fetch(apiPathRef.current, {
+        const responsePending = fetch(apiPathRef.current, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            message,
-            ...(organizationId ? { organizationId } : { workspaceId }),
-            userMessageId,
-            createNewChat: !requestChatId,
-            ...(requestChatId ? { chatId: requestChatId } : {}),
-            ...(fileAttachments && fileAttachments.length > 0 ? { fileAttachments } : {}),
-            ...(resourceAttachments ? { resourceAttachments } : {}),
-            ...(contexts && contexts.length > 0 ? { contexts } : {}),
-            ...(options?.requestMode ? { mode: options.requestMode } : {}),
-            ...(options?.assistantSearch ? { assistantSearch: options.assistantSearch } : {}),
-            ...(options?.requestMode === 'assistant' && options.assistantSearchLevel
-              ? { assistantSearchLevel: options.assistantSearchLevel }
-              : {}),
-            ...(options?.requestMode !== 'assistant' && workflowIdRef.current
-              ? { workflowId: workflowIdRef.current }
-              : {}),
-            // Desktop-only capabilities (local filesystem tools, browser
-            // subagent) — the server gates the features on these flags.
-            ...desktopChatCapabilities,
-            userTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-            ...(options?.requestMode !== 'assistant'
-              ? {
-                  modelSelection: resolveMothershipModelSettings(
-                    (options?.requestMode === 'plan'
-                      ? useMothershipPlanEffortStore
-                      : useMothershipEffortStore
-                    ).getState(),
-                    modelSelectorEnabled,
-                    options?.requestMode === 'plan'
-                  ).modelSelection,
-                  ...(effortChoice ? { effort: effortChoice } : {}),
+          body: JSON.stringify(
+            localSend
+              ? localBody(message, userMessageId, requestChatId)
+              : {
+                  message,
+                  ...(organizationId ? { organizationId } : { workspaceId }),
+                  userMessageId,
+                  createNewChat: !requestChatId,
+                  ...(requestChatId ? { chatId: requestChatId } : {}),
+                  ...(fileAttachments && fileAttachments.length > 0 ? { fileAttachments } : {}),
+                  ...(resourceAttachments ? { resourceAttachments } : {}),
+                  ...(contexts && contexts.length > 0 ? { contexts } : {}),
+                  ...(options?.requestMode ? { mode: options.requestMode } : {}),
+                  ...(options?.assistantSearch ? { assistantSearch: options.assistantSearch } : {}),
+                  ...(options?.requestMode === 'assistant' && options.assistantSearchLevel
+                    ? { assistantSearchLevel: options.assistantSearchLevel }
+                    : {}),
+                  ...(options?.requestMode !== 'assistant' && workflowIdRef.current
+                    ? { workflowId: workflowIdRef.current }
+                    : {}),
+                  // Desktop-only capabilities (local filesystem tools, browser
+                  // subagent) — the server gates the features on these flags.
+                  ...desktopChatCapabilities,
+                  userTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+                  ...(options?.requestMode !== 'assistant'
+                    ? {
+                        modelSelection: resolveMothershipModelSettings(
+                          (options?.requestMode === 'plan'
+                            ? useMothershipPlanEffortStore
+                            : useMothershipEffortStore
+                          ).getState(),
+                          modelSelectorEnabled,
+                          options?.requestMode === 'plan'
+                        ).modelSelection,
+                        ...(effortChoice ? { effort: effortChoice } : {}),
+                      }
+                    : {}),
                 }
-              : {}),
-          }),
+          ),
           signal: abortController.signal,
         }).catch((error: unknown) => {
           postFailedAtNetwork = error instanceof TypeError
           throw error
         })
+        if (localSend) {
+          // Queue subscribers run only after the owned request has started.
+          onOptimisticSendApplied?.()
+          consumedByTranscript = true
+        }
+        const response = await responsePending
         sendReachedServer = true
         const admittedChatId = response.ok
           ? (response.headers.get(MOTHERSHIP_CHAT_ID_HEADER) ?? requestChatId)
@@ -4342,6 +4636,11 @@ export function useChat(
       options?: SendMessageOptions
     ) => {
       if ((!message.trim() && !fileAttachments?.length) || !scopeKey) return
+      const check = checkLocalSendRef.current(message, fileAttachments, contexts, options)
+      if (check.error) {
+        setError(check.error)
+        return
+      }
 
       const queueStore = useMothershipQueueStore.getState()
       const activeChatKey = chatKeyRef.current
@@ -4352,14 +4651,20 @@ export function useChat(
       if (editingId) {
         const existing = queueStore.queues[activeChatKey]?.find((m) => m.id === editingId)
         if (existing) {
+          if (Object.hasOwn(existing, 'localOrigin') && !check.local) {
+            setError('Ce message attend les réglages locaux du cabinet. Votre texte est conservé.')
+            return
+          }
           queueStore.replaceAt(activeChatKey, editingId, {
             content: message,
+            ...(check.local ? { localOrigin: true } : {}),
             fileAttachments,
             contexts,
             requestMode: options?.requestMode ?? existing.requestMode,
             assistantSearch: options?.assistantSearch ?? existing.assistantSearch,
             assistantSearchLevel: options?.assistantSearchLevel ?? existing.assistantSearchLevel,
           })
+          if (check.local) localQueueTicketsRef.current.set(editingId, check.token)
           queueStore.setEditing(activeChatKey, null)
           // Resume dispatch if it paused on this slot.
           if (!sendingRef.current && !pendingStopPromiseRef.current) {
@@ -4388,14 +4693,23 @@ export function useChat(
       // after a turn ends.
       const queuedAheadCount = (queueStore.queues[activeChatKey] ?? EMPTY_MESSAGE_QUEUE).length
       if (
+        check.local ||
         shouldQueueOutgoingMessage(
           Boolean(sendingRef.current || hasPendingChatAdmission()),
           Boolean(pendingStopPromiseRef.current),
           queuedAheadCount
         )
       ) {
-        queueStore.enqueue(activeChatKey, createQueuedMessage(payload, options.resumeUserMessageId))
-        if (pendingStopPromiseRef.current || (queuedAheadCount > 0 && !sendingRef.current)) {
+        const queued: QueuedMothershipMessage = {
+          ...createQueuedMessage(payload, options.resumeUserMessageId),
+          ...(check.local ? { localOrigin: true } : {}),
+        }
+        if (check.local) localQueueTicketsRef.current.set(queued.id, check.token)
+        queueStore.enqueue(activeChatKey, queued)
+        if (
+          pendingStopPromiseRef.current ||
+          (!sendingRef.current && (check.local || queuedAheadCount > 0))
+        ) {
           void enqueueQueueDispatchRef.current({ type: 'send_head' })
         }
         return
@@ -4436,6 +4750,28 @@ export function useChat(
       hasPendingChatAdmission,
     ]
   )
+  const trySubmitMessage = (
+    message: string,
+    files?: FileAttachmentForApi[],
+    contexts?: ChatContext[]
+  ) => {
+    if (!message.trim() && !files?.length) return false
+    const check = checkLocalSendRef.current(message, files, contexts)
+    if (check.error) {
+      setError(check.error)
+      return false
+    }
+    const queueState = useMothershipQueueStore.getState()
+    const editingId = queueState.editing[chatKeyRef.current]
+    const editing = queueState.queues[chatKeyRef.current]?.find((entry) => entry.id === editingId)
+    if (editing && Object.hasOwn(editing, 'localOrigin') && !check.local) {
+      setError('Ce message attend les réglages locaux du cabinet. Votre texte est conservé.')
+      return false
+    }
+    void sendMessage(message, files, contexts)
+    return true
+  }
+
   useEffect(() => {
     if (typeof window === 'undefined') return
 
@@ -4948,6 +5284,11 @@ export function useChat(
       if (queuedMessageDispatchIds.has(msg.id)) {
         return
       }
+      const localRefusal = queuedLocalErrorRef.current(msg)
+      if (localRefusal) {
+        setError(localRefusal)
+        return
+      }
       queuedMessageDispatchIds.add(msg.id)
 
       const dispatchChatKey = chatKeyRef.current
@@ -5026,7 +5367,11 @@ export function useChat(
            restore would strand this under the dead instance's key — hand it to
            the next surface instead. A chat-bound key is the stable chat id, so
            the queue itself is the durable retry. */
-        if (withdrawn?.reason === 'withdrawn' && chatless) {
+        if (
+          withdrawn?.reason === 'withdrawn' &&
+          chatless &&
+          !Object.hasOwn(dispatched, 'localOrigin')
+        ) {
           clearQueuedSendHandoffState(msg.id)
           handOffWithdrawnSend({
             ...sendPayload(dispatched),
@@ -5034,6 +5379,15 @@ export function useChat(
           })
           return
         }
+        // The native unmount path already retained this local send under its
+        // held surface. Do not duplicate it or put it into a legacy handoff.
+        if (
+          withdrawn?.reason === 'withdrawn' &&
+          chatless &&
+          Object.hasOwn(dispatched, 'localOrigin') &&
+          withdrawnHeldAtUnmountRef.current?.delete(withdrawn.userMessageId)
+        )
+          return
         /** Once restored, the queue owns recovery; a second handoff reader must not resend it. */
         clearQueuedSendHandoffState(msg.id)
         useMothershipQueueStore.getState().insertAt(restoreKey, restoreIndex, {
@@ -5071,6 +5425,7 @@ export function useChat(
         const { content, fileAttachments, contexts, ...sendOptions } = sendPayload(liveMsg)
         const sendResult = await startSendMessage(content, fileAttachments, contexts, {
           ...sendOptions,
+          localQueueEntryId: msg.id,
           pendingStop: options.pendingStop,
           onOptimisticSendApplied: removeQueuedMessage,
           queuedSendHandoff: activeQueuedSendHandoff,
@@ -5094,6 +5449,13 @@ export function useChat(
         setDispatchingHeadId((current) => (current === msg.id ? null : current))
         queuedMessageDispatchIds.delete(msg.id)
         userRemovedDuringDispatch.delete(msg.id)
+        if (
+          !Object.values(useMothershipQueueStore.getState().queues).some((queue) =>
+            queue.some((entry) => entry.id === msg.id)
+          )
+        ) {
+          localQueueTicketsRef.current.delete(msg.id)
+        }
       }
     },
     [startSendMessage, handOffWithdrawnSend, heldSendSurface]
@@ -5154,7 +5516,10 @@ export function useChat(
         // Pause draining if the head is bound to the composer; dispatching now
         // would race the eventual submit. The next kick on edit-resolve resumes us.
         if (queueState.editing[activeChatKey] === msg.id) continue
+        const localQueueIntact = () => !queuedLocalErrorRef.current(msg)
+        if (!localQueueIntact()) continue
         const verdict = await checkResend(activeChatKey, msg)
+        if (!localQueueIntact()) continue
         if (verdict !== 'send') {
           applyResendVerdict(activeChatKey, msg, verdict)
           continue
@@ -5191,6 +5556,7 @@ export function useChat(
       userRemovedDuringDispatch.add(id)
     }
     discardQueuedSend(chatKeyRef.current, id)
+    localQueueTicketsRef.current.delete(id)
   }, [])
 
   const sendQueuedMessageImmediately = useCallback(
@@ -5201,6 +5567,15 @@ export function useChat(
       const msg = id === undefined ? queue?.[0] : queue?.find((queued) => queued.id === id)
       if (!msg || queueState.editing[chatKey] === msg.id) return
       if (queuedMessageDispatchIds.has(msg.id)) return
+      const localQueueAllowed = () => {
+        const refusal = queuedLocalErrorRef.current(msg)
+        if (refusal) {
+          setError(refusal)
+          return false
+        }
+        return true
+      }
+      if (!localQueueAllowed()) return
       /* Sent by hand, it still must not run a second turn: if the history shows it
          accepted, it is already in the chat. A history that cannot be read does not
          hold it back here; the user asked to send it, and the server deduplicates it
@@ -5223,6 +5598,7 @@ export function useChat(
       ) {
         return
       }
+      if (!localQueueAllowed()) return
       const admissionPending = hasPendingChatAdmission()
 
       // Explicit queue sends should supersede any older auto-drain work scheduled by finalize().
@@ -5394,12 +5770,13 @@ export function useChat(
           withdrawing &&
           withdrawing.chatKey === deadKey &&
           abortControllerRef.current === withdrawing.controller &&
-          (queueStore.queues[deadKey]?.length ?? 0) > 0
+          ((queueStore.queues[deadKey]?.length ?? 0) > 0 || withdrawing.send.localOrigin === true)
         ) {
           const { send } = withdrawing
           queueStore.insertAt(deadKey, 0, {
             id: generateId(),
             ...sendPayload(send),
+            ...(send.localOrigin === true ? { localOrigin: true } : {}),
             resumeUserMessageId: send.userMessageId,
             admissionUnknown: true,
           })
@@ -5431,6 +5808,32 @@ export function useChat(
     clearActiveTurn,
   ])
 
+  const currentSettings = readLocalSettings()
+  const currentProfile = currentSettings.observed.profile
+  const localMessage = checkLocalSend('', undefined, undefined).error
+  const localChat: LocalChatPresentation = {
+    backend:
+      currentSettings.observed.status === 'ready'
+        ? (currentProfile?.backend ?? 'unavailable')
+        : currentSettings.observed.status,
+    message: localMessage ?? error,
+    blocked: Boolean(localMessage),
+    ...(currentProfile?.backend === 'local'
+      ? {
+          model: currentProfile.model,
+          settings: `Préférences précédentes : ${currentSettings.preferences.modelSelection.model}${currentSettings.preferences.modelSelection.fastMode ? ', rapide' : ''}${currentSettings.effort ? `, effort ${currentSettings.effort}` : ''}`,
+        }
+      : {}),
+    adopted: adoptedSettings === currentSettings.token,
+    adopt: () => {
+      const latest = readLocalSettingsRef.current()
+      if (latest.observed.status !== 'ready' || latest.observed.profile?.backend !== 'local') return
+      adoptedSettingsRef.current = latest.token
+      setAdoptedSettings(latest.token)
+      setError(null)
+    },
+  }
+
   return {
     messages,
     isChatHistoryPending,
@@ -5441,6 +5844,8 @@ export function useChat(
     resolvedChatId,
     desktopScopeId,
     sendMessage,
+    trySubmitMessage,
+    localChat,
     stopGeneration,
     resources,
     activeResourceId: effectiveActiveResourceId,

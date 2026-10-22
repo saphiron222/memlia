@@ -1,3 +1,4 @@
+// Modified by Memlia: write only admitted numeric container counters into execution data.
 import { createLogger } from '@sim/logger'
 import { isRecordLike } from '@sim/utils/object'
 import { isEqual } from 'es-toolkit'
@@ -20,7 +21,7 @@ import {
   normalizeTools,
   updateCanonicalModesForInputs,
 } from './builders'
-import { VALID_LOOP_TYPES, VALID_PARALLEL_TYPES } from './container-types'
+import { parseContainerCounter, VALID_LOOP_TYPES, VALID_PARALLEL_TYPES } from './container-types'
 import type { EditWorkflowOperation, OperationContext } from './types'
 import { logSkippedItem } from './types'
 import {
@@ -36,6 +37,7 @@ const logger = createLogger('EditWorkflowServerTool')
  */
 function applyLoopOrParallelContainerData(block: any, params: Record<string, any>): void {
   if (params.type === 'loop') {
+    const count = parseContainerCounter(params.inputs?.iterations)
     const loopType =
       params.inputs?.loopType && VALID_LOOP_TYPES.includes(params.inputs.loopType)
         ? params.inputs.loopType
@@ -45,13 +47,14 @@ function applyLoopOrParallelContainerData(block: any, params: Record<string, any
       loopType,
       ...(loopType === 'forEach' &&
         params.inputs?.collection && { collection: params.inputs.collection }),
-      ...(loopType === 'for' && params.inputs?.iterations && { count: params.inputs.iterations }),
+      ...(loopType === 'for' && count !== undefined && { count }),
       ...(loopType === 'while' &&
         params.inputs?.condition && { whileCondition: params.inputs.condition }),
       ...(loopType === 'doWhile' &&
         params.inputs?.condition && { doWhileCondition: params.inputs.condition }),
     }
   } else if (params.type === 'parallel') {
+    const count = parseContainerCounter(params.inputs?.count)
     const parallelType =
       params.inputs?.parallelType && VALID_PARALLEL_TYPES.includes(params.inputs.parallelType)
         ? params.inputs.parallelType
@@ -61,7 +64,7 @@ function applyLoopOrParallelContainerData(block: any, params: Record<string, any
       parallelType,
       ...(parallelType === 'collection' &&
         params.inputs?.collection && { collection: params.inputs.collection }),
-      ...(parallelType === 'count' && params.inputs?.count && { count: params.inputs.count }),
+      ...(parallelType === 'count' && count !== undefined && { count }),
     }
   }
 }
@@ -133,6 +136,7 @@ function processNestedNodesForParent(
 
 function updateLoopOrParallelContainerData(block: any, params: Record<string, any>): void {
   if (block.type === 'loop') {
+    const count = parseContainerCounter(params.inputs?.iterations)
     block.data = block.data || {}
     if (params.inputs?.loopType) {
       const validLoopTypes = ['for', 'forEach', 'while', 'doWhile']
@@ -141,8 +145,8 @@ function updateLoopOrParallelContainerData(block: any, params: Record<string, an
       }
     }
     const effectiveLoopType = params.inputs?.loopType ?? block.data.loopType ?? 'for'
-    if (params.inputs?.iterations && effectiveLoopType === 'for') {
-      block.data.count = params.inputs.iterations
+    if (count !== undefined && effectiveLoopType === 'for') {
+      block.data.count = count
     }
     if (params.inputs?.collection && effectiveLoopType === 'forEach') {
       block.data.collection = params.inputs.collection
@@ -158,6 +162,7 @@ function updateLoopOrParallelContainerData(block: any, params: Record<string, an
       }
     }
   } else if (block.type === 'parallel') {
+    const count = parseContainerCounter(params.inputs?.count)
     block.data = block.data || {}
     if (params.inputs?.parallelType) {
       const validParallelTypes = ['count', 'collection']
@@ -166,8 +171,8 @@ function updateLoopOrParallelContainerData(block: any, params: Record<string, an
       }
     }
     const effectiveParallelType = params.inputs?.parallelType ?? block.data.parallelType ?? 'count'
-    if (params.inputs?.count && effectiveParallelType === 'count') {
-      block.data.count = params.inputs.count
+    if (count !== undefined && effectiveParallelType === 'count') {
+      block.data.count = count
     }
     if (params.inputs?.collection && effectiveParallelType === 'collection') {
       block.data.collection = params.inputs.collection
@@ -520,6 +525,7 @@ export function handleEditOperation(op: EditWorkflowOperation, ctx: OperationCon
     }
 
     if (block.type === 'loop') {
+      const count = parseContainerCounter(params.inputs.iterations)
       block.data = block.data || {}
       if (params.inputs.loopType !== undefined) {
         const validLoopTypes = ['for', 'forEach', 'while', 'doWhile']
@@ -528,8 +534,8 @@ export function handleEditOperation(op: EditWorkflowOperation, ctx: OperationCon
         }
       }
       const effectiveLoopType = params.inputs.loopType ?? block.data.loopType ?? 'for'
-      if (params.inputs.iterations !== undefined && effectiveLoopType === 'for') {
-        block.data.count = params.inputs.iterations
+      if (count !== undefined && effectiveLoopType === 'for') {
+        block.data.count = count
       }
       if (params.inputs.collection !== undefined && effectiveLoopType === 'forEach') {
         block.data.collection = params.inputs.collection
@@ -545,6 +551,7 @@ export function handleEditOperation(op: EditWorkflowOperation, ctx: OperationCon
         }
       }
     } else if (block.type === 'parallel') {
+      const count = parseContainerCounter(params.inputs.count)
       block.data = block.data || {}
       if (params.inputs.parallelType !== undefined) {
         const validParallelTypes = ['count', 'collection']
@@ -553,8 +560,8 @@ export function handleEditOperation(op: EditWorkflowOperation, ctx: OperationCon
         }
       }
       const effectiveParallelType = params.inputs.parallelType ?? block.data.parallelType ?? 'count'
-      if (params.inputs.count !== undefined && effectiveParallelType === 'count') {
-        block.data.count = params.inputs.count
+      if (count !== undefined && effectiveParallelType === 'count') {
+        block.data.count = count
       }
       if (params.inputs.collection !== undefined && effectiveParallelType === 'collection') {
         block.data.collection = params.inputs.collection
@@ -993,6 +1000,9 @@ export function handleInsertIntoSubflowOperation(
           Object.keys(validationResult.validInputs),
           existingBlockConfig
         )
+      }
+      if (existingBlock.type === 'loop' || existingBlock.type === 'parallel') {
+        updateLoopOrParallelContainerData(existingBlock, params)
       }
     }
   } else {

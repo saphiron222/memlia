@@ -4,7 +4,7 @@
   "properties": {
     "schemaVersion": {
       "type": "string",
-      "const": "memlia.desktop-command/v1"
+      "const": "memlia.desktop-command/v2"
     },
     "organizationId": {
       "anyOf": [
@@ -188,6 +188,13 @@
               "type": "string",
               "const": "procedure.run"
             },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "test",
+                "production"
+              ]
+            },
             "procedure": {
               "type": "object",
               "properties": {
@@ -227,6 +234,7 @@
           },
           "required": [
             "kind",
+            "mode",
             "procedure",
             "parameters"
           ],

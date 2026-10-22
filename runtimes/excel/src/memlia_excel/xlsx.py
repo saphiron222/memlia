@@ -27,6 +27,9 @@ _WORKBOOK_TAGS = frozenset(
     "workbook workbookPr workbookProtection bookViews workbookView sheets sheet definedNames calcPr".split()
 )
 _MAIN_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+_REQUIRED_PARTS = frozenset(
+    ("[Content_Types].xml", "_rels/.rels", "xl/workbook.xml", "xl/_rels/workbook.xml.rels")
+)
 
 
 def _check_sheet_coordinates(root: Element, max_cells: int) -> None:
@@ -67,6 +70,7 @@ def _check_sheet_coordinates(root: Element, max_cells: int) -> None:
 
 
 def _check_archive(data: bytes, max_expanded_bytes: int, max_cells: int) -> None:
+    invalid = False
     try:
         with ZipFile(BytesIO(data)) as archive:
             entries = archive.infolist()
@@ -77,6 +81,8 @@ def _check_archive(data: bytes, max_expanded_bytes: int, max_cells: int) -> None
                 raise KernelError("archive_limit")
             if len({item.filename for item in entries}) != len(entries):
                 raise KernelError("archive_duplicate")
+            if not _REQUIRED_PARTS.issubset(item.filename for item in entries):
+                raise KernelError("invalid_archive")
             for entry in entries:
                 if not _PART.fullmatch(entry.filename) or entry.flag_bits & 1:
                     raise KernelError("unsupported_package_part")
@@ -100,8 +106,48 @@ def _check_archive(data: bytes, max_expanded_bytes: int, max_cells: int) -> None
                         and tag not in _SHEET_TAGS
                     ):
                         raise KernelError("unsupported_sheet_object")
-    except (BadZipFile, ElementTree.ParseError, DefusedXmlException) as exc:
-        raise KernelError("invalid_archive") from exc
+    except (BadZipFile, ElementTree.ParseError, DefusedXmlException):
+        invalid = True
+    # Parser exceptions may contain private DTD identifiers or document data.
+    # Raising outside the handler retains neither their cause nor their context.
+    if invalid:
+        raise KernelError("invalid_archive")
+
+
+def _workbook_rows(data: bytes, sheet: str, width: int, max_cells: int) -> list:
+    """Close the owned input even when openpyxl fails before returning a book."""
+    invalid = False
+    with BytesIO(data) as stream:
+        book = None
+        try:
+            book = openpyxl.load_workbook(
+                stream, read_only=True, data_only=False, keep_links=False
+            )
+            if sheet not in book.sheetnames:
+                raise KernelError("sheet_missing")
+            page = book[sheet]
+            page.reset_dimensions()
+            rows = []
+            cells_seen = 0
+            for row in page.values:
+                cells_seen += max(1, width)
+                if cells_seen > max_cells:
+                    raise KernelError("cell_limit")
+                if len(row) > width:
+                    raise KernelError("row_width")
+                rows.append(tuple(row) + (None,) * (width - len(row)))
+            return rows
+        except (KernelError, InterruptedError):
+            raise
+        except (KeyError, IndexError, TypeError, ValueError, AttributeError,
+                OSError, BadZipFile, ElementTree.ParseError, DefusedXmlException):
+            invalid = True
+        finally:
+            if book is not None:
+                book.close()
+    # Keep metadata contents out of both the message and exception chain.
+    if invalid:
+        raise KernelError("invalid_archive")
 
 
 def read_table(
@@ -121,45 +167,27 @@ def read_table(
     if len(data) > 10000000:
         raise KernelError("archive_limit")
     _check_archive(data, max_expanded_bytes, max_cells)
-    book = openpyxl.load_workbook(
-        BytesIO(data), read_only=True, data_only=False, keep_links=False
-    )
-    try:
-        if sheet not in book.sheetnames:
-            raise KernelError("sheet_missing")
-        page = book[sheet]
-        page.reset_dimensions()
-        rows = []
-        cells_seen = 0
-        for row in page.values:
-            cells_seen += max(1, len(columns))
-            if cells_seen > max_cells:
-                raise KernelError("cell_limit")
-            if len(row) > len(columns):
-                raise KernelError("row_width")
-            rows.append(tuple(row) + (None,) * (len(columns) - len(row)))
-        if not rows or list(rows[0]) != list(columns):
-            raise KernelError("header_mismatch")
-        series = []
-        for index, (name, kind) in enumerate(columns.items()):
-            values = [row[index] for row in rows[1:]]
-            if kind == "decimal":
-                series.append(
-                    decimal_series(name, values, precision=precision, scale=scale)
-                )
-            elif kind == "string" and all(
-                value is None or isinstance(value, str) for value in values
-            ):
-                series.append(pl.Series(name, values, dtype=pl.String))
-            elif kind == "boolean" and all(
-                value is None or isinstance(value, bool) for value in values
-            ):
-                series.append(pl.Series(name, values, dtype=pl.Boolean))
-            else:
-                raise KernelError("unsupported_cell_type")
-        return pl.DataFrame(series)
-    finally:
-        book.close()
+    rows = _workbook_rows(data, sheet, len(columns), max_cells)
+    if not rows or list(rows[0]) != list(columns):
+        raise KernelError("header_mismatch")
+    series = []
+    for index, (name, kind) in enumerate(columns.items()):
+        values = [row[index] for row in rows[1:]]
+        if kind == "decimal":
+            series.append(
+                decimal_series(name, values, precision=precision, scale=scale)
+            )
+        elif kind == "string" and all(
+            value is None or isinstance(value, str) for value in values
+        ):
+            series.append(pl.Series(name, values, dtype=pl.String))
+        elif kind == "boolean" and all(
+            value is None or isinstance(value, bool) for value in values
+        ):
+            series.append(pl.Series(name, values, dtype=pl.Boolean))
+        else:
+            raise KernelError("unsupported_cell_type")
+    return pl.DataFrame(series)
 
 
 def write_table(frame: pl.DataFrame, *, sheet: str) -> bytes:

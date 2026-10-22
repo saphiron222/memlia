@@ -588,7 +588,11 @@ export async function runCopilotLifecycle(
         goRoute === '/api/tools/resume'
           ? undefined
           : createProviderToolCallIdentity(resolvedRunId ?? generateId()),
-      toolPermissions: await resolveToolPermissions(lifecycleOptions),
+      // Validated local turns use one-time consent, independent of the legacy
+      // worker flag/surface. Never load or inherit durable auto-approval here.
+      toolPermissions: localChat
+        ? { enabled: true, autoAllowed: new Set(), autoAllowPermitted: false }
+        : await resolveToolPermissions(lifecycleOptions),
       ...(lifecycleOptions.trace ? { trace: lifecycleOptions.trace } : {}),
     })
     if (options.recovery) {

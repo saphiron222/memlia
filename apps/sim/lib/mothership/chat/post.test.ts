@@ -1,3 +1,4 @@
+// Modified by Memlia: qualify opt-in local HTTP admission and refusal boundaries.
 import { ROOT_CONTEXT, trace } from '@opentelemetry/api'
 import {
   authMockFns,
@@ -18,6 +19,7 @@ import {
   billingAttributionMockFns,
 } from '@sim/testing/mocks/billing-attribution.mock'
 import { knowledgeAvailabilityMock } from '@sim/testing/mocks/knowledge-availability.mock'
+import { getAllMockLoggers } from '@sim/testing/mocks/logger.mock'
 import {
   mothershipChatLifecycleMock,
   mothershipChatLifecycleMockFns,
@@ -41,9 +43,17 @@ import {
 import { mothershipOtelMock, mothershipOtelMockFns } from '@sim/testing/mocks/mothership-otel.mock'
 import { createMockRequest } from '@sim/testing/mocks/request.mock'
 import { NextRequest } from 'next/server'
-import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { OrchestrationError } from '@/lib/core/orchestration/types'
 import { ResolvedSecretTraceRegistry } from '@/executor/utils/resolved-secret-trace-registry'
+
+const readLocalChatCapabilities = vi.hoisted(() => vi.fn())
+vi.mock('@/lib/memlia/chat/local-capabilities.server', () => ({
+  readLocalChatCapabilities: { execute: readLocalChatCapabilities },
+}))
+
+const prepareLocalChatAdmission = vi.hoisted(() => vi.fn())
+vi.mock('@/lib/memlia/chat/local-admission.server', () => ({ prepareLocalChatAdmission }))
 
 const flags = vi.hoisted(() => ({ plan: vi.fn(), models: vi.fn() }))
 vi.mock('@/lib/mothership/feature-flags', () => ({
@@ -346,6 +356,692 @@ describe('handleUnifiedChatPost', () => {
       appendedAssistant: true,
       workspaceId: 'ws-1',
       outcome: 'appended_assistant',
+    })
+  })
+
+  describe('server-owned local HTTP admission', () => {
+    const ids = {
+      chat: '11111111-1111-4111-8111-111111111111',
+      workspace: '22222222-2222-4222-8222-222222222222',
+      message: '33333333-3333-4333-8333-333333333333',
+    }
+    const input = () => ({
+      message: 'FICTITIOUS_CURRENT_TEXT',
+      userMessageId: ids.message,
+      workflowId: 'wf-1',
+      workspaceId: ids.workspace,
+      chatId: ids.chat,
+      mode: 'agent',
+    })
+    const localChat = {
+      request: {
+        model: 'gpt-4.1-mini',
+        apiKey: 'FICTITIOUS_HTTP_KEY',
+        messages: [{ role: 'assistant', content: 'FICTITIOUS_HISTORY' }],
+      },
+      budget: { windowId: 'private-window', pricingProfile: { provider: 'openai' } },
+    }
+    const send = (body: unknown = input(), headers: Record<string, string> = {}) =>
+      handleUnifiedChatPost(
+        new NextRequest('http://localhost/api/mothership/chat', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(body),
+        })
+      )
+    beforeEach(() => {
+      vi.stubEnv('MEMLIA_CHAT_POLICY_FILE', '/fixture/admin-policy.json')
+      readLocalChatCapabilities.mockResolvedValue({
+        version: 1,
+        backend: 'local',
+        provider: 'openai',
+        model: 'gpt-4.1-mini',
+        workspaceId: ids.workspace,
+        workflowId: 'wf-1',
+        requestSupported: true,
+      })
+      resolveWorkflowIdForUser.mockResolvedValue({
+        status: 'resolved',
+        workflowId: 'wf-1',
+        workspaceId: ids.workspace,
+        workflowName: 'Native workflow',
+      })
+      resolveOrCreateChat.mockResolvedValue({
+        chatId: ids.chat,
+        chat: { id: ids.chat },
+        isNew: false,
+      })
+      prepareLocalChatAdmission.mockImplementation(async (value) => ({
+        intent: {
+          kind: 'memlia_local_chat',
+          version: 1,
+          request: {
+            userId: value.principal.userId,
+            chatId: value.chatId,
+            workspaceId: value.workspaceId,
+            workflowId: value.workflowId,
+            messageId: value.currentMessage.id,
+            message: value.currentMessage.content,
+            mode: 'agent',
+          },
+        },
+        localChat,
+      }))
+    })
+    afterEach(() => vi.unstubAllEnvs())
+
+    it('admits the Anthropic HTTP selection with its ephemeral server workspace', async () => {
+      const observed = {
+        version: 1,
+        backend: 'local',
+        provider: 'anthropic',
+        model: 'claude-haiku-4-5',
+        workspaceId: ids.workspace,
+        workflowId: 'wf-1',
+        requestSupported: true,
+      }
+      readLocalChatCapabilities.mockResolvedValue(observed)
+      const original = prepareLocalChatAdmission.getMockImplementation()!
+      prepareLocalChatAdmission.mockImplementation(async (value) => {
+        const prepared = await original(value)
+        return {
+          ...prepared,
+          localChat: {
+            ...prepared.localChat,
+            anthropicWorkspaceId: 'wrkspc_fixture123',
+            request: { ...prepared.localChat.request, model: 'claude-haiku-4-5' },
+            budget: { ...prepared.localChat.budget, pricingProfile: { provider: 'anthropic' } },
+          },
+        }
+      })
+      resolveOrCreateChat.mockImplementation(async () => {
+        observed.provider = 'openai'
+        return { chatId: ids.chat, chat: { id: ids.chat }, isNew: false }
+      })
+      const response = await send()
+      expect(response.status).toBe(200)
+      expect(resolveOrCreateChat).toHaveBeenCalledWith(
+        expect.objectContaining({ model: 'claude-haiku-4-5' })
+      )
+      expect(createSSEStream.mock.calls[0][0].orchestrateOptions.localChat).toMatchObject({
+        anthropicWorkspaceId: 'wrkspc_fixture123',
+        request: { model: 'claude-haiku-4-5' },
+      })
+      expect(JSON.stringify(admitTurn.mock.calls)).not.toMatch(/wrkspc_|FICTITIOUS_HTTP_KEY/)
+      expect(buildCopilotRequestPayload).not.toHaveBeenCalled()
+    })
+    it('refuses provider drift after asynchronous preparation even when the model is unchanged', async () => {
+      const original = prepareLocalChatAdmission.getMockImplementation()!
+      prepareLocalChatAdmission.mockImplementation(async (value) => {
+        const prepared = await original(value)
+        return {
+          ...prepared,
+          localChat: {
+            ...prepared.localChat,
+            budget: { ...prepared.localChat.budget, pricingProfile: { provider: 'anthropic' } },
+          },
+        }
+      })
+      expect((await send()).status).toBe(503)
+      expect(prepareLocalChatAdmission).toHaveBeenCalledOnce()
+      expect(admitTurn).not.toHaveBeenCalled()
+      expect(createSSEStream).not.toHaveBeenCalled()
+    })
+    it('creates local chat metadata with the observed administrator model', async () => {
+      const response = await send({ ...input(), chatId: undefined, createNewChat: true })
+      expect(response.status).toBe(200)
+      expect(resolveOrCreateChat).toHaveBeenCalledWith(
+        expect.objectContaining({ model: 'gpt-4.1-mini' })
+      )
+      expect(readLocalChatCapabilities).toHaveBeenCalledWith({
+        principal: { kind: 'session', userId: 'user-1', sessionId: 'session-1' },
+        input: { workspaceId: ids.workspace, workflowId: 'wf-1' },
+      })
+      expect(readLocalChatCapabilities.mock.invocationCallOrder[0]).toBeLessThan(
+        resolveOrCreateChat.mock.invocationCallOrder[0]
+      )
+      expect(resolveOrCreateChat.mock.invocationCallOrder[0]).toBeLessThan(
+        prepareLocalChatAdmission.mock.invocationCallOrder[0]
+      )
+    })
+    it('refuses an unavailable administrator profile before any chat creation or secret preparation', async () => {
+      readLocalChatCapabilities.mockResolvedValue({
+        version: 1,
+        backend: 'unavailable',
+        code: 'local_profile_unavailable',
+      })
+      const response = await send({ ...input(), chatId: undefined, createNewChat: true })
+      expect(response.status).toBe(503)
+      expect(await response.json()).toEqual({ error: 'Local Chat request is unavailable.' })
+      expect(resolveOrCreateChat).not.toHaveBeenCalled()
+      expect(prepareLocalChatAdmission).not.toHaveBeenCalled()
+      expect(admitTurn).not.toHaveBeenCalled()
+      expect(createSSEStream).not.toHaveBeenCalled()
+    })
+    it('refuses model drift during complete preparation before admission without retry', async () => {
+      const original = prepareLocalChatAdmission.getMockImplementation()!
+      prepareLocalChatAdmission.mockImplementation(async (value) => {
+        const prepared = await original(value)
+        return {
+          ...prepared,
+          localChat: {
+            ...prepared.localChat,
+            request: { ...prepared.localChat.request, model: 'gpt-4.1' },
+          },
+        }
+      })
+      const response = await send()
+      expect(response.status).toBe(503)
+      expect(await response.json()).toEqual({ error: 'Local Chat request is unavailable.' })
+      expect(resolveOrCreateChat).toHaveBeenCalledWith(
+        expect.objectContaining({ model: 'gpt-4.1-mini' })
+      )
+      expect(prepareLocalChatAdmission).toHaveBeenCalledTimes(1)
+      expect(readLocalChatCapabilities).toHaveBeenCalledTimes(1)
+      expect(admitTurn).not.toHaveBeenCalled()
+      expect(createSSEStream).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      { backend: 'legacy' },
+      { provider: 'azure-anthropic' },
+      { workspaceId: 'foreign-workspace' },
+      { workflowId: 'foreign-workflow' },
+      { requestSupported: false },
+    ])('refuses a nonmatching local observation before chat storage: %j', async (change) => {
+      readLocalChatCapabilities.mockResolvedValue({
+        version: 1,
+        backend: 'local',
+        provider: 'openai',
+        model: 'gpt-4.1-mini',
+        workspaceId: ids.workspace,
+        workflowId: 'wf-1',
+        requestSupported: true,
+        ...change,
+      })
+      const response = await send()
+      expect(response.status).toBe(503)
+      expect(await response.json()).toEqual({ error: 'Local Chat request is unavailable.' })
+      expect(resolveOrCreateChat).not.toHaveBeenCalled()
+      expect(prepareLocalChatAdmission).not.toHaveBeenCalled()
+      expect(admitTurn).not.toHaveBeenCalled()
+    })
+    it('checks native copilot.use before the non-secret model observation', async () => {
+      resolvePermissionGroupConfig.mockResolvedValue({
+        ...DEFAULT_PERMISSION_GROUP_CONFIG,
+        hideCopilot: true,
+      })
+      expect((await send()).status).toBe(403)
+      expect(readLocalChatCapabilities).not.toHaveBeenCalled()
+      expect(resolveOrCreateChat).not.toHaveBeenCalled()
+    })
+    it('preserves native forbidden-model refusal without leaking its cause', async () => {
+      readLocalChatCapabilities.mockRejectedValue(
+        new OrchestrationError('forbidden', 'FICTITIOUS_MODEL_DIAGNOSTIC')
+      )
+      const response = await send()
+      expect(response.status).toBe(403)
+      expect(await response.json()).toEqual({ error: 'Local Chat request is unavailable.' })
+      expect(resolveOrCreateChat).not.toHaveBeenCalled()
+      expect(prepareLocalChatAdmission).not.toHaveBeenCalled()
+    })
+    it('retains its observed model across later mutation without rewriting an old chat', async () => {
+      const observed = {
+        version: 1,
+        backend: 'local',
+        provider: 'openai',
+        model: 'gpt-4.1-mini',
+        workspaceId: ids.workspace,
+        workflowId: 'wf-1',
+        requestSupported: true,
+      }
+      const oldChat = Object.freeze({ id: ids.chat, model: 'historical-model' })
+      readLocalChatCapabilities.mockResolvedValue(observed)
+      resolveOrCreateChat.mockImplementation(async () => {
+        observed.model = 'gpt-4.1'
+        return { chatId: ids.chat, chat: oldChat, isNew: false }
+      })
+      expect((await send()).status).toBe(200)
+      expect(resolveOrCreateChat).toHaveBeenCalledWith(
+        expect.objectContaining({ model: 'gpt-4.1-mini' })
+      )
+      expect(oldChat.model).toBe('historical-model')
+      expect(prepareLocalChatAdmission).toHaveBeenCalledTimes(1)
+      expect(createSSEStream).toHaveBeenCalledTimes(1)
+    })
+    it('refuses cancellation during observation before chat creation', async () => {
+      const controller = new AbortController()
+      readLocalChatCapabilities.mockImplementation(async () => {
+        controller.abort()
+        return {
+          version: 1,
+          backend: 'local',
+          provider: 'openai',
+          model: 'gpt-4.1-mini',
+          workspaceId: ids.workspace,
+          workflowId: 'wf-1',
+          requestSupported: true,
+        }
+      })
+      const response = await handleUnifiedChatPost(
+        new NextRequest('http://localhost/api/mothership/chat', {
+          method: 'POST',
+          body: JSON.stringify(input()),
+          signal: controller.signal,
+        })
+      )
+      expect(response.status).toBe(503)
+      expect(resolveOrCreateChat).not.toHaveBeenCalled()
+      expect(prepareLocalChatAdmission).not.toHaveBeenCalled()
+      expect(admitTurn).not.toHaveBeenCalled()
+    })
+    it('does not observe local metadata for the unchanged legacy mode', async () => {
+      vi.stubEnv('MEMLIA_CHAT_POLICY_FILE', undefined)
+      const response = await send()
+      expect(response.status).toBe(200)
+      expect(readLocalChatCapabilities).not.toHaveBeenCalled()
+      expect(prepareLocalChatAdmission).not.toHaveBeenCalled()
+      expect(resolveOrCreateChat).toHaveBeenCalledWith(
+        expect.objectContaining({ model: 'claude-opus-4-8' })
+      )
+    })
+
+    function streamedRequest(headers: Record<string, string> = {}, abortDuringRead = false) {
+      const state = { chunks: 0, cancelled: false }
+      const controller = new AbortController()
+      const bytes = new TextEncoder().encode(
+        JSON.stringify({ ...input(), message: 'x'.repeat(192 * 1024) })
+      )
+      const body = new ReadableStream<Uint8Array>(
+        {
+          pull(stream) {
+            const offset = state.chunks++ * 8192
+            if (abortDuringRead) controller.abort()
+            if (offset >= bytes.length) stream.close()
+            else stream.enqueue(bytes.slice(offset, offset + 8192))
+          },
+          cancel() {
+            state.cancelled = true
+          },
+        },
+        { highWaterMark: 0 }
+      )
+      return {
+        state,
+        request: new NextRequest('http://localhost/api/mothership/chat', {
+          method: 'POST',
+          headers,
+          body,
+          signal: controller.signal,
+        }),
+      }
+    }
+
+    it('bounds declared local transport size before reading or claiming', async () => {
+      const { request, state } = streamedRequest({ 'content-length': String(32 * 1024 * 1024) })
+      const response = await handleUnifiedChatPost(request)
+      expect(response.status).toBe(413)
+      expect(await response.json()).toEqual({ error: 'Local Chat request is unavailable.' })
+      expect(state.chunks).toBe(0)
+      expect(atomicallyClaimChatSend).not.toHaveBeenCalled()
+      expect(prepareLocalChatAdmission).not.toHaveBeenCalled()
+    })
+    it('refuses an excessive declared length even with a small valid body', async () => {
+      expect((await send(input(), { 'content-length': String(32 * 1024 * 1024) })).status).toBe(413)
+      expect(atomicallyClaimChatSend).not.toHaveBeenCalled()
+    })
+    it('bounds chunked local transport and cancels the unread remainder', async () => {
+      const { request, state } = streamedRequest()
+      const response = await handleUnifiedChatPost(request)
+      expect(response.status).toBe(413)
+      expect(state.chunks).toBe(13)
+      expect(state.cancelled).toBe(true)
+      expect(atomicallyClaimChatSend).not.toHaveBeenCalled()
+      expect(prepareLocalChatAdmission).not.toHaveBeenCalled()
+    })
+    it('does not read any local cross-site body', async () => {
+      const { request, state } = streamedRequest({ 'sec-fetch-site': 'cross-site' })
+      expect((await handleUnifiedChatPost(request)).status).toBe(403)
+      expect(state.chunks).toBe(0)
+      expect(atomicallyClaimChatSend).not.toHaveBeenCalled()
+    })
+    it('refuses an abort during a valid bounded body before the send claim', async () => {
+      const controller = new AbortController()
+      const body = new ReadableStream<Uint8Array>(
+        {
+          pull(stream) {
+            controller.abort()
+            stream.enqueue(new TextEncoder().encode(JSON.stringify(input())))
+            stream.close()
+          },
+        },
+        { highWaterMark: 0 }
+      )
+      const response = await handleUnifiedChatPost(
+        new NextRequest('http://localhost/api/mothership/chat', {
+          method: 'POST',
+          body,
+          signal: controller.signal,
+        })
+      )
+      expect(response.status).toBe(400)
+      expect(atomicallyClaimChatSend).not.toHaveBeenCalled()
+      expect(resolveOrCreateChat).not.toHaveBeenCalled()
+      expect(prepareLocalChatAdmission).not.toHaveBeenCalled()
+    })
+    it('returns a fixed invalid JSON refusal without claiming', async () => {
+      const response = await handleUnifiedChatPost(
+        new NextRequest('http://localhost/api/mothership/chat', {
+          method: 'POST',
+          body: '{',
+        })
+      )
+      expect(response.status).toBe(400)
+      expect(await response.json()).toEqual({ error: 'Local Chat request is unavailable.' })
+      expect(atomicallyClaimChatSend).not.toHaveBeenCalled()
+    })
+
+    it('requires a real session before any local preparation or claim', async () => {
+      getSession.mockResolvedValue(null)
+      expect((await send()).status).toBe(401)
+      expect(atomicallyClaimChatSend).not.toHaveBeenCalled()
+      expect(prepareLocalChatAdmission).not.toHaveBeenCalled()
+    })
+    it('refuses cross-site sessions before claims and chat resolution', async () => {
+      expect((await send(input(), { 'sec-fetch-site': 'cross-site' })).status).toBe(403)
+      expect(atomicallyClaimChatSend).not.toHaveBeenCalled()
+      expect(resolveOrCreateChat).not.toHaveBeenCalled()
+    })
+    it.each([
+      { mode: 'plan' },
+      { mode: 'assistant' },
+      { organizationId: 'org-1' },
+      { workflowId: undefined, workflowName: undefined },
+      { chatId: undefined, createNewChat: false },
+      { contexts: [{ type: 'workflow', workflowId: 'wf-1' }] },
+      { resourceAttachments: [{ id: '', type: 'workflow' }] },
+      { fileAttachments: [{ id: 'x', key: 'x', filename: 'x', media_type: 'x', size: 1 }] },
+      { commands: ['execute'] },
+      { prefetch: true },
+      { implicitFeedback: 'feedback' },
+      { assistantSearch: true },
+      { desktopCapabilities: { browser: true } },
+      { desktopCapabilities: { deviceId: ids.chat } },
+      { desktopCapabilities: { terminals: [{ id: 'x', cwd: 'x', running: false }] } },
+      { modelSelection: { model: 'gpt-6-astra' } },
+      { effort: 'high' },
+      { provider: 'openai' },
+      { model: 'other-model' },
+      { unexpectedOption: 'value' },
+    ])('refuses unsupported semantics before any claim: %j', async (options) => {
+      const response = await send({ ...input(), ...options })
+      expect(response.status).toBe(400)
+      expect(await response.json()).toEqual({ error: 'Local Chat request is unavailable.' })
+      expect(atomicallyClaimChatSend).not.toHaveBeenCalled()
+      expect(resolveOrCreateChat).not.toHaveBeenCalled()
+      expect(createSSEStream).not.toHaveBeenCalled()
+    })
+    it('keeps an empty policy variable local and refuses helper errors without fallback', async () => {
+      vi.stubEnv('MEMLIA_CHAT_POLICY_FILE', '')
+      prepareLocalChatAdmission.mockRejectedValue(new Error('FICTITIOUS_HTTP_KEY'))
+      const response = await send()
+      expect(response.status).toBe(503)
+      expect(await response.json()).toEqual({ error: 'Local Chat request is unavailable.' })
+      expect(buildCopilotRequestPayload).not.toHaveBeenCalled()
+      expect(getEffectiveEnvironmentSnapshot).not.toHaveBeenCalled()
+      expect(releasePendingChatStream).toHaveBeenCalledWith(ids.chat, ids.message)
+      expect(releaseChatSendClaim).toHaveBeenCalledTimes(1)
+      expect(admitTurn).not.toHaveBeenCalled()
+      expect(
+        JSON.stringify(getAllMockLoggers().map((l) => [l.error.mock.calls, l.warn.mock.calls]))
+      ).not.toContain('FICTITIOUS_HTTP_KEY')
+      expect(setInputMessages).not.toHaveBeenCalled()
+    })
+    it('uses native admission and SSE with ephemeral options only, no worker prep', async () => {
+      const response = await send({
+        ...input(),
+        contexts: [],
+        fileAttachments: [],
+        resourceAttachments: [],
+        desktopCapabilities: { browser: false, terminals: [] },
+      })
+      expect(response.status).toBe(200)
+      expect(response.headers.get('Content-Type')).toContain('text/event-stream')
+      expect(prepareLocalChatAdmission).toHaveBeenCalledWith({
+        principal: { kind: 'session', userId: 'user-1', sessionId: 'session-1' },
+        chatId: ids.chat,
+        workspaceId: ids.workspace,
+        workflowId: 'wf-1',
+        currentMessage: { id: ids.message, content: input().message },
+      })
+      const admission = admitTurn.mock.calls[0][0]
+      expect(admission.input.local.request.message).toBe(input().message)
+      expect(admission.input).not.toHaveProperty('recovery')
+      expect(admission.input).not.toHaveProperty('desktopDeviceId')
+      expect(admission.input.message).toEqual({
+        id: ids.message,
+        content: input().message,
+        requestMode: 'agent',
+      })
+      expect(JSON.stringify(admission)).not.toMatch(
+        /FICTITIOUS_HTTP_KEY|FICTITIOUS_HISTORY|private-window/
+      )
+      const stream = createSSEStream.mock.calls[0][0]
+      expect(stream.orchestrateOptions.localChat).toBe(localChat)
+      expect(stream.requestPayload).toMatchObject(admission.input.local.request)
+      expect(JSON.stringify(stream.requestPayload)).not.toMatch(
+        /FICTITIOUS_HTTP_KEY|FICTITIOUS_HISTORY|private-window/
+      )
+      expect(stream.orchestrateOptions.executionContext).toMatchObject({
+        userId: 'user-1',
+        workflowId: 'wf-1',
+        workspaceId: ids.workspace,
+        chatId: ids.chat,
+        secretActorUserId: null,
+      })
+      expect(stream.orchestrateOptions).not.toHaveProperty('billingAttribution')
+      expect(buildCopilotRequestPayload).not.toHaveBeenCalled()
+      expect(getEffectiveEnvironmentSnapshot).not.toHaveBeenCalled()
+      expect(resolveBillingAttribution).not.toHaveBeenCalled()
+      expect(loadChatMcpServerIds).not.toHaveBeenCalled()
+      expect(processContextsServer).not.toHaveBeenCalled()
+      expect(setInputMessages).not.toHaveBeenCalled()
+      expect(setUserMessagePreview).not.toHaveBeenCalled()
+      expect(releaseChatSendClaim).not.toHaveBeenCalled()
+      await stream.orchestrateOptions.onComplete({
+        success: true,
+        content: 'native response',
+        contentBlocks: [],
+        toolCalls: [],
+      })
+      expect(finalizeAssistantTurn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          chatId: ids.chat,
+          userMessageId: ids.message,
+          runController: expect.objectContaining({ token: `${ids.message}\ncontroller` }),
+        })
+      )
+    })
+    it('creates a native chat for an existing workflow before preparing local options', async () => {
+      resolveOrCreateChat.mockResolvedValue({
+        chatId: ids.chat,
+        chat: { id: ids.chat },
+        isNew: true,
+      })
+      expect((await send({ ...input(), chatId: undefined, createNewChat: true })).status).toBe(200)
+      expect(resolveOrCreateChat).toHaveBeenCalledWith(
+        expect.objectContaining({ workflowId: 'wf-1', type: 'copilot' })
+      )
+      expect(prepareLocalChatAdmission).toHaveBeenCalledWith(
+        expect.objectContaining({ chatId: ids.chat })
+      )
+      expect(resolveOrCreateChat.mock.invocationCallOrder[0]).toBeLessThan(
+        prepareLocalChatAdmission.mock.invocationCallOrder[0]
+      )
+    })
+    it('keeps canonical workflow workspace rather than a client workspace', async () => {
+      expect((await send({ ...input(), workspaceId: 'foreign-workspace' })).status).toBe(200)
+      expect(prepareLocalChatAdmission).toHaveBeenCalledWith(
+        expect.objectContaining({ workspaceId: ids.workspace })
+      )
+    })
+    it('releases an uncommitted failed admission without leaking its cause', async () => {
+      admitTurn.mockRejectedValueOnce(new Error('FICTITIOUS_HTTP_KEY'))
+      const response = await send()
+      expect(response.status).toBe(503)
+      expect(await response.text()).not.toContain('FICTITIOUS_HTTP_KEY')
+      expect(createSSEStream).not.toHaveBeenCalled()
+      expect(releaseChatSendClaim).toHaveBeenCalledTimes(1)
+      expect(releasePendingChatStream).toHaveBeenCalledTimes(1)
+    })
+    it('never releases a committed claim or falls back after stream attachment fails', async () => {
+      createSSEStream.mockImplementationOnce(() => {
+        throw new Error('FICTITIOUS_HTTP_KEY')
+      })
+      const response = await send()
+      expect(response.status).toBe(503)
+      expect(admitTurn).toHaveBeenCalledTimes(1)
+      expect(createSSEStream).toHaveBeenCalledTimes(1)
+      expect(buildCopilotRequestPayload).not.toHaveBeenCalled()
+      expect(releaseChatSendClaim).not.toHaveBeenCalled()
+      expect(releasePendingChatStream).toHaveBeenCalledTimes(1)
+      expect(await response.text()).not.toContain('FICTITIOUS_HTTP_KEY')
+    })
+    it('refuses a missing session reference before effects', async () => {
+      getSession.mockResolvedValue({ user: { id: 'user-1' } })
+      expect((await send()).status).toBe(401)
+      expect(atomicallyClaimChatSend).not.toHaveBeenCalled()
+    })
+    it('captures session primitives before asynchronous canonical resolution', async () => {
+      const session = { user: { id: 'user-1' }, session: { id: 'session-1' } }
+      getSession.mockResolvedValue(session)
+      resolveWorkflowIdForUser.mockImplementationOnce(async () => {
+        session.session.id = 'foreign-session'
+        session.user.id = 'foreign-user'
+        return {
+          status: 'resolved',
+          workflowId: 'wf-1',
+          workspaceId: ids.workspace,
+          workflowName: 'Native',
+        }
+      })
+      expect((await send()).status).toBe(200)
+      expect(prepareLocalChatAdmission).toHaveBeenCalledWith(
+        expect.objectContaining({
+          principal: { kind: 'session', userId: 'user-1', sessionId: 'session-1' },
+        })
+      )
+      expect(admitTurn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          principal: { kind: 'session', userId: 'user-1', sessionId: 'session-1' },
+        })
+      )
+    })
+    it('never starts a stream after HTTP cancellation during committed admission', async () => {
+      const controller = new AbortController()
+      admitTurn.mockImplementationOnce(async () => {
+        controller.abort()
+        return { id: 'run-1', status: 'active' }
+      })
+      const response = await handleUnifiedChatPost(
+        new NextRequest('http://localhost/api/mothership/chat', {
+          method: 'POST',
+          body: JSON.stringify(input()),
+          signal: controller.signal,
+        })
+      )
+      expect(response.status).toBe(503)
+      expect(createSSEStream).not.toHaveBeenCalled()
+      expect(releaseChatSendClaim).not.toHaveBeenCalled()
+      expect(releasePendingChatStream).toHaveBeenCalledTimes(1)
+    })
+    it('never admits after cancellation during option preparation', async () => {
+      const controller = new AbortController()
+      const prepare = prepareLocalChatAdmission.getMockImplementation()!
+      prepareLocalChatAdmission.mockImplementationOnce(async (value) => {
+        const result = await prepare(value)
+        controller.abort()
+        return result
+      })
+      const response = await handleUnifiedChatPost(
+        new NextRequest('http://localhost/api/mothership/chat', {
+          method: 'POST',
+          body: JSON.stringify(input()),
+          signal: controller.signal,
+        })
+      )
+      expect(response.status).toBe(503)
+      expect(admitTurn).not.toHaveBeenCalled()
+      expect(createSSEStream).not.toHaveBeenCalled()
+      expect(releaseChatSendClaim).toHaveBeenCalledTimes(1)
+    })
+    it('preserves the native superseded-send identity without exposing an exception', async () => {
+      admitTurn.mockRejectedValueOnce(new ChatSendSupersededError())
+      const response = await send()
+      expect(response.status).toBe(409)
+      expect(await response.json()).toEqual({
+        error: 'This message was already sent.',
+        activeStreamId: ids.message,
+      })
+      expect(createSSEStream).not.toHaveBeenCalled()
+    })
+    it('keeps cleanup errors closed and still attempts send-claim cleanup', async () => {
+      prepareLocalChatAdmission.mockRejectedValueOnce(new Error('FICTITIOUS_HTTP_KEY'))
+      releasePendingChatStream.mockRejectedValueOnce(new Error('FICTITIOUS_LEASE_FAILURE'))
+      releaseChatSendClaim.mockRejectedValueOnce(new Error('FICTITIOUS_CLAIM_FAILURE'))
+      const response = await send()
+      expect(response.status).toBe(503)
+      expect(releaseChatSendClaim).toHaveBeenCalledTimes(1)
+      expect(
+        JSON.stringify(getAllMockLoggers().map((l) => [l.error.mock.calls, l.warn.mock.calls]))
+      ).not.toMatch(/FICTITIOUS_(HTTP_KEY|LEASE_FAILURE|CLAIM_FAILURE)/)
+    })
+    it('refuses a failed chat creation instead of falling back to a stateless stream', async () => {
+      resolveOrCreateChat.mockResolvedValueOnce({ chatId: undefined, chat: null, isNew: false })
+      expect((await send({ ...input(), chatId: undefined, createNewChat: true })).status).toBe(503)
+      expect(prepareLocalChatAdmission).not.toHaveBeenCalled()
+      expect(createSSEStream).not.toHaveBeenCalled()
+      expect(releaseChatSendClaim).toHaveBeenCalledTimes(1)
+    })
+    it('resolves a workflow name through the native canonical resolver', async () => {
+      expect(
+        (await send({ ...input(), workflowId: undefined, workflowName: 'Native workflow' })).status
+      ).toBe(200)
+      expect(prepareLocalChatAdmission).toHaveBeenCalledWith(
+        expect.objectContaining({ workflowId: 'wf-1' })
+      )
+    })
+    it('refuses oversize UTF-8 and malformed JSON before claims', async () => {
+      expect((await send({ ...input(), message: 'é'.repeat(32769) })).status).toBe(400)
+      const response = await handleUnifiedChatPost(
+        new NextRequest('http://localhost/api/mothership/chat', { method: 'POST', body: '{' })
+      )
+      expect(response.status).toBe(400)
+      expect(atomicallyClaimChatSend).not.toHaveBeenCalled()
+    })
+    it('uses the native copilot.use refusal before preparing a key', async () => {
+      resolvePermissionGroupConfig.mockResolvedValue({
+        ...DEFAULT_PERMISSION_GROUP_CONFIG,
+        hideCopilot: true,
+      })
+      const response = await send()
+      expect(response.status).toBe(403)
+      expect(prepareLocalChatAdmission).not.toHaveBeenCalled()
+      expect(resolveOrCreateChat).not.toHaveBeenCalled()
+      expect(releaseChatSendClaim).toHaveBeenCalledTimes(1)
+    })
+    it('refuses an aborted request before any claim', async () => {
+      const controller = new AbortController()
+      controller.abort()
+      const response = await handleUnifiedChatPost(
+        new NextRequest('http://localhost/api/mothership/chat', {
+          method: 'POST',
+          body: JSON.stringify(input()),
+          signal: controller.signal,
+        })
+      )
+      expect(response.status).toBe(400)
+      expect(atomicallyClaimChatSend).not.toHaveBeenCalled()
     })
   })
 

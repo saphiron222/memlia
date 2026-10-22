@@ -22,6 +22,10 @@ import {
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const proposalInfra = vi.hoisted(() => ({ propose: vi.fn() }))
+const selectedFileInfra = vi.hoisted(() => ({ inspect: vi.fn() }))
+vi.mock('@/lib/memlia/excel/application/selected-files', () => ({
+  inspectSelectedExcelFiles: selectedFileInfra.inspect,
+}))
 vi.mock('@/lib/memlia/chat/workflow-preview-tools', async (original) => {
   const actual = await original<typeof import('@/lib/memlia/chat/workflow-preview-tools')>()
   return {
@@ -84,6 +88,7 @@ import {
   type ProviderModelObservation,
   runWithProviderRuntimeContext,
 } from '@/providers/runtime-context'
+import { ModelAdapterStop } from './model-adapter'
 import { runCatalogProvider } from './provider-binding'
 
 function transportGate() {
@@ -488,7 +493,11 @@ function answer() {
     ])
   )
 }
-function anthropicSse(tool = false, call?: { name: string; input: Record<string, unknown> }) {
+function anthropicSse(
+  tool = false,
+  call?: { name: string; input: Record<string, unknown> },
+  usage?: Record<string, unknown>
+) {
   const events = [
     {
       type: 'message_start',
@@ -500,7 +509,7 @@ function anthropicSse(tool = false, call?: { name: string; input: Record<string,
         content: [],
         stop_reason: null,
         stop_sequence: null,
-        usage: { input_tokens: 1, output_tokens: 0 },
+        usage: { input_tokens: 1, output_tokens: 0, ...usage },
       },
     },
     {
@@ -1766,6 +1775,39 @@ describe('optional preview — native providers and edit engine, HTTP/DB doubles
     })
     return { http, run }
   }
+  it.each(['openai', 'anthropic'] as const)(
+    'completion protocol — native %s preview then final text has no proposal authority',
+    async (provider) => {
+      const { run, http } = start(
+        provider,
+        { request: request() },
+        {
+          proposal: { runId: 'run-a', onProposal: vi.fn() },
+        }
+      )
+      await collect(run.stream)
+      expect(run.workflowPreparation()).toEqual({ evaluated: 1, refused: 0 })
+      expect(Object.isFrozen(run.workflowPreparation())).toBe(true)
+      expect(proposalInfra.propose).not.toHaveBeenCalled()
+      expect(http).toHaveBeenCalledTimes(2)
+      const second = JSON.stringify(JSON.parse(http.mock.calls[1][1].body))
+      expect(second).toContain('review_diagnostics_then_propose_or_clarify')
+      expect(second).not.toContain('PRIVATE_GRAPH_CANARY')
+    }
+  )
+
+  it('completion protocol — malformed model preview and forged observation fields never become an evaluated preview', async () => {
+    const { run } = start('openai', {
+      request: request(),
+      workflowPreparation: { evaluated: 1, refused: 0 },
+    })
+    const before = run.workflowPreparation()
+    await collect(run.stream)
+    expect(before).toEqual({ evaluated: 0, refused: 0 })
+    expect(run.workflowPreparation()).toEqual({ evaluated: 0, refused: 1 })
+    expect(proposalInfra.propose).not.toHaveBeenCalled()
+  })
+
   async function turn(provider: 'openai' | 'anthropic', input: Record<string, unknown>) {
     const { http, run } = start(provider, input)
     const events = await collect(run.stream)
@@ -1823,7 +1865,10 @@ describe('optional preview — native providers and edit engine, HTTP/DB doubles
       )
       expect(JSON.parse(originalLocation)).toEqual(native)
       expect(schema.required).toEqual(['request'])
-      expect(first.tools).toHaveLength(7)
+      expect(first.tools).toHaveLength(9)
+      expect(first.tools.map((entry: { name: string }) => entry.name)).toEqual(
+        expect.arrayContaining(['excel_describe_capabilities', 'excel_preview_procedure'])
+      )
       expect(JSON.stringify(first.tools)).not.toContain('bound-workflow')
       expect(result.output).toMatchObject({
         dryRun: true,
@@ -2258,17 +2303,17 @@ describe('OpenAI physical usage observation — native parser, HTTP double', () 
     expect(observed.observations.map((o) => o.observation.kind)).toEqual(['usage', 'unknown'])
   })
 
-  it('refuses observation on Anthropic before any transport', () => {
+  it('refuses observation on an unsupported provider before any transport', () => {
     const http = vi.fn()
     vi.stubGlobal('fetch', http)
     expect(() =>
       runCatalogProvider({
         ...scope,
-        provider: 'anthropic',
+        provider: 'azure-anthropic' as never,
         request: modelRequest,
         ...observationOptions(),
       })
-    ).toThrow('Model observation requires OpenAI streaming.')
+    ).toThrow('Model observation requires a supported streaming provider.')
     expect(http).not.toHaveBeenCalled()
   })
 })
@@ -2468,4 +2513,408 @@ it('controlled native provider failures do not expose a fictive transport canary
   ).catch(() => {})
   const calls = getAllMockLoggers().flatMap((l) => [...l.error.mock.calls, ...l.warn.mock.calls])
   expect(inspect(calls, { depth: 8 })).not.toContain('FICTIVE_NATIVE_LOG_CANARY')
+})
+
+describe('P11 declarative Excel tools in the real provider loop', () => {
+  it.each(['excel_describe_capabilities', 'excel_preview_procedure'])(
+    'announces %s only for the server-selected workflow',
+    async (name) => {
+      const http = vi.fn(async () => answer())
+      vi.stubGlobal('fetch', http)
+      const run = runCatalogProvider({
+        ...scope,
+        provider: 'openai',
+        request: modelRequest,
+        workflow: {
+          workflowId: 'bound-workflow',
+          policy: 'sanitized_details',
+          previewOperations: true,
+        },
+      })
+      await collect(run.stream)
+      const body = JSON.parse(http.mock.calls[0][1].body)
+      expect(body.tools.some((t: { name: string }) => t.name === name)).toBe(true)
+    }
+  )
+})
+
+// The SDK/parser/limiter/Excel adapter/authorization funnel are real; transport and DB lookups are doubled.
+import { fixtures as excelFixtures } from '../../../../../packages/memlia-contracts/tests/fixtures'
+
+describe('P11 Excel dispatch through native controlled providers', () => {
+  function draft() {
+    const {
+      schemaVersion,
+      organizationId,
+      workspaceId,
+      procedureId,
+      version,
+      parentVersion,
+      workflowId,
+      deployedVersionId,
+      ownerUserId,
+      digest,
+      policyVersion,
+      ...value
+    } = structuredClone(excelFixtures.ExcelProcedure)
+    value.decimalPolicy.precision = 18
+    return value
+  }
+  beforeEach(() => {
+    workflowContextMockFns.mockResolveActiveWorkflowApplicationContext
+      .mockReset()
+      .mockResolvedValue({
+        workflowId: 'bound-workflow',
+        workflow: { id: 'bound-workflow', workspaceId: 'workspace-1' },
+        workspaceId: 'workspace-1',
+        workspaceOrganizationId: null,
+        allowPersonalApiKeys: true,
+        billedAccountUserId: 'not-authority',
+      })
+  })
+  async function turn(
+    provider: 'openai' | 'anthropic',
+    name: string,
+    params: Record<string, unknown>,
+    excelFileIds?: string[]
+  ) {
+    const http = vi
+      .fn()
+      .mockResolvedValueOnce(
+        provider === 'openai'
+          ? sse(response([toolCall(name, params)]))
+          : anthropicSse(true, { name, input: params })
+      )
+      .mockResolvedValueOnce(provider === 'openai' ? answer() : anthropicSse())
+    vi.stubGlobal('fetch', http)
+    const run = runCatalogProvider({
+      ...scope,
+      provider,
+      request: { ...modelRequest, model: provider === 'openai' ? 'gpt-4.1' : 'claude-sonnet-4-5' },
+      workflow: {
+        workflowId: 'bound-workflow',
+        policy: 'sanitized_details',
+        previewOperations: true,
+        ...(excelFileIds ? { excelFileIds } : {}),
+      },
+    })
+    const events = await collect(run.stream)
+    const body = JSON.parse(http.mock.calls[1][1].body)
+    const wire =
+      provider === 'openai'
+        ? body.input.find((x: { type: string }) => x.type === 'function_call_output').output
+        : body.messages
+            .flatMap((x: { content: unknown[] }) => x.content)
+            .find((x: { type: string }) => x.type === 'tool_result').content
+    return { result: JSON.parse(wire), http, events, run }
+  }
+  it.each(['openai', 'anthropic'] as const)(
+    'raccorde inspection sélectionnée via %s natif, transport et lecture fichiers doublés',
+    async (provider) => {
+      selectedFileInfra.inspect
+        .mockReset()
+        .mockResolvedValue({
+          analysis: 'selected_file_sample',
+          executionAvailable: false,
+          persisted: false,
+          files: [{ fileId: 'selected-file', sample: 'Fictif' }],
+        })
+      const { result, http } = await turn(provider, 'excel_inspect_selected_files', {}, [
+        'selected-file',
+      ])
+      expect(result).toMatchObject({
+        analysis: 'selected_file_sample',
+        files: [{ fileId: 'selected-file' }],
+      })
+      expect(selectedFileInfra.inspect).toHaveBeenCalledWith(
+        { principal, workspaceId: 'workspace-1', fileIds: ['selected-file'] },
+        expect.any(AbortSignal)
+      )
+      const first = JSON.parse(http.mock.calls[0][1].body)
+      const tool = first.tools.find(
+        (value: { name: string }) => value.name === 'excel_inspect_selected_files'
+      )
+      expect((provider === 'openai' ? tool.parameters : tool.input_schema).properties).toEqual({})
+      expect(toolsMockFns.mockExecuteTool).not.toHaveBeenCalled()
+    }
+  )
+  it('refuse un fileId inventé dans l’outil natif plutôt que d’élargir la sélection', async () => {
+    selectedFileInfra.inspect.mockReset()
+    const { result } = await turn(
+      'openai',
+      'excel_inspect_selected_files',
+      { fileId: 'PRIVATE_FOREIGN' },
+      ['selected-file']
+    )
+    expect(result).toMatchObject({ ok: false, error: { code: 'invalid_input' } })
+    expect(selectedFileInfra.inspect).not.toHaveBeenCalled()
+    expect(JSON.stringify(result)).not.toContain('PRIVATE_FOREIGN')
+  })
+  it.each(['openai', 'anthropic'] as const)(
+    'executes description and real draft analysis under %s without registry fallback',
+    async (provider) => {
+      const description = await turn(provider, 'excel_describe_capabilities', {})
+      expect(description.result).toMatchObject({
+        executionAvailable: false,
+        persisted: false,
+        profile: { tables: { floatingPoint: false } },
+      })
+      clearProviderClientCacheForTests()
+      const preview = await turn(provider, 'excel_preview_procedure', { request: draft() })
+      expect(preview.result).toMatchObject({
+        executionAvailable: false,
+        persisted: false,
+        analysis: 'declarative_draft',
+        dataflow: { declaredDataflowValid: true },
+        capabilities: { primitiveOptionsCompatible: true },
+      })
+      expect(preview.run.usage()).toMatchObject({ toolCalls: 1 })
+      expect(toolsMockFns.mockExecuteTool).not.toHaveBeenCalled()
+      const first = JSON.parse(preview.http.mock.calls[0][1].body)
+      const tool = first.tools.find((x: { name: string }) => x.name === 'excel_preview_procedure')
+      const schema = provider === 'openai' ? tool.parameters : tool.input_schema
+      expect(schema.properties.request.properties).toHaveProperty('operations')
+      expect(schema.properties.request.properties).not.toHaveProperty('ownerUserId')
+      expect(schema.properties.request.properties).not.toHaveProperty('deployedVersionId')
+    }
+  )
+  it.each(['openai', 'anthropic'] as const)(
+    'delivers a closed refusal to %s without dropping it or executing another tool',
+    async (provider) => {
+      const { result } = await turn(provider, 'excel_preview_procedure', {
+        request: { ...draft(), ownerUserId: 'PRIVATE_CANARY' },
+      })
+      expect(result).toMatchObject({ ok: false, error: { code: 'invalid_input' } })
+      expect(JSON.stringify(result)).not.toContain('PRIVATE_CANARY')
+      expect(toolsMockFns.mockExecuteTool).not.toHaveBeenCalled()
+    }
+  )
+  it('rejects lost native workflow permission rather than treating tool advertisement as authority', async () => {
+    workspaceAuthzMockFns.mockResolveEffectiveWorkspacePermission.mockResolvedValue(null)
+    const { result } = await turn('openai', 'excel_describe_capabilities', {})
+    expect(result).toMatchObject({ ok: false })
+    expect(result).not.toHaveProperty('profile')
+    expect(toolsMockFns.mockExecuteTool).not.toHaveBeenCalled()
+  })
+})
+
+describe('Anthropic physical observation with native SDK and HTTP double', () => {
+  it('accepts the server observer and settles a native complete standard stream', async () => {
+    const references: unknown[] = []
+    const observations: ProviderModelObservation[] = []
+    const http = vi.fn(async (_input: unknown, _init?: RequestInit) =>
+      anthropicSse(false, undefined, {
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        cache_creation: null,
+        service_tier: 'standard',
+      })
+    )
+    vi.stubGlobal('fetch', http)
+    await collect(
+      runCatalogProvider({
+        ...scope,
+        provider: 'anthropic',
+        request: { ...modelRequest, model: 'claude-haiku-4-5' },
+        async beforeModelTransport(_signal, attempt) {
+          references.push(attempt)
+        },
+        async observeModelAttempt(attempt, observation) {
+          expect(attempt).toBe(references[0])
+          observations.push(observation)
+        },
+      }).stream
+    )
+    expect(observations).toEqual([
+      {
+        kind: 'usage',
+        usage: {
+          input: 1,
+          output: 1,
+          cacheRead: 0,
+          cacheWrites: [
+            { tokens: 0, inputRateMultiplier: 1.25 },
+            { tokens: 0, inputRateMultiplier: 2 },
+          ],
+        },
+        cost: { kind: 'list_price_estimate', usd: 0.000006 },
+      },
+    ])
+    expect(references[0]).toBeDefined()
+    expect(http).toHaveBeenCalledOnce()
+    const payload = JSON.parse(http.mock.calls[0][1].body as string)
+    expect(payload.service_tier).toBe('standard_only')
+  })
+})
+
+describe('server-only Anthropic workspace at the real SDK boundary', () => {
+  const usage = {
+    cache_read_input_tokens: 0,
+    cache_creation_input_tokens: 0,
+    cache_creation: null,
+    service_tier: 'standard',
+  }
+  it('captures workspace and observer once across the COMMIT wait and does not add an LLM field', async () => {
+    const gate = transportGate()
+    const observed = vi.fn(async () => {})
+    const replacement = vi.fn(async () => {})
+    const http = vi.fn(async (_input: unknown, _init?: RequestInit) =>
+      anthropicSse(false, undefined, usage)
+    )
+    vi.stubGlobal('fetch', http)
+    const options = {
+      ...scope,
+      provider: 'anthropic' as const,
+      anthropicWorkspaceId: 'wrkspc_fixture123',
+      request: {
+        ...modelRequest,
+        model: 'claude-haiku-4-5',
+        anthropicWorkspaceId: 'wrkspc_LLM123456',
+      },
+      beforeModelTransport: vi.fn(() => gate.promise),
+      observeModelAttempt: observed,
+    }
+    const run = runCatalogProvider(options)
+    const events = collect(run.stream)
+    await vi.waitFor(() => expect(options.beforeModelTransport).toHaveBeenCalledOnce())
+    expect(http).not.toHaveBeenCalled()
+    options.anthropicWorkspaceId = 'wrkspc_mutated123'
+    options.observeModelAttempt = replacement
+    gate.release()
+    await events
+    const init = http.mock.calls[0][1]
+    const headers = new Headers(init?.headers)
+    expect(headers.get('anthropic-workspace-id')).toBe('wrkspc_fixture123')
+    expect(headers.get('x-api-key')).toBe(modelRequest.apiKey)
+    expect(headers.has('authorization')).toBe(false)
+    expect(JSON.parse(init?.body as string)).not.toHaveProperty('anthropicWorkspaceId')
+    expect(observed).toHaveBeenCalledOnce()
+    expect(replacement).not.toHaveBeenCalled()
+  })
+  it('keeps concurrent Anthropic workspaces isolated and does not inherit into OpenAI', async () => {
+    const http = vi.fn(async (input: unknown, _init?: RequestInit) =>
+      String(input).includes('anthropic.com') ? anthropicSse(false, undefined, usage) : answer()
+    )
+    vi.stubGlobal('fetch', http)
+    await Promise.all(
+      ['wrkspc_fixture123', 'wrkspc_fixture456'].map((anthropicWorkspaceId) =>
+        collect(
+          runCatalogProvider({
+            ...scope,
+            provider: 'anthropic',
+            anthropicWorkspaceId,
+            request: { ...modelRequest, model: 'claude-haiku-4-5' },
+            async observeModelAttempt() {},
+          }).stream
+        )
+      )
+    )
+    await collect(
+      runCatalogProvider({ ...scope, provider: 'openai', request: modelRequest }).stream
+    )
+    const anthropic = http.mock.calls.filter(([url]) => String(url).includes('anthropic.com'))
+    expect(
+      anthropic.map((call) => new Headers(call[1]?.headers).get('anthropic-workspace-id')).sort()
+    ).toEqual(['wrkspc_fixture123', 'wrkspc_fixture456'])
+    const openai = http.mock.calls.find(([url]) => String(url).includes('openai.com'))!
+    expect(new Headers(openai[1]?.headers).has('anthropic-workspace-id')).toBe(false)
+  })
+  it.each(['openai', 'anthropic'] as const)(
+    'refuses invalid server workspace for %s before any transport',
+    (provider) => {
+      const http = vi.fn()
+      vi.stubGlobal('fetch', http)
+      expect(() =>
+        runCatalogProvider({
+          ...scope,
+          provider,
+          request: modelRequest,
+          anthropicWorkspaceId: provider === 'openai' ? 'wrkspc_fixture123' : 'PRIVATE_INVALID',
+        })
+      ).toThrow('Invalid server Anthropic workspace binding.')
+      expect(http).not.toHaveBeenCalled()
+    }
+  )
+})
+
+it('refuses native thinking adjustment that would expand an observed output ceiling before HTTP', async () => {
+  const http = vi.fn(async () =>
+    anthropicSse(false, undefined, {
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+      cache_creation: null,
+      service_tier: 'standard',
+    })
+  )
+  vi.stubGlobal('fetch', http)
+  const guard = vi.fn(async () => {})
+  const run = runCatalogProvider({
+    ...scope,
+    provider: 'anthropic',
+    request: { ...modelRequest, model: 'claude-haiku-4-5', maxTokens: 100, thinkingLevel: 'high' },
+    beforeModelTransport: guard,
+    async observeModelAttempt() {},
+  })
+  await expect(collect(run.stream)).rejects.toThrow(
+    'Controlled Anthropic output limit is unavailable.'
+  )
+  expect(guard).not.toHaveBeenCalled()
+  expect(http).not.toHaveBeenCalled()
+})
+
+describe('v6 diagnosis — certain proposal effect at the final allowed transport', () => {
+  it.each([1, 2])('Anthropic synthesis consumes a distinct transport (cap %s)', async (cap) => {
+    proposalInfra.propose.mockReset().mockResolvedValue({
+      ok: true,
+      proposal: { proposalId: 'server-proposal', expectedRevision: 7 },
+      persisted: true,
+    })
+    const applied = vi.fn(async () => ({
+      status: 'applied' as const,
+      baseRevision: 7,
+      draftRevision: 8,
+    }))
+    const http = vi
+      .fn()
+      .mockResolvedValueOnce(
+        anthropicSse(true, {
+          name: 'propose_workflow_operations',
+          input: {
+            request: {
+              expectedRevision: 7,
+              operations: [{ operation_type: 'remove', block_id: 'b1' }],
+              layout: { mode: 'preserve' },
+            },
+          },
+        })
+      )
+      .mockResolvedValueOnce(anthropicSse())
+    vi.stubGlobal('fetch', http)
+    const run = runCatalogProvider({
+      ...scope,
+      provider: 'anthropic',
+      request: { ...modelRequest, model: 'claude-sonnet-4-5' },
+      workflow: {
+        workflowId: 'bound-workflow',
+        policy: 'sanitized_details',
+        previewOperations: true,
+      },
+      proposal: { runId: 'run-a', onProposal: applied },
+      limits: { maxModelCalls: cap },
+    })
+    const collected = collect(run.stream)
+    if (cap === 1) {
+      await expect(collected).rejects.toBeInstanceOf(ModelAdapterStop)
+      await expect(collected).rejects.toMatchObject({ code: 'model_calls' })
+    } else
+      expect(await collected).toContainEqual({
+        type: 'turn_end',
+        turn: 'final',
+        finishReason: 'end_turn',
+      })
+    expect(applied).toHaveBeenCalledOnce()
+    expect(http).toHaveBeenCalledTimes(cap)
+    expect(run.usage()).toEqual({ modelCalls: cap, toolCalls: 1 })
+    expect(toolsMockFns.mockExecuteTool).not.toHaveBeenCalled()
+  })
 })

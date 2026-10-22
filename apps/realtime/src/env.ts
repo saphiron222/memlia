@@ -1,3 +1,5 @@
+// Modified by Memlia in 2026: validate an optional operator-selected realtime bind address.
+// Upstream Apache-2.0 license and notices retained.
 import { z } from 'zod'
 
 const EnvSchema = z.object({
@@ -15,6 +17,7 @@ const EnvSchema = z.object({
   NEXT_PUBLIC_APP_URL: z.string().url(),
   ALLOWED_ORIGINS: z.string().optional(),
   PORT: z.coerce.number().int().positive().default(3002),
+  REALTIME_HOST: z.union([z.ipv4(), z.ipv6()]).default('0.0.0.0'),
   SIM_DB_ROLE: z.enum(['web', 'trigger', 'realtime']).optional(),
   DISABLE_AUTH: z
     .string()

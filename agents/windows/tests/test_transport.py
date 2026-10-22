@@ -25,8 +25,10 @@ except ImportError:
 
 class TlsServer:
     """One request per connection, no external network, bounded parser for fixtures."""
-    def __init__(self, context, handler):
+    def __init__(self, context, handler, *, max_request_body_bytes=0):
         self.context, self.handler = context, handler
+        self.max_request_body_bytes = max_request_body_bytes
+        self.request_bodies = []
         self.requests, self.tasks, self.writers = [], set(), set()
         self.connections = 0
 
@@ -45,9 +47,18 @@ class TlsServer:
         try:
             await writer.start_tls(self.context, ssl_handshake_timeout=1)
             headers = await asyncio.wait_for(reader.readuntil(b'\r\n\r\n'), 1)
+            lengths = [line.split(b':', 1)[1].strip() for line in headers.split(b'\r\n')
+                       if line.lower().startswith(b'content-length:')]
+            if len(lengths) > 1:
+                raise ValueError('duplicate fixture length')
+            length = int(lengths[0]) if lengths else 0
+            if not 0 <= length <= self.max_request_body_bytes:
+                raise ValueError('fixture request body limit')
+            body = await asyncio.wait_for(reader.readexactly(length), 1) if length else b''
+            self.request_bodies.append(body)
             self.requests.append(headers)
             await self.handler(writer, len(self.requests))
-        except (asyncio.TimeoutError, ConnectionError, asyncio.IncompleteReadError, ssl.SSLError):
+        except (asyncio.TimeoutError, ConnectionError, asyncio.IncompleteReadError, ssl.SSLError, ValueError):
             pass
         finally:
             writer.close()
@@ -436,6 +447,52 @@ class PreparationTransportTests(unittest.IsolatedAsyncioTestCase):
                 await channel.get_json('/fixture')
             self.assertEqual(error.exception.code,'channel_closed')
         await original()  # Real test-owned pool cleanup after the injected failure.
+
+    async def test_context_pool_close_failure_preserves_task_cancellation(self):
+        channel = self.channel('https://example.invalid')
+        original = channel._client.aclose
+        entered = asyncio.Event()
+
+        async def broken_close():
+            raise OSError('FICTIONAL_PRIVATE_POOL_CLOSE_DETAIL')
+
+        async def operation():
+            async with channel:
+                entered.set()
+                await asyncio.Event().wait()
+
+        try:
+            with patch.object(channel._client, 'aclose', side_effect=broken_close):
+                task = asyncio.create_task(operation())
+                await asyncio.wait_for(entered.wait(), 1)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError) as cancelled:
+                    await task
+                self.assertTrue(task.cancelled())
+                self.assertIn('channel_cleanup_unverified: close_failed', cancelled.exception.__notes__)
+            with self.assertRaises(transport.TransportError) as error:
+                await channel.get_json('/fixture')
+            self.assertEqual(error.exception.code, 'channel_closed')
+        finally:
+            await original()
+
+    async def test_context_without_cancellation_still_reports_pool_close_failure(self):
+        channel = self.channel('https://example.invalid')
+        original = channel._client.aclose
+
+        async def broken_close():
+            raise OSError('FICTIONAL_PRIVATE_POOL_CLOSE_DETAIL')
+
+        try:
+            with patch.object(channel._client, 'aclose', side_effect=broken_close):
+                with self.assertRaises(transport.TransportError) as error:
+                    async with channel:
+                        pass
+                self.assertEqual(error.exception.code, 'close_failed')
+                self.assertIsNone(error.exception.__cause__)
+                self.assertIsNone(error.exception.__context__)
+        finally:
+            await original()
 
     async def test_response_close_after_deadline(self):
         original=transport.httpx.Response.aclose

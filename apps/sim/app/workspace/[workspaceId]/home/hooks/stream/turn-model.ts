@@ -1,4 +1,6 @@
+// Modified by Memlia: display and preserve limited Chat response notices.
 import { isRecordLike, toRecord } from '@sim/utils/object'
+import { buildCompletionNotice } from '@/lib/mothership/chat/completion-notice'
 import { buildMothershipErrorTag } from '@/lib/mothership/chat/error-tag'
 import { resolveStreamToolOutcome } from '@/lib/mothership/chat/stream-tool-outcome'
 import { reduceTaskState } from '@/lib/mothership/chat/task-state'
@@ -751,6 +753,12 @@ export function reduceEvent(model: TurnModel, envelope: PersistedStreamEventEnve
       const response = isRecordLike(payload.response) ? payload.response : undefined
       if (response && 'async_pause' in response) break
       const status = payload.status
+      const notice = model.status === 'streaming' ? buildCompletionNotice(payload) : undefined
+      if (notice) {
+        // A local display notice is separate from model-authored text and tool outcomes.
+        breakLane(model, MAIN_SPAN, tsMs)
+        appendText(model, MAIN_SPAN, 'assistant', notice, seq, tsMs)
+      }
       if (status === MothershipStreamV1CompletionStatus.cancelled) {
         applyTurnTerminal(model, 'cancelled')
       } else if (status === MothershipStreamV1CompletionStatus.error) {

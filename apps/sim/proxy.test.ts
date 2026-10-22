@@ -1,3 +1,4 @@
+// Modified by Memlia: verify exact-path Office desktop security headers.
 import { resetEnvMock, setEnv } from '@sim/testing/mocks/env.mock'
 import { unstable_doesMiddlewareMatch } from 'next/experimental/testing/server'
 import { NextRequest } from 'next/server'
@@ -183,5 +184,38 @@ describe('proxy matcher', () => {
     expect(matches('/api/internal/project-file-doc/project-1/file-1/persist/other')).toBe(true)
     expect(matches('/api/internal/file-doc/persist/other')).toBe(true)
     expect(matches('/api/internal/file-doc/seed')).toBe(true)
+  })
+})
+
+describe('Office desktop page security', () => {
+  function request(path: string) {
+    return new NextRequest(`https://app.sim.test${path}`, {
+      headers: { host: 'app.sim.test', 'user-agent': 'Mozilla/5.0 Memlia Excel' },
+    })
+  }
+
+  it('permits the SDK only on the exact taskpane and preserves desktop framing protection', () => {
+    const response = proxy(request('/excel-addin?ignored=1'))
+    expect(response.status).toBe(200)
+    expect(response.headers.get('Content-Security-Policy')).toContain(
+      'https://officeapis.public.onecdn.static.microsoft'
+    )
+    expect(response.headers.get('X-Frame-Options')).toBe('SAMEORIGIN')
+    expect(response.headers.get('Cross-Origin-Embedder-Policy')).toBe('unsafe-none')
+    expect(response.headers.get('X-Robots-Tag')).toBe('noindex, nofollow')
+    expect(response.headers.get('Cache-Control')).toBe('no-store')
+  })
+
+  it.each([
+    '/excel-addin-other',
+    '/excel-addin/manifest.xml',
+    '/api/workspaces/w/excel/office-backups',
+    '/login',
+  ])('does not broaden the SDK exception to %s', (path) => {
+    const response = proxy(request(path))
+    expect(response.headers.get('Content-Security-Policy') ?? '').not.toContain(
+      'officeapis.public.onecdn.static.microsoft'
+    )
+    expect(response.headers.get('Cross-Origin-Embedder-Policy')).not.toBe('unsafe-none')
   })
 })

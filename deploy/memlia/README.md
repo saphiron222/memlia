@@ -32,6 +32,11 @@ du laboratoire. Aucun déploiement client n'a été effectué.
    pas leurs droits. Ne pas utiliser le compte administrateur pour les apps.
    `POSTGRES_PASSWORD` initialise seulement le volume neuf ; le changer dans
    `.env` ne change pas le mot de passe d'une base existante.
+   Le parcours initial à cinq rôles du profil Excel dispose maintenant du CLI
+   produit [`database-bootstrap.ts`](database-bootstrap.ts) dans l’image
+   migrations : suivre [`DATABASE_BOOTSTRAP.md`](DATABASE_BOOTSTRAP.md), puis
+   le runner natif et les contrôles de droits effectifs. Cela ne dispense pas
+   de qualifier les images et la composition complète.
 4. Préparer `/app/apps/sim/uploads` dans l'image avec propriétaire `1001:1001`,
    avant `USER nextjs`, puis tester création/lecture/restauration en UID 1001.
    Le provider local utilise `process.cwd()/uploads` ; Next standalone change
@@ -76,6 +81,38 @@ manifeste d'une seule release. Le préfixe est le registre/espace Memlia choisi
 par l'exploitation. Aucun `latest`, serveur propriétaire Copilot, Trigger.dev,
 MinIO obligatoire ou nouveau scheduler n'est ajouté.
 
+Avant tout démarrage ou changement de configuration, contrôler aussi le modèle
+résolu avec le précontrôle fourni. `compose config --quiet` vérifie la résolution,
+mais accepte par exemple une origine HTTP, une fausse empreinte ou le même rôle
+de base pour le web et realtime. Le contrôle suivant ne démarre aucun service :
+
+```sh
+docker compose --env-file deploy/memlia/.env -p memlia-cabinet \
+  -f deploy/memlia/compose.yaml config --format json | \
+  python3 -I -B deploy/memlia/preflight.py
+```
+
+Pour le profil Excel optionnel, ajouter `-f deploy/memlia/compose.excel.yaml`
+à **cette même commande Compose**, après les gates propres à ce profil. Arrêter
+le déploiement si le résultat est `refused` ou si l'une des commandes échoue.
+Ne pas copier le JSON résolu dans un fichier, un journal ou un `tee` : il contient
+les secrets. Seul le petit verdict du précontrôle, composé de codes fixes, peut
+être conservé. L'entrée est limitée à1Mio ; un flux vide/invalide est refusé.
+
+Le contrôle vérifie les origines HTTPS canoniques et identiques des consommateurs,
+la forme des références d'images et leur préfixe applicatif commun, les URL
+PostgreSQL, les noms de rôles distincts et une même base métier. Le transport
+pg-boss peut avoir sa propre base, avec un rôle dédié et la même URL côté web et
+worker. Les URL de ce profil n'acceptent pas de paramètres de query : ceux-ci
+peuvent surcharger les identifiants ou la destination selon le driver. Une
+extension de ce profil nécessiterait une analyse des options réellement utilisées.
+
+`configuration_valid` **ne prouve ni la provenance/droits des images, ni leurs
+révisions communes, ni les privilèges PostgreSQL effectifs, ni le TLS réel**.
+Les mêmes contrôles de release, droits DB, montage de policy, sauvegarde,
+restauration, démarrage et parcours métier restent obligatoires. Le précontrôle
+ne crée aucune admission et n'autorise pas automatiquement `up`.
+
 Le service nommé `redis` conserve les URL natives `redis://redis:6379` mais
 exécute Valkey 8.1.10-alpine. Son manifeste est
 `sha256:081c2f5cb575efc901aa80ff9cdbd1ec6a301682fd35e1ebb4b0990a4a4a8507`.
@@ -111,6 +148,57 @@ cron en lecture seule, réutilise les horaires et appels bornés amont, en retir
 facturation et réconciliation d'entitlements Cloud. `CRON_SECRET` est obligatoire
 avant résolution Compose. Son healthcheck prouve seulement la vie du processus,
 pas la réussite des appels : surveiller leurs erreurs. Pas de nouveau scheduler.
+
+## Configuration du Chat indépendant
+
+`MEMLIA_CHAT_POLICY_SOURCE` désigne un fichier JSON non secret, par chemin
+absolu dans la VM Linux. Préparer sa politique selon
+[`CHAT_POLICY.md`](../../apps/sim/lib/memlia/ai/CHAT_POLICY.md) et ses règles de
+modèle/tarif/fenêtre ; ce déploiement n'invente aucun prix ni budget actif.
+Les secrets fournisseurs restent injectés seulement dans leurs variables
+serveur existantes, jamais dans ce JSON ni une variable publique. Le profil
+local actuel accepte OpenAI ; les autres clés restent utiles aux blocs de
+workflows existants mais ne sélectionnent pas un autre moteur Chat local.
+
+Le web reçoit toujours `MEMLIA_CHAT_POLICY_FILE=/etc/memlia/chat-policy.json`
+et `COPILOT_TOOL_PERMISSIONS_ENABLED=true`. Le fichier est monté en lecture
+seule au premier emplacement, avec `bind.create_host_path=false`. Une source
+hôte manquante ne doit pas devenir un répertoire créé automatiquement. La
+variable source est obligatoire avant résolution Compose ; ni son contenu ni
+ses permissions ne sont vérifiés par `compose config`. Le chemin interne fixe
+sélectionne le backend local : absence, corruption ou refus de policy ne
+retombe pas sur le worker Sim. Aucune clé `COPILOT_API_KEY` n'est transmise.
+
+Préparer le fichier sous UID 0, sans écriture groupe/autres et sans lien,
+par exemple mode0444, lisible par UID/GID1001. Dans l'image finale, `/etc/memlia`
+et tous les parents du chemin interne doivent également appartenir à root,
+être traversables et ne pas être modifiables par l'identité web. Vérifier les
+permissions réelles après montage, y compris les ACL : `read_only` seul ne
+prouve pas ces propriétés. Le lecteur natif recontrôle la propriété, les
+modes, l'accès effectif, les métadonnées et la taille bornée à chaque lecture.
+Les services DB/cache/realtime/cron/migrations ne reçoivent ni fichier ni
+variable de policy. Aucun UID de config supposé changer l'ownership hôte
+n'est utilisé.
+
+Le flag de confirmations rend les routes natives disponibles ; il n'accorde
+aucune permission de workspace ou de workflow. Le driver local conserve son
+gate unitaire sans approbation automatique ni préférence permanente, lié aux
+opérations exactes et au CAS. Permissions, modèle courant, transcript,
+fenêtre monétaire, réservations et quotas restent vérifiés dans le backend.
+Une simple clé fournisseur ne suffit pas à rendre ce Chat opérationnel.
+
+Le crontab existant appelle toutes les30minutes la route authentifiée
+`/api/cron/cleanup-stale-executions`. Celle-ci enfile le job natif qui appelle
+`runCleanupStaleExecutions`, puis `sweepOrphanedRuns` pour les tours abandonnés.
+Aucun timer ou daemon supplémentaire n'est ajouté. Le dispatch, l'exécution
+réelle du job et son résultat doivent être vérifiés et supervisés dans la
+recette Compose ; le seul HTTP200 ne prouve pas la clôture. Le raccordement
+persistant général des jobs reste une condition bloquante décrite plus haut.
+
+Les tests de cette tranche résolvent réellement le modèle Compose sans daemon
+et exercent les absences de variables, la portée du montage, les valeurs fixes
+serveur et l'absence de credentials worker. Ils ne qualifient pas un montage
+Linux, un démarrage applicatif, un modèle, le cron en exécution ou Hyper-V.
 
 ## TLS du cabinet
 

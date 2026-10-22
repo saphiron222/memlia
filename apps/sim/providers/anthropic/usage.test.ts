@@ -1,9 +1,10 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   addAnthropicUsage,
   buildAnthropicUsageCost,
   buildAnthropicUsageTokens,
   createAnthropicUsageAccumulator,
+  observeAnthropicUsage,
   toAnthropicModelUsage,
 } from '@/providers/anthropic/usage'
 
@@ -143,6 +144,103 @@ describe('Anthropic usage aggregation', () => {
       total: 110,
       cacheRead: 22,
       cacheWrite: 33,
+    })
+  })
+})
+
+describe('strict controlled Anthropic usage observation', () => {
+  const complete = () => ({
+    stop_reason: 'end_turn',
+    usage: {
+      input_tokens: 10,
+      output_tokens: 20,
+      cache_read_input_tokens: 30,
+      cache_creation_input_tokens: 50,
+      cache_creation: { ephemeral_5m_input_tokens: 10, ephemeral_1h_input_tokens: 40 },
+      service_tier: 'standard',
+      server_tool_use: null,
+    },
+  })
+  it('prices disjoint native 5m/1h cache buckets at standard list price', () => {
+    expect(observeAnthropicUsage('claude-haiku-4-5', complete())).toEqual({
+      kind: 'usage',
+      usage: {
+        input: 10,
+        output: 20,
+        cacheRead: 30,
+        cacheWrites: [
+          { tokens: 10, inputRateMultiplier: 1.25 },
+          { tokens: 40, inputRateMultiplier: 2 },
+        ],
+      },
+      cost: { kind: 'list_price_estimate', usd: 0.0002055 },
+    })
+  })
+  it.each([
+    'input_tokens',
+    'output_tokens',
+    'cache_read_input_tokens',
+    'cache_creation_input_tokens',
+  ])('never converts an absent or invalid %s into zero-cost evidence', (field) => {
+    for (const invalid of [
+      undefined,
+      null,
+      -1,
+      0.5,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      '1',
+      Number.MAX_SAFE_INTEGER + 1,
+    ]) {
+      const message = complete()
+      Reflect.set(message.usage, field, invalid)
+      expect(observeAnthropicUsage('claude-haiku-4-5', message)).toEqual({
+        kind: 'unknown',
+        reason: 'usage_unavailable',
+      })
+    }
+  })
+  it.each([
+    null,
+    undefined,
+    {},
+    { ephemeral_5m_input_tokens: 50 },
+    { ephemeral_5m_input_tokens: 10, ephemeral_1h_input_tokens: 39 },
+    { ephemeral_5m_input_tokens: 10, ephemeral_1h_input_tokens: 40, foreign: 1 },
+    { ephemeral_5m_input_tokens: -1, ephemeral_1h_input_tokens: 51 },
+  ])('retains unknown cost for missing, contradictory or malformed cache TTLs (%#)', (cache) => {
+    const message = complete()
+    Reflect.set(message.usage, 'cache_creation', cache)
+    expect(observeAnthropicUsage('claude-haiku-4-5', message)).toEqual({
+      kind: 'unknown',
+      reason: 'usage_unavailable',
+    })
+  })
+  it.each(['priority', 'batch', null, undefined])(
+    'refuses non-standard or missing service tier %s',
+    (tier) => {
+      const message = complete()
+      Reflect.set(message.usage, 'service_tier', tier)
+      expect(observeAnthropicUsage('claude-haiku-4-5', message)).toEqual({
+        kind: 'unknown',
+        reason: 'usage_unavailable',
+      })
+    }
+  )
+  it('does not coerce an unknown stop reason or accept unpriced server tools', () => {
+    const message = complete()
+    const coerceStop = vi.fn(() => 'end_turn')
+    Reflect.set(message, 'stop_reason', { toString: coerceStop })
+    expect(observeAnthropicUsage('claude-haiku-4-5', message).kind).toBe('unknown')
+    expect(coerceStop).not.toHaveBeenCalled()
+    Reflect.set(message, 'stop_reason', 'end_turn')
+    Reflect.set(message.usage, 'server_tool_use', { web_search_requests: 1, web_fetch_requests: 0 })
+    expect(observeAnthropicUsage('claude-haiku-4-5', message).kind).toBe('unknown')
+  })
+  it('reports missing native pricing without inventing an invoice or fallback rate', () => {
+    expect(observeAnthropicUsage('not-a-native-model', complete())).toMatchObject({
+      kind: 'usage',
+      cost: { kind: 'unavailable' },
     })
   })
 })

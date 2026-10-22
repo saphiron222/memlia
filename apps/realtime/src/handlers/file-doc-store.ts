@@ -1,3 +1,5 @@
+// Modified by Memlia in 2026: close all owned Redis handles and propagate shutdown failures.
+// Upstream Apache-2.0 license and notices retained.
 /**
  * Shared, multi-replica Yjs backend for the collaborative file-document relay, over Redis Streams.
  *
@@ -422,9 +424,19 @@ export class FileDocStore {
     this.running = false
     if (this.heartbeat) clearInterval(this.heartbeat)
     this.heartbeat = null
-    await Promise.all([this.write?.quit().catch(() => {}), this.read?.quit().catch(() => {})])
-    this.write = null
-    this.read = null
+    const write = this.write
+    const read = this.read
+    // Attempt both even if a client refuses synchronously. Retain failed handles
+    // rather than reporting release or closing a successful peer twice later.
+    const [writeResult, readResult] = await Promise.allSettled([
+      Promise.resolve().then(() => write?.quit()),
+      Promise.resolve().then(() => read?.quit()),
+    ])
+    if (writeResult.status === 'fulfilled' && this.write === write) this.write = null
+    if (readResult.status === 'fulfilled' && this.read === read) this.read = null
+    if (writeResult.status === 'rejected' || readResult.status === 'rejected') {
+      throw new Error('FileDocStore shutdown incomplete')
+    }
     this.rooms.clear()
     this.localInvalidations.clear()
   }

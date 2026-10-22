@@ -152,8 +152,16 @@ class PreparationChannel:
             raise TransportError('channel_closed')
         return self
 
-    async def __aexit__(self, *exc):
-        await self.aclose()
+    async def __aexit__(self, exc_type, exc, traceback):
+        try:
+            await self.aclose()
+        except TransportError:
+            if not isinstance(exc, asyncio.CancelledError):
+                raise
+            # A failed pool close must not turn an already cancelled task into
+            # an ordinary failure eligible for retry. aclose has disabled reuse;
+            # keep the cleanup uncertainty explicit on the original cancellation.
+            exc.add_note('channel_cleanup_unverified: close_failed')
 
     async def aclose(self) -> None:
         self._closed = True
@@ -168,13 +176,19 @@ class PreparationChannel:
 
     async def get_json(self, path: str):
         path = _path(path)
-        if self._closed:
-            raise TransportError('channel_closed')
         # Explicit Request avoids merging client cookies/headers/params. No user
         # header, auth, query, absolute URL, proxy or per-call transport override.
         request = httpx.Request('GET', self._origin + path,
                                 headers={'Accept': 'application/json',
                                          'Accept-Encoding': 'identity'})
+        _, result = await self._request_json(request, (200,))
+        return result
+
+    async def _request_json(self, request: httpx.Request, statuses: tuple[int, ...], validator=None):
+        # Private shared transport mechanics. Public callers never supply a Request,
+        # destination, method or status policy; closed adapters create those here.
+        if self._closed:
+            raise TransportError('channel_closed')
         deadline = asyncio.get_running_loop().time() + self._duration
         try:
             async with asyncio.timeout_at(deadline):
@@ -183,7 +197,7 @@ class PreparationChannel:
                 try:
                     if 300 <= response.status_code < 400:
                         raise TransportError('redirect_refused')
-                    if response.status_code != 200:
+                    if response.status_code not in statuses:
                         raise TransportError('http_status_refused')
                     if response.headers.get('content-encoding', '').strip().lower() not in ('', 'identity'):
                         raise TransportError('compression_refused')
@@ -195,6 +209,8 @@ class PreparationChannel:
                             raise TransportError('response_too_large')
                         data.extend(chunk)
                     result = _json(data)
+                    if validator is not None:
+                        result = validator(response.status_code, result)
                 except asyncio.CancelledError:
                     body_cancelled = True
                     raise
@@ -218,7 +234,7 @@ class PreparationChannel:
                 await asyncio.sleep(0)
                 if asyncio.get_running_loop().time() >= deadline:
                     raise TimeoutError
-                return result
+                return response.status_code, result
         except TransportError as error:
             failure = error.code
         except (TimeoutError, httpx.TimeoutException):
@@ -256,3 +272,123 @@ class MutualTLSChannel(PreparationChannel):
         super().__init__(origin=origin, ca_pem=ca_pem, max_response_bytes=max_response_bytes,
                          total_timeout_seconds=total_timeout_seconds,
                          max_connections=max_connections, _client_identity=client_identity)
+
+
+# Request/response bounds derive from the existing authoritative server contract:
+# apps/sim/lib/api/contracts/desktop-agent-enrollment.ts. No authority is minted here.
+_ENROLLMENT_REQUEST_BYTES = 196608
+_ENROLLMENT_ID = re.compile(r'[A-Za-z0-9_-]{1,128}', re.ASCII)
+_ENROLLMENT_CODE = re.compile(r'[A-Za-z0-9_-]{43}', re.ASCII)
+_ENROLLMENT_SID = re.compile(r'S-1-\d+(?:-\d+){1,14}', re.ASCII)
+_ENROLLMENT_SIGNATURE = re.compile(r'[A-Za-z0-9_+/=-]+', re.ASCII)
+
+
+def _exact_fields(value, names):
+    return (type(value) is dict and len(value) == len(names)
+            and all(type(key) is str for key in value) and set(value) == set(names))
+
+
+def _text(value, maximum):
+    # Zod/JavaScript count UTF-16 code units; Python len alone counts code points.
+    return (type(value) is str and 1 <= len(value) <= maximum and '\0' not in value
+            and sum(1 + (ord(char) > 0xFFFF) for char in value) <= maximum)
+
+
+def _enrollment_payload(body, stage):
+    fields = ('enrollmentId', 'code', 'csrPem', 'windowsSid' if stage == 'challenge' else 'signature')
+    valid = (_exact_fields(body, fields)
+             and _text(body['enrollmentId'], 128) and _ENROLLMENT_ID.fullmatch(body['enrollmentId'])
+             and _text(body['code'], 43) and _ENROLLMENT_CODE.fullmatch(body['code'])
+             and _text(body['csrPem'], 16384))
+    if valid:
+        valid = (_text(body['windowsSid'], 184) and _ENROLLMENT_SID.fullmatch(body['windowsSid'])
+                 if stage == 'challenge' else
+                 _text(body['signature'], 8192) and _ENROLLMENT_SIGNATURE.fullmatch(body['signature']))
+    if not valid:
+        raise TransportError('invalid_enrollment_request')
+    payload = None
+    try:
+        # Captured immutable bytes before the first await; no custom object hooks survive.
+        payload = json.dumps(body, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
+    except (ValueError, TypeError, UnicodeError):
+        pass
+    if payload is None:
+        raise TransportError('invalid_enrollment_request')
+    if len(payload) > _ENROLLMENT_REQUEST_BYTES:
+        raise TransportError('request_too_large')
+    return payload
+
+
+def _instant(value):
+    return (type(value) in (int, float) and 0 <= value <= 8640000000000000
+            and math.isfinite(value) and value == int(value))
+
+
+def _enrollment_result(stage, enrollment_id, status, result):
+    def identifier(value):
+        return _text(value, 128) and _ENROLLMENT_ID.fullmatch(value)
+
+    def digest(value):
+        return type(value) is str and re.fullmatch(r'[0-9a-f]{64}', value, re.ASCII)
+
+    if stage == 'challenge':
+        valid = (_exact_fields(result, ('enrollmentId', 'challengePayload', 'expiresAt'))
+                 and result['enrollmentId'] == enrollment_id
+                 and _text(result['challengePayload'], 4096) and _instant(result['expiresAt']))
+    elif status == 202:
+        valid = (_exact_fields(result, ('status', 'enrollmentId'))
+                 and result['status'] == 'issuance_unknown' and result['enrollmentId'] == enrollment_id)
+    else:
+        valid = (_exact_fields(result, ('status', 'enrollmentId', 'agentId', 'issuanceId', 'bindingDigest', 'certificate'))
+                 and result['status'] == 'issued' and result['enrollmentId'] == enrollment_id
+                 and identifier(result['agentId']) and identifier(result['issuanceId'])
+                 and digest(result['bindingDigest']))
+        if valid:
+            cert = result['certificate']
+            valid = (_exact_fields(cert, ('certificateSerial', 'certificateSha256', 'certificatePem',
+                                          'spkiSha256', 'notBefore', 'notAfter'))
+                     and type(cert['certificateSerial']) is str
+                     and re.fullmatch(r'[0-9a-f]{1,40}', cert['certificateSerial'], re.ASCII)
+                     and digest(cert['certificateSha256']) and digest(cert['spkiSha256'])
+                     and _text(cert['certificatePem'], 16384)
+                     and _instant(cert['notBefore']) and _instant(cert['notAfter'])
+                     and cert['notBefore'] < cert['notAfter'])
+    if not valid:
+        raise TransportError('invalid_enrollment_response')
+    # Structural/correlation check only. No cryptographic certificate installation or trust.
+    return result
+
+
+class EnrollmentChannel(PreparationChannel):
+    """Server-authenticated one-shot exchange only; no agent identity or authority.
+
+    The caller must already own durable pending state before a remote enrollment
+    journey uses this primitive. No key, credential store or certificate is installed.
+    """
+
+    def __init__(self, *, origin: str, ca_pem: bytes, max_response_bytes: int,
+                 total_timeout_seconds: float, max_connections: int):
+        super().__init__(origin=origin, ca_pem=ca_pem,
+                         max_response_bytes=max_response_bytes,
+                         total_timeout_seconds=total_timeout_seconds,
+                         max_connections=max_connections)
+
+    async def challenge(self, body: dict):
+        payload = _enrollment_payload(body, 'challenge')
+        request = httpx.Request('POST', self._origin + '/api/desktop-agent-enrollments/challenge',
+                                content=payload, headers={'Accept': 'application/json',
+                                    'Accept-Encoding': 'identity', 'Content-Type': 'application/json'})
+        enrollment_id = body['enrollmentId']
+        _, result = await self._request_json(request, (200,),
+            lambda status, result: _enrollment_result('challenge', enrollment_id, status, result))
+        return result
+
+    async def complete(self, body: dict):
+        payload = _enrollment_payload(body, 'complete')
+        request = httpx.Request('POST', self._origin + '/api/desktop-agent-enrollments/complete',
+                                content=payload, headers={'Accept': 'application/json',
+                                    'Accept-Encoding': 'identity', 'Content-Type': 'application/json'})
+        enrollment_id = body['enrollmentId']
+        _, result = await self._request_json(request, (200, 202),
+            lambda status, result: _enrollment_result('complete', enrollment_id, status, result))
+        return result

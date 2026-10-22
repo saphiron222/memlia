@@ -191,6 +191,52 @@ describe('public-context access (profile-pictures / og-images / workspace-logos)
  * alone silently missed every attachment and fell through to object metadata,
  * which cannot see a soft delete.
  */
+// Modified by Memlia in 2026: private Office backup access regression coverage.
+describe('private Office backup access through generic file authorization', () => {
+  it.each(
+    (['workspace', 'general', 'profile-pictures', undefined] as const).flatMap((context) =>
+      [false, true].map((requireWrite) => ({ context, requireWrite }))
+    )
+  )(
+    'refuses generic access with $context and requireWrite=$requireWrite',
+    async ({ context, requireWrite }) => {
+      const key = 'workspace/ws-1/private-office-copy.xlsx'
+      mockGetFileMetadataByKey.mockResolvedValue({
+        key,
+        context: 'office-backup',
+        workspaceId: 'ws-1',
+        userId: USER_ID,
+        deletedAt: null,
+      })
+      mockGetFileMetadata.mockResolvedValue({ workspaceId: 'ws-1', userId: USER_ID })
+      mockGetUserEntityPermissions.mockResolvedValue('admin')
+      dbChainMockFns.limit.mockResolvedValue([{ workspaceId: 'ws-1' }])
+
+      await expect(
+        verifyFileAccess(key, USER_ID, undefined, context, { requireWrite })
+      ).resolves.toBe(false)
+      expect(mockGetFileMetadata).not.toHaveBeenCalled()
+      expect(mockGetUserEntityPermissions).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each(['workspace', 'general', 'profile-pictures'] as const)(
+    'refuses the reserved namespace without a database row under %s',
+    async (context) => {
+      mockGetFileMetadataByKey.mockResolvedValue(null)
+      mockGetFileMetadata.mockResolvedValue({ workspaceId: 'ws-1', userId: USER_ID })
+      mockGetUserEntityPermissions.mockResolvedValue('admin')
+      dbChainMockFns.limit.mockResolvedValue([{ workspaceId: 'ws-1' }])
+
+      await expect(
+        verifyFileAccess('workspace/ws-1/office-backups/copy.xlsx', USER_ID, undefined, context)
+      ).resolves.toBe(false)
+      expect(mockGetFileMetadataByKey).not.toHaveBeenCalled()
+      expect(mockGetFileMetadata).not.toHaveBeenCalled()
+    }
+  )
+})
+
 describe('workspace-scoped access (workspace files and mothership attachments)', () => {
   const ATTACHMENT_KEY = 'workspace/ws-1/1786000000000-a3f2-photo.png'
 

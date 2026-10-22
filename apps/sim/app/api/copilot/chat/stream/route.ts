@@ -1,3 +1,4 @@
+// Modified by Memlia: replay local buffers without worker journal fallback.
 import { type Context, context as otelContext, type Span, trace } from '@opentelemetry/api'
 import type { SessionPrincipal } from '@sim/auth/principal'
 import { createLogger } from '@sim/logger'
@@ -29,6 +30,7 @@ import { TraceAttr } from '@/lib/mothership/generated/trace-attributes-v1'
 import { TraceSpan } from '@/lib/mothership/generated/trace-spans-v1'
 import { readChatStream } from '@/lib/mothership/request/application/recover-stream'
 import { contextFromRequestHeaders } from '@/lib/mothership/request/go/propagation'
+import { classifyRunExecution } from '@/lib/mothership/request/lifecycle/recovery-config'
 import { getCopilotTracer, markSpanForError } from '@/lib/mothership/request/otel'
 import {
   createEvent,
@@ -251,6 +253,15 @@ async function handleResumeRequestBody({
     return NextResponse.json({ error: 'Stream not found' }, { status: 404 })
   }
   rootSpan.setAttribute(TraceAttr.CopilotRunStatus, run.status)
+  // Capture canonical persisted identity before asynchronous buffer reads. Request hints
+  // cannot choose the engine; a local run has no worker journal or compute recovery.
+  const executionKind = classifyRunExecution(run.requestContext)
+  const replayUnavailable = () => {
+    rootSpan.end()
+    return NextResponse.json({ error: 'Stream replay is unavailable' }, { status: 503 })
+  }
+  if (executionKind === 'unavailable' || (executionKind === 'local' && fromLog))
+    return replayUnavailable()
 
   if (batchMode) {
     const afterSeq = afterCursor || '0'
@@ -265,6 +276,12 @@ async function handleResumeRequestBody({
         return []
       }),
     ])
+    if (
+      executionKind === 'local' &&
+      ((gap && !(gap.latestSeq <= 0 && isTerminalStreamStatus(run.status))) ||
+        !startsAfterCursor(events, afterSeq))
+    )
+      return replayUnavailable()
     // A reader the ring cannot serve, or whose next event it trimmed after the gap check,
     // is re-synced from the worker log by the live tail.
     const batchEvents =
@@ -309,6 +326,7 @@ async function handleResumeRequestBody({
   const gap =
     ringGap && !(ringGap.latestSeq <= 0 && isTerminalStreamStatus(run.status)) ? ringGap : null
   const resyncFromLog = fromLog || gap !== null
+  if (executionKind !== 'worker' && resyncFromLog) return replayUnavailable()
   let replayBody: ReadableStream<Uint8Array> | null = null
   /** Releases the worker's replay once this response ends; the request signal may never fire. */
   const replayAbort = new AbortController()

@@ -380,6 +380,64 @@ with tempfile.TemporaryDirectory() as directory:
 print('installed_native_procedure_verified')
 """
             )
+            # The same installed runtime must also cross the declarative process
+            # boundary. Keep the direct-kernel assertions above unchanged.
+            code += r"""
+import base64, os, subprocess
+original_sources = {role: value.content for role, value in sources.items()}
+envelope = {
+    "schemaVersion": "memlia.excel-process/v1",
+    "requestId": "installed-process-fixture",
+    "profile": MEMORY_PROFILE,
+    "procedure": recipe,
+    "sources": {role: {
+        "bindingId": value.binding_id, "sheetId": value.sheet_id,
+        "sheetName": value.sheet_name,
+        "contentBase64": base64.b64encode(value.content).decode("ascii"),
+        "sha256": value.sha256,
+    } for role, value in sources.items()},
+    "targets": {role: {
+        "bindingId": value.binding_id, "sheetId": value.sheet_id,
+        "sheetName": value.sheet_name,
+    } for role, value in targets.items()},
+}
+wire = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+def exchange(payload):
+    return subprocess.run(
+        [sys.executable, "-I", "-B", "-m", "memlia_excel.process"],
+        input=payload, capture_output=True, timeout=10,
+        env={"PATH": os.defpath, "TMPDIR": os.environ["TMPDIR"],
+             "HOME": os.environ["TMPDIR"], "POLARS_MAX_THREADS": "1"},
+        cwd=Path.cwd(),
+    )
+child = exchange(wire)
+assert child.returncode == 0 and child.stderr == b"", "installed process failed"
+answer = json.loads(child.stdout)
+assert set(answer) == {"schemaVersion", "requestId", "status", "published", "outputs", "controls"}
+assert answer["schemaVersion"] == "memlia.excel-process/v1"
+assert answer["requestId"] == "installed-process-fixture"
+assert answer["status"] == "prepared_in_memory" and answer["published"] is False
+assert len(answer["outputs"]) == 1
+output = answer["outputs"][0]
+assert set(output) == {"role", "bindingId", "sheetId", "contentBase64", "sha256"}
+assert (output["role"], output["bindingId"], output["sheetId"]) == ("result", "result-binding", "result-sheet")
+content = base64.b64decode(output["contentBase64"], validate=True)
+assert content and output["sha256"] == "sha256:" + sha256(content).hexdigest()
+assert answer["controls"] == [{"index": 0, "kind": "balance", "severity": "blocking", "satisfied": True}]
+book = openpyxl.load_workbook(BytesIO(content), read_only=True)
+assert list(book.active.values) == [('id','debit','credit'),('a','0.10','0.10'),('b','0.20','0.20')]
+book.close()
+assert {role: value.content for role, value in sources.items()} == original_sources
+unknown = deepcopy(envelope)
+unknown["command"] = "fixture-must-not-execute"
+for rejected in (json.dumps(unknown).encode("utf-8"), wire + b" {}"):
+    child = exchange(rejected)
+    assert child.returncode == 2 and child.stderr == b"", "process refusal failed"
+    assert json.loads(child.stdout) == {
+        "schemaVersion": "memlia.excel-process/v1", "status": "refused", "code": "invalid_request"
+    }
+assert list(Path(os.environ["TMPDIR"]).iterdir()) == []
+"""
             outside = work / "outside"
             outside.mkdir()
             temporary = work / "owned-tmp"

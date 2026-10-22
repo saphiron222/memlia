@@ -1,0 +1,144 @@
+# Copyright 2026 Memlia. All rights reserved.
+name: Intégration PostgreSQL — fenêtre de budget
+on:
+  workflow_dispatch:
+  pull_request:
+    paths: [.github/workflows/memlia-postgres-tests.yml, scripts/ci/**, apps/sim/**, packages/**, package.json, bun.lock, bunfig.toml, patches/**]
+  push:
+    branches: [main, memlia/integration]
+    paths: [.github/workflows/memlia-postgres-tests.yml, scripts/ci/**, apps/sim/**, packages/**, package.json, bun.lock, bunfig.toml, patches/**]
+permissions:
+  contents: read
+concurrency:
+  group: memlia-postgres-tests-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  budget-window-postgres:
+    if: github.event.repository.private == false && github.repository == 'saphiron222/memlia'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Tester le contrôle sans base
+        run: python3 -B scripts/ci/test-postgres-tests.py -v
+      - name: Migrer puis tester une base neuve, sans Next ni fournisseur
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          private="$RUNNER_TEMP/memlia-postgres-tests"
+          mkdir "$private" "$private/tools" "$private/scratch"
+          prefix="memlia-pg-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          image='node:24.22.0-bookworm@sha256:14078204b6bb268c107ceff6d3c43f45a888105e5c2b18b14c32b3409d93a1b0'
+          postgres='pgvector/pgvector:pg17@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d'
+          cleanup() {
+            local phase id present observed net
+            for phase in test install database; do
+              [[ -f "$private/$phase.cid" ]] || continue
+              id="$(cat "$private/$phase.cid")"
+              [[ "$id" =~ ^[a-f0-9]{64}$ ]] || return 1
+              present="$(timeout 10 docker container ls --all --no-trunc --format '{{.ID}}' --filter "id=$id")" || return 1
+              if [[ -n "$present" ]]; then
+                [[ "$present" == "$id" ]] || return 1
+                observed="$(timeout 10 docker inspect --format '{{.Id}} {{index .Config.Labels "org.memlia.postgres-ci"}}' "$id")" || return 1
+                [[ "$observed" == "$id $prefix" ]] || return 1
+                timeout 10 docker rm --force "$id" > /dev/null || return 1
+                present="$(timeout 10 docker container ls --all --no-trunc --format '{{.ID}}' --filter "id=$id")" || return 1
+                [[ -z "$present" ]] || return 1
+              fi
+            done
+            if [[ -f "$private/network.id" ]]; then
+              net="$(cat "$private/network.id")"
+              [[ "$net" =~ ^[a-f0-9]{64}$ ]] || return 1
+              observed="$(timeout 10 docker network inspect --format '{{.Id}} {{index .Labels "org.memlia.postgres-ci"}}' "$net")" || return 1
+              [[ "$observed" == "$net $prefix" ]] || return 1
+              timeout 10 docker network rm "$net" > /dev/null || return 1
+              present="$(timeout 10 docker network ls --no-trunc --format '{{.ID}}' --filter "id=$net")" || return 1
+              [[ -z "$present" ]] || return 1
+            fi
+          }
+          trap 'code=$?; cleanup || code=1; exit "$code"' EXIT
+          timeout --kill-after=10s 180s docker pull --platform linux/amd64 "$image" > "$private/node-pull.log" 2>&1
+          timeout --kill-after=10s 180s docker pull --platform linux/amd64 "$postgres" > "$private/pg-pull.log" 2>&1
+          curl --fail --location --silent --show-error --max-time 120 \
+            https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64.zip --output "$private/bun.zip"
+          printf '%s  %s\n' '36368faef7527875d5ffa52e53cd48021741f2a83eb6208a8dd64068d422a913' "$private/bun.zip" | sha256sum --check
+          unzip -q "$private/bun.zip" -d "$private/tools"
+          limits=(--platform linux/amd64 --user "$(id -u):$(id -g)" --read-only --cap-drop ALL \
+            --security-opt no-new-privileges:true --cpus 2 --memory 4g --memory-swap 4g --pids-limit 256 \
+            --tmpfs /tmp:rw,nosuid,nodev,size=512m --workdir /work --label "org.memlia.postgres-ci=$prefix" \
+            --mount "type=bind,src=$private/tools,dst=/tools,readonly" \
+            --mount "type=bind,src=$private/scratch,dst=/scratch" \
+            --env PATH=/tools/bun-linux-x64:/usr/local/bin:/usr/bin:/bin \
+            --env HOME=/scratch --env TMPDIR=/tmp --env CI=true --env PYTHONDONTWRITEBYTECODE=1)
+          timeout --signal=TERM --kill-after=10s 660s docker run --rm --name "$prefix-install" \
+            --cidfile "$private/install.cid" "${limits[@]}" --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/work" "$image" \
+            python3 -B scripts/ci/linux-build-metrics.py --phase install --timeout 600 --report /scratch/install.json -- \
+            sh -ec 'test "$(node --version)" = v24.22.0; test "$(bun --version)" = 1.4.2; sha256sum bun.lock > /scratch/lock.sha256; bun install --frozen-lockfile --ignore-scripts; sha256sum --check /scratch/lock.sha256'
+          python3 - "$private" <<'PY'
+          import os,secrets,sys
+          from pathlib import Path
+          p=Path(sys.argv[1]);password=secrets.token_hex(32)
+          for name,value in [('database.env','POSTGRES_PASSWORD='+password+'\n'),
+                             ('test.env','MEMLIA_PG_CI_ADMIN_URL=postgres://postgres:'+password+'@127.0.0.1:5432/postgres\n')]:
+              fd=os.open(p/name,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+              with os.fdopen(fd,'w') as out:out.write(value)
+          PY
+          timeout 10 docker network create --internal --label "org.memlia.postgres-ci=$prefix" "$prefix" > "$private/network.id"
+          timeout 20 docker run -d --platform linux/amd64 --name "$prefix-database" --cidfile "$private/database.cid" \
+            --label "org.memlia.postgres-ci=$prefix" --network "$prefix" --user 999:999 --read-only \
+            --cap-drop ALL --security-opt no-new-privileges:true --memory 1g --memory-swap 1g --cpus 1 --pids-limit 128 \
+            --tmpfs /var/lib/postgresql/data:rw,nosuid,nodev,size=1g,uid=999,gid=999 \
+            --tmpfs /var/run/postgresql:rw,nosuid,nodev,size=16m,uid=999,gid=999 \
+            --tmpfs /tmp:rw,nosuid,nodev,size=64m --env-file "$private/database.env" "$postgres" > "$private/database.log" 2>&1
+          ready=0
+          for attempt in {1..40}; do
+            if timeout 3 docker exec "$prefix-database" pg_isready -h 127.0.0.1 -U postgres -t 1 > /dev/null 2>&1; then ready=1; break; fi
+            sleep 1
+          done
+          [[ "$ready" == 1 ]]
+          timeout --signal=TERM --kill-after=10s 1260s docker run --rm --name "$prefix-test" --cidfile "$private/test.cid" \
+            "${limits[@]}" --network "container:$prefix-database" --env-file "$private/test.env" \
+            --env MEMLIA_POSTGRES_CONTAINER=1 --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/work,readonly" "$image" \
+            python3 -B scripts/ci/linux-build-metrics.py --phase test --timeout 1200 --report /scratch/test.json -- \
+            python3 -B scripts/ci/postgres-tests.py --report /scratch/postgres.json
+          # An unexpectedly dead/OOM database is never an expected shutdown or success.
+          state="$(timeout 10 docker inspect --format '{{.State.Running}} {{.State.OOMKilled}} {{index .Config.Labels "org.memlia.postgres-ci"}}' "$prefix-database")"
+          [[ "$state" == "true false $prefix" ]]
+          git diff --exit-code
+      - name: Lire seulement le verdict fermé
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json,math,os,re,stat
+          from pathlib import Path
+          p=Path(os.environ['RUNNER_TEMP'])/'memlia-postgres-tests/scratch/postgres.json'
+          if p.exists():
+              if p.parent.is_symlink() or p.parent.parent.is_symlink():raise SystemExit('Invalid receipt directory')
+              fd=os.open(p,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+              with os.fdopen(fd,'rb') as stream:
+                  if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):raise SystemExit('Invalid receipt')
+                  raw=stream.read(16385)
+              if len(raw)>16384:raise SystemExit('Receipt exceeds bound')
+              r=json.loads(raw)
+              if set(r)!={'status','phases','resourcesRetained','nextBuildExecuted','liveProviderTested','cacheTested','namespace'}:raise SystemExit('Invalid scope')
+              if r['status'] not in ('passed','failed') or type(r['resourcesRetained']) is not bool:raise SystemExit('Invalid status')
+              if any(r[k] is not False for k in ('nextBuildExecuted','liveProviderTested','cacheTested')):raise SystemExit('Invalid scope')
+              n=r['namespace']
+              if type(n) is not dict or set(n)!={'nonce','database','roles'} or type(n['nonce']) is not str or not re.fullmatch('[a-f0-9]{32}',n['nonce']):raise SystemExit('Invalid namespace')
+              if n['database']!='memlia_p06_budget_test' or n['roles']!=['pgwin_m_'+n['nonce'],'pgwin_w_'+n['nonce']]:raise SystemExit('Invalid ownership')
+              names=('bootstrap','migrate','grants','baseline','test','readback','cleanup')
+              if type(r['phases']) is not list or not 0<=len(r['phases'])<=7:raise SystemExit('Invalid phases')
+              for value,expected in zip(r['phases'],names):
+                  if set(value)!={'phase','passed','exitCode','reason','seconds'} or value['phase']!=expected or type(value['passed']) is not bool:raise SystemExit('Invalid phase')
+                  if type(value['exitCode']) is not int or not -255<=value['exitCode']<=255 or value['reason'] not in (None,'phase_failed'):raise SystemExit('Invalid result')
+                  if type(value['seconds']) not in (int,float) or not math.isfinite(value['seconds']) or not 0<=value['seconds']<=610:raise SystemExit('Invalid duration')
+                  if value['passed'] and (value['exitCode']!=0 or value['reason'] is not None):raise SystemExit('Invalid success')
+              if r['status']=='passed' and (len(r['phases'])!=7 or r['resourcesRetained'] or not all(v['passed'] for v in r['phases'])):raise SystemExit('Invalid aggregate success')
+              print(json.dumps(r))
+          PY
+      # No artifacts, credentials, raw SQL/test logs, cache, image or release are uploaded.

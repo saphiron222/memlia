@@ -1,3 +1,4 @@
+// Modified by Memlia: project the native Function execution context.
 import { createLogger } from '@sim/logger'
 import { toError } from '@sim/utils/errors'
 import {
@@ -20,6 +21,10 @@ import {
   type CatalogToolSummary,
   projectToolDetail,
 } from '@/lib/catalog/projection/tool'
+import {
+  type FunctionCodeContext,
+  projectFunctionCodeContext,
+} from '@/lib/execution/function-context'
 import { isCustomBlockType } from '@/blocks/custom/build-config'
 import { type BlockConfig, isHiddenFromDisplay, type SubBlockConfig } from '@/blocks/types'
 import { getTrigger, isTriggerValid } from '@/triggers'
@@ -107,6 +112,7 @@ export interface CatalogTriggerConfigField {
 
 /** The full authoring shape of one block. */
 export interface CatalogBlockDetail extends CatalogBlockSummary {
+  codeExecution?: FunctionCodeContext
   bestPractices?: string
   /** Configuration fields that apply regardless of the selected operation. */
   inputSchema: CatalogSubBlock[]
@@ -484,6 +490,7 @@ export function projectBlockDetail(
 
   return {
     ...summaryWithSunsetFirst(block),
+    ...(block.type === 'function' ? { codeExecution: projectFunctionCodeContext() } : {}),
     inputSchema: commonFields,
     operationInputSchema: operationFields,
     inputDefinitions,

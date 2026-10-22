@@ -1,3 +1,4 @@
+// Modified by Memlia: qualify persistent local engine boundaries.
 import type { Principal } from '@sim/auth/principal'
 import { createSessionPrincipal } from '@sim/testing/factories/principal.factory'
 import {
@@ -173,6 +174,37 @@ describe('authorized chat stream recovery', () => {
     mocks.run.mockResolvedValue({ ...run, status })
     expect((await readChatStream.execute({ principal, input })).status).toBe(status)
     expect(mocks.acquire).not.toHaveBeenCalled()
+  })
+
+  it('does not restart a local run after the in-memory options are lost', async () => {
+    const localRun = {
+      ...run,
+      requestContext: {
+        controllerToken: 'old-controller',
+        localExecution: { kind: 'memlia_local_chat', version: 1, recovery: 'none' },
+      },
+    }
+    mocks.run.mockResolvedValue(localRun)
+    expect(await readChatStream.execute({ principal, input })).toBe(localRun)
+    expect(mocks.acquire).not.toHaveBeenCalled()
+    expect(mocks.claim).not.toHaveBeenCalled()
+    expect(mocks.start).not.toHaveBeenCalled()
+  })
+  it.each([
+    null,
+    { kind: 'memlia_local_chat', version: 2, recovery: 'none' },
+    { kind: 'memlia_local_chat', version: 1, recovery: 'none' },
+  ])('refuses local marker plus worker recovery before takeover', async (localExecution) => {
+    mocks.run.mockResolvedValue({
+      ...run,
+      requestContext: { ...run.requestContext, localExecution },
+    })
+    await expect(readChatStream.execute({ principal, input })).rejects.toThrow(
+      'Local Chat is unavailable.'
+    )
+    expect(mocks.acquire).not.toHaveBeenCalled()
+    expect(mocks.claim).not.toHaveBeenCalled()
+    expect(mocks.start).not.toHaveBeenCalled()
   })
 
   it('tails the existing owner without starting another controller', async () => {

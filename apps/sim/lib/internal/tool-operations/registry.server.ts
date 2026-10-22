@@ -1,3 +1,4 @@
+// Modified by Memlia: resolve the worker-only Excel internal handler.
 import type {
   InternalToolOperationHandler,
   InternalToolOperationResult,
@@ -1844,6 +1845,11 @@ handlerLoaders.set(
 handlerLoaders.set(
   'mcp_list_operations',
   async () => (await import('@/lib/internal/mcp/list-operations')).listMcpOperations
+)
+
+handlerLoaders.set(
+  'memlia_excel_transform',
+  async () => (await import('@/lib/memlia/excel/execute-tool.server')).executeMemliaExcelTool
 )
 
 export function isInternalToolOperationRegistered(toolId: string): boolean {

@@ -1,3 +1,4 @@
+// Modified by Memlia: pass optional deployment fields only when defined, for strict Excel capture.
 import { AuditAction, AuditResourceType } from '@sim/audit'
 import {
   resolvePrincipalAttribution,
@@ -165,14 +166,17 @@ export const deployWorkflow = defineAuthorizedWorkflowUseCase({
     })
     const result = await performFullDeploy({
       workflowId: context.workflowId,
+      assertedWorkspaceId: context.workspaceId,
       userId: attribution.attributedUserId,
       actorId: attribution.attributedUserId,
       actor: toPrincipalActor(principal),
       ...(principal.kind === 'delegated' ? { captureAnalytics: false as const } : {}),
-      versionName: input.name,
-      versionDescription: input.description,
+      // An absent input stays absent: the Excel publish snapshot refuses a present
+      // `undefined` field when it captures these params as strict JSON.
+      ...(input.name !== undefined ? { versionName: input.name } : {}),
+      ...(input.description !== undefined ? { versionDescription: input.description } : {}),
       requestId: input.requestId,
-      idempotencyKey: input.idempotencyKey,
+      ...(input.idempotencyKey !== undefined ? { idempotencyKey: input.idempotencyKey } : {}),
     })
     if (!result.success) throwDeploymentFailure(result, 'Failed to deploy workflow')
     const lint =

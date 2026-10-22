@@ -3,8 +3,22 @@
 import { isPlainRecord } from '@sim/utils/object'
 import { z } from 'zod'
 import { workflowIdParamsSchema } from '@/lib/api/contracts/workflows'
-import { getModelSunsetStatus, getProviderModels } from '@/providers/models'
+import { getModelSunsetStatus, getProviderModels, getThinkingCapability } from '@/providers/models'
 import type { runCatalogProvider } from '../chat/provider-binding'
+
+const localBackend = z
+  .object({
+    kind: z.literal('memlia_local_chat'),
+    version: z.literal(1),
+    thinkingLevel: z.string().min(1).max(64).optional(),
+    budgetWindow: z
+      .object({
+        id: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
+        version: z.number().int().positive().max(2147483647),
+      })
+      .strict(),
+  })
+  .strict()
 
 const configuration = z
   .object({
@@ -12,6 +26,11 @@ const configuration = z
     provider: z.enum(['openai', 'anthropic']),
     model: z.string().min(1).max(256),
     destination: z.literal('official'),
+    anthropicWorkspaceId: z
+      .string()
+      .regex(/^wrkspc_[A-Za-z0-9]{8,100}$/)
+      .optional(),
+    localBackend: localBackend.optional(),
     data: z
       .object({
         conversation: z.literal(true),
@@ -33,13 +52,38 @@ export function parseChatInstallationPolicy(raw: unknown) {
     const parsed = configuration.safeParse(raw)
     if (
       !parsed.success ||
+      (Object.hasOwn(parsed.data, 'anthropicWorkspaceId') &&
+        (parsed.data.provider !== 'anthropic' ||
+          typeof parsed.data.anthropicWorkspaceId !== 'string')) ||
       !getProviderModels(parsed.data.provider).includes(parsed.data.model) ||
       getModelSunsetStatus(parsed.data.model) === 'deprecated'
     )
       throw unavailable()
+    const backend = parsed.data.localBackend
+    if (backend && Object.hasOwn(backend, 'thinkingLevel')) {
+      const level = backend.thinkingLevel
+      const capability = getThinkingCapability(parsed.data.model)
+      if (
+        parsed.data.provider !== 'anthropic' ||
+        typeof level !== 'string' ||
+        !capability ||
+        (level === 'none'
+          ? !['disabled', 'between_tools'].includes(capability.noneMode ?? '')
+          : !capability.levels.includes(level))
+      )
+        throw unavailable()
+    }
     return Object.freeze({
       ...parsed.data,
       data: Object.freeze(parsed.data.data),
+      ...(parsed.data.localBackend === undefined
+        ? {}
+        : {
+            localBackend: Object.freeze({
+              ...parsed.data.localBackend,
+              budgetWindow: Object.freeze(parsed.data.localBackend.budgetWindow),
+            }),
+          }),
       kind: 'configuration_decision' as const,
       activation: 'blocked' as const,
     })
@@ -69,7 +113,14 @@ export function selectWorkflowReadPolicy(
 
 /** Inspect descriptors before Zod can evaluate a configuration object's accessors. */
 function plainConfiguration(value: unknown) {
-  return plainRecord(value) && plainRecord(Object.getOwnPropertyDescriptor(value, 'data')?.value)
+  if (!plainRecord(value) || !plainRecord(Object.getOwnPropertyDescriptor(value, 'data')?.value))
+    return false
+  const backend = Object.getOwnPropertyDescriptor(value, 'localBackend')
+  return (
+    backend === undefined ||
+    (plainRecord(backend.value) &&
+      plainRecord(Object.getOwnPropertyDescriptor(backend.value, 'budgetWindow')?.value))
+  )
 }
 function plainRecord(value: unknown): value is Record<string, unknown> {
   if (!isPlainRecord(value)) return false

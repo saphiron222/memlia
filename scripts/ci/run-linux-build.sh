@@ -4,6 +4,9 @@
 set -euo pipefail
 umask 077
 scope=build
+ui_selected=${MEMLIA_CI_CHAT_UI:-0}
+[[ "$ui_selected" == 0 || "$ui_selected" == 1 ]] || exit 2
+ui_verified=0; ui_cleanup_failed=0; ui_seeded=0; ui_network_created=0; ui_front_created=0; ui_resources=()
 swap_variant=''
 if [[ "$#" != 0 ]]; then
   if [[ "$#" == 1 && "$1" == --validation-only ]]; then
@@ -15,6 +18,7 @@ if [[ "$#" != 0 ]]; then
     echo 'Unsupported validation mode' >&2; exit 2
   fi
 fi
+[[ "$ui_selected" == 0 || ( "$scope" == build && "$swap_variant" == turbopack ) ]] || exit 2
 root="$(git rev-parse --show-toplevel)"
 : "${RUNNER_TEMP:?GitHub runner temporary directory required}"
 if [[ -n "$swap_variant" && "${MEMLIA_SWAP_HOST_READY:-}" != 1 ]]; then
@@ -38,17 +42,30 @@ database_ready_exit_code=''
 database_init_exit_code=''
 cleanup() {
   result=$?
+  local -r primary_stage="${current_stage:-bootstrap}"
   trap - EXIT INT TERM
   set +e
   cleanup_ok=1
   receipt_ok=1
+  if [[ "${ui_selected:-0}" == 1 ]] && declare -f ui_close > /dev/null; then ui_close || cleanup_ok=0; fi
   for name in "${containers[@]}"; do
+    if [[ "$name" == "$prefix-ui-web" || "$name" == "$prefix-ui-realtime" || "$name" == "$prefix-ui-cache" ]] && ! ui_owns "$name"; then cleanup_ok=0; continue; fi
     if docker inspect "$name" > /dev/null 2>&1; then
       docker rm -fv "$name" > /dev/null 2>&1 || cleanup_ok=0
     fi
     remaining="$(docker ps -a --filter "name=^/${name}$" --format '{{.Names}}' 2>/dev/null)"
     [[ $? == 0 && -z "$remaining" ]] || cleanup_ok=0
   done
+  if [[ "${ui_front_created:-0}" == 1 ]]; then
+    if [[ "$(docker network inspect --format '{{.Id}} {{index .Labels "org.memlia.ci"}}' "$prefix-ui-front" 2>/dev/null)" == "$(cat "$private/ui-front-network.log") $prefix" ]]; then
+      docker network rm "$prefix-ui-front" > /dev/null 2>&1 || cleanup_ok=0
+    else cleanup_ok=0; fi
+  fi
+  if [[ "${ui_network_created:-0}" == 1 ]]; then
+    if [[ "$(docker network inspect --format '{{.Id}} {{index .Labels "org.memlia.ci"}}' "$prefix-ui" 2>/dev/null)" == "$(cat "$private/ui-network.log") $prefix" ]]; then
+      docker network rm "$prefix-ui" > /dev/null 2>&1 || cleanup_ok=0
+    else cleanup_ok=0; fi
+  fi
   if [[ "$network_created" == 1 ]]; then
     docker network rm "$prefix" > /dev/null 2>&1 || cleanup_ok=0
   fi
@@ -58,8 +75,8 @@ cleanup() {
     cleanup_ok=0
   fi
   python3 - "$metrics/result.json" "$result" "$completed" "$cleanup_ok" \
-    "${current_stage:-bootstrap}" "${database_ready_exit_code:-}" "${database_init_exit_code:-}" \
-    "${scope:-build}" "${next_started:-0}" "${standalone_verified:-0}" <<'PY' || receipt_ok=0
+    "$primary_stage" "${database_ready_exit_code:-}" "${database_init_exit_code:-}" \
+    "${scope:-build}" "${next_started:-0}" "${standalone_verified:-0}" "${ui_selected:-0}" "${ui_verified:-0}" <<'PY' || receipt_ok=0
 import json,sys
 from pathlib import Path
 def exit_code(value, optional=False):
@@ -72,17 +89,21 @@ allowed={'bootstrap','host','pull_node','pull_database','download_bun','verify_b
          'prepare_database','create_network','start_database','database_readiness','database_initialization',
          'phase_test','phase_install','toolchain','phase_inventory','phase_typegen','phase_typecheck',
          'phase_cli','phase_sandbox','phase_config','phase_next','phase_standalone','completed','validation_completed'}
+allowed.update({'ui_browser_install','ui_prepare','ui_services','ui_readiness','ui_browser',*[f'phase_ui-{p}' for p in ('bootstrap','migrate','grants','metadata','baseline','seed','stage','cleanup','readback')]})
+allowed.update({'ui_network_create','ui_network_connect','ui_network_identity','ui_cache_pull',
+                'ui_cache_start','ui_cache_inspect','ui_realtime','ui_web'})
+ui_selected,ui_verified=map(int,sys.argv[11:13]);assert ui_selected in (0,1) and ui_verified in (0,1)
 scope=sys.argv[8]; next_started,standalone=map(int,sys.argv[9:11])
 assert stage in allowed and completed in (0,1) and cleanup in (0,1), 'Invalid fixed build diagnostic'
 assert scope in ('build','validation') and next_started in (0,1) and standalone in (0,1), 'Invalid validation diagnostic'
-normal=code==0 and completed and cleanup
+normal=code==0 and completed and cleanup and (not ui_selected or ui_verified)
 validation_passed=normal and scope=='validation' and stage=='validation_completed' and not next_started and not standalone
 build_passed=normal and scope=='build' and stage=='completed' and next_started and standalone
 status='validation_passed' if validation_passed else 'passed' if build_passed else 'failed'
 Path(sys.argv[1]).write_text(json.dumps({'exitCode':code,'stage':stage,
     'databaseReadyExitCode':exit_code(sys.argv[6],True),'databaseInitExitCode':exit_code(sys.argv[7],True),
     'normalCompletion':bool(completed),'cleanup':bool(cleanup),
-    'scope':scope,'nextStarted':bool(next_started),'standaloneVerified':bool(standalone),
+    'uiSelected':bool(ui_selected),'uiVerified':bool(ui_verified),'scope':scope,'nextStarted':bool(next_started),'standaloneVerified':bool(standalone),
     'buildStatus':'passed' if build_passed else 'not_run' if not next_started else 'failed',
     'status':status},indent=2)+'\n')
 if status=='failed': raise SystemExit(1)
@@ -91,8 +112,54 @@ PY
   python3 - "$metrics" <<'PY' || receipt_ok=0
 import json,sys
 from pathlib import Path
-receipts = [json.loads(path.read_text()) for path in sorted(Path(sys.argv[1]).glob('*.json'))]
-for receipt in receipts:
+for path in sorted(Path(sys.argv[1]).glob('*.json')):
+    if path.name in ('chat-ui.json','ui-readiness.json','ui-service-web.json','ui-service-realtime.json','ui-service-cache.json','ui-realtime-startup.json','ui-realtime-connection.json'):
+        import os,stat
+        if Path(sys.argv[1]).is_symlink() or path.is_symlink(): raise SystemExit('Invalid UI receipt')
+        fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+        with os.fdopen(fd,'rb') as f:
+            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode): raise SystemExit('Invalid UI receipt')
+            data=f.read(4097)
+        if len(data)>4096: raise SystemExit('Invalid UI receipt')
+        receipt=json.loads(data)
+        if type(receipt)is not dict:raise SystemExit('Invalid UI receipt')
+        if path.name=='chat-ui.json':
+            flags={'authenticated','socket','workflow','canvas','chatRefused','browserClosed'}
+            if set(receipt)!=flags|{'status','reason'}: raise SystemExit('Invalid UI receipt')
+            if any(type(receipt[k])is not bool for k in flags): raise SystemExit('Invalid UI receipt')
+            if receipt['status'] not in ('passed','failed') or receipt['reason'] not in (None,'cleanup_failed','journey_failed'): raise SystemExit('Invalid UI receipt')
+            if (receipt['status']=='passed') != (receipt['reason'] is None and all(receipt[k] for k in flags)): raise SystemExit('Invalid UI receipt')
+        elif path.name=='ui-readiness.json':
+            if set(receipt)!={'phase','status','service','httpStatus','errorClass'} or receipt['phase']!='ui-readiness':raise SystemExit('Invalid UI receipt')
+            if receipt['status'] not in ('passed','failed') or receipt['service'] not in ('realtime','web'):raise SystemExit('Invalid UI receipt')
+            if receipt['httpStatus'] is not None and (type(receipt['httpStatus'])is not int or not 100<=receipt['httpStatus']<=599):raise SystemExit('Invalid UI receipt')
+            if receipt['errorClass'] not in (None,'timeout','connection','http','os','unexpected'):raise SystemExit('Invalid UI receipt')
+            if receipt['status']=='passed' and (receipt['service']!='web' or receipt['httpStatus']!=200 or receipt['errorClass']is not None):raise SystemExit('Invalid UI receipt')
+        elif path.name=='ui-realtime-connection.json':
+            try:
+                if type(receipt)is not dict or set(receipt)!={'phase','status','elapsedMs','ownerVerified','namespaceMatched','publishedIPv4Matched','hostHttpStatus','hostErrorCode','localHttpStatus','localErrorCode'} or receipt['phase']!='ui-realtime-connection':raise ValueError()
+                if receipt['status'] not in ('observed','refused','budget_expired'):raise ValueError()
+                if type(receipt['elapsedMs'])is not int or not 0<=receipt['elapsedMs']<=180000:raise ValueError()
+                if any(type(receipt[k])is not bool for k in ('ownerVerified','namespaceMatched','publishedIPv4Matched')):raise ValueError()
+                if receipt['status']=='observed' and not (receipt['ownerVerified'] and receipt['namespaceMatched']):raise ValueError()
+                for side in ('host','local'):
+                    status,code=receipt[side+'HttpStatus'],receipt[side+'ErrorCode']
+                    if status is not None and (type(status)is not int or not 100<=status<=599):raise ValueError()
+                    if code not in (None,'ECONNREFUSED','ECONNRESET','ETIMEDOUT','EHOSTUNREACH','ENETUNREACH','EACCES','OTHER'):raise ValueError()
+                    if status is not None and code is not None:raise ValueError()
+                    if receipt['status']=='observed' and status is None and code is None:raise ValueError()
+            except (ValueError,TypeError,KeyError):raise SystemExit('Invalid UI receipt') from None
+        elif path.name=='ui-realtime-startup.json':
+            if set(receipt)!={'phase','service','logStatus','lastMarker','errorCode'} or receipt['phase']!='ui-realtime-startup' or receipt['service']!='realtime':raise SystemExit('Invalid UI receipt')
+            if receipt['logStatus'] not in ('observed','empty','unavailable','refused'):raise SystemExit('Invalid UI receipt')
+            if receipt['lastMarker'] not in (None,'main_entered','redis_adapter_connecting','redis_adapter_ready','room_manager_connecting','room_manager_ready','file_doc_store_ready','schema_ready','listening'):raise SystemExit('Invalid UI receipt')
+            if receipt['errorCode'] not in (None,'ECONNREFUSED','ENOTFOUND','EAI_AGAIN','ETIMEDOUT','EACCES','ENOSPC','ERR_DLOPEN_FAILED','MODULE_NOT_FOUND'):raise SystemExit('Invalid UI receipt')
+            if (receipt['logStatus']=='observed') != (receipt['lastMarker'] is not None or receipt['errorCode'] is not None):raise SystemExit('Invalid UI receipt')
+        else:
+            if set(receipt)!={'phase','service','running','oomKilled','errorPresent'} or receipt['phase']!='ui-service-state':raise SystemExit('Invalid UI receipt')
+            if receipt['service'] not in ('web','realtime','cache') or path.name!='ui-service-'+receipt['service']+'.json':raise SystemExit('Invalid UI receipt')
+            if any(type(receipt[k])is not bool for k in ('running','oomKilled','errorPresent')):raise SystemExit('Invalid UI receipt')
+    else: receipt=json.loads(path.read_text())
     print(json.dumps(receipt,sort_keys=True))
 PY
   [[ "$completed" == 1 && "$cleanup_ok" == 1 && "$receipt_ok" == 1 && "$result" == 0 ]] || exit 1
@@ -153,12 +220,13 @@ printf '%s  %s\n' '36368faef7527875d5ffa52e53cd48021741f2a83eb6208a8dd64068d422a
 current_stage=extract_bun
 unzip -q "$private/bun.zip" -d "$private/tools"
 current_stage=prepare_database
-python3 - "$private" <<'PY'
+python3 - "$private" "$ui_selected" <<'PY'
 from pathlib import Path
 import secrets,sys
 root=Path(sys.argv[1]); admin=secrets.token_hex(32); password=secrets.token_hex(32)
 (root/'postgres.env').write_text(f'POSTGRES_PASSWORD={admin}\nPOSTGRES_DB=memlia_build\n')
 values={'DATABASE_URL':f'postgresql://memlia_build:{password}@database:5432/memlia_build','MIGRATION_DATABASE_URL':f'postgresql://memlia_build:{password}@database:5432/memlia_build','BETTER_AUTH_SECRET':secrets.token_hex(32),'ENCRYPTION_KEY':secrets.token_hex(32),'INTERNAL_API_SECRET':secrets.token_hex(32),'BETTER_AUTH_URL':'http://localhost:3000','NEXT_PUBLIC_APP_URL':'http://localhost:3000','NEXT_PUBLIC_SOCKET_URL':'http://localhost:3002','DOCKER_BUILD':'true','MEMLIA_LOCAL_BUILD':'1','NODE_OPTIONS':'--max-old-space-size=10240','NEXT_TELEMETRY_DISABLED':'1','DO_NOT_TRACK':'1','SENTRY_DSN':'','NEXT_PUBLIC_SENTRY_DSN':'','HOME':'/scratch','TMPDIR':'/scratch/tmp','CI':'true'}
+if sys.argv[2]=='1': values.update({'NEXT_PUBLIC_BILLING_ENABLED':'false','NEXT_PUBLIC_CHAT_DISABLED':'false','NEXT_PUBLIC_POSTHOG_ENABLED':'false'})
 (root/'build.env').write_text(''.join(f'{k}={v}\n' for k,v in values.items()))
 (root/'database.sql').write_text(f"CREATE ROLE memlia_build LOGIN PASSWORD '{password}' NOSUPERUSER NOCREATEDB NOCREATEROLE;\nALTER DATABASE memlia_build OWNER TO memlia_build;\nCREATE EXTENSION IF NOT EXISTS vector;\nALTER SCHEMA public OWNER TO memlia_build;\n")
 PY
@@ -190,13 +258,17 @@ phase() {
   local label="$1" cwd="$2"
   current_stage="phase_$label"
   shift 2
-  python3 - "$root" <<'PY'
+  python3 - "$root" <<'PY' || return 1
 import shutil,sys
 assert shutil.disk_usage(sys.argv[1]).free >= 2*1024**3, 'disk reserve exhausted'
 PY
   local name="$prefix-$label"
   containers+=("$name")
   local code=0
+  local phase_env="$private/build.env"
+  if [[ "$label" == ui-* && "$label" != ui-stage ]]; then phase_env="$private/$label.env"; fi
+  local phase_mounts=(--mount "type=bind,source=$private,target=/scratch")
+  if [[ "$label" == ui-* ]]; then phase_mounts=(--mount "type=bind,source=$private/ui-runtime,target=/scratch" --mount "type=bind,source=$private/ui,target=/scratch/ui"); fi
   local memory_swap=13g
   local metrics_extra=() env_extra=()
   if [[ -n "${swap_variant:-}" ]]; then
@@ -206,12 +278,24 @@ PY
       metrics_extra+=(--experiment "$swap_variant" --timeout 6000)
     fi
   fi
-  docker run --name "$name" --platform linux/amd64 --network "$prefix" \
+  local phase_runner=(docker)
+  if [[ "$label" == standalone ]]; then metrics_extra+=(--timeout 120); fi
+  if [[ "$label" == ui-* ]]; then
+    local reserve=150 maximum=120 remaining
+    if [[ "$label" == ui-cleanup || "$label" == ui-readback ]]; then reserve=0; maximum=60; fi
+    remaining="$(ui_remaining "$maximum" "$reserve")" || return 1
+    (( remaining > 5 )) || return 1
+    metrics_extra+=(--timeout "$((remaining - 5))")
+    phase_runner=(timeout --kill-after=2 "$remaining" docker)
+  fi
+  local phase_network="$prefix"
+  if [[ "$label" == ui-cleanup || "$label" == ui-readback ]] && [[ "$ui_network_created" == 1 ]]; then phase_network="$prefix-ui"; fi
+  "${phase_runner[@]}" run --name "$name" --platform linux/amd64 --network "$phase_network" \
     --user "$(id -u):$(id -g)" --read-only --cap-drop ALL --security-opt no-new-privileges:true \
     --memory 13g --memory-swap "$memory_swap" --cpus 4 --pids-limit 512 \
-    --env-file "$private/build.env" "${env_extra[@]}" --env PATH=/tools/bun-linux-x64:/usr/local/bin:/usr/bin:/bin \
+    --env-file "$phase_env" "${env_extra[@]}" --env PATH=/tools/bun-linux-x64:/usr/local/bin:/usr/bin:/bin \
     --mount "type=bind,source=$root,target=/work" \
-    --mount "type=bind,source=$private,target=/scratch" \
+    "${phase_mounts[@]}" \
     --mount "type=bind,source=$private/tools,target=/tools,readonly" \
     --mount "type=bind,source=$private/tracked-sources.json,target=/scratch/tracked-sources.json,readonly" \
     --mount "type=bind,source=$metrics,target=/metrics" --workdir "$cwd" \
@@ -238,7 +322,7 @@ Path(sys.argv[1]).write_text(json.dumps(receipt,indent=2)+'\n')
 assert receipt['dockerExitCode']==0 and receipt['containerExitCode']==0 and not receipt['oomKilled'] and not receipt['running'] and receipt['receiptPresent']
 PY
 }
-phase test /work python3 scripts/ci/test-linux-build-metrics.py -v
+phase test /work sh -ec 'python3 scripts/ci/test-linux-build-metrics.py -v; python3 scripts/ci/test-linux-standalone-smoke.py -v'
 phase install /work sh -ec 'test "$(node --version)" = v24.22.0; test "$(bun --version)" = 1.4.2; sha256sum bun.lock > /scratch/lock.sha256; bun install --frozen-lockfile --ignore-scripts; sha256sum -c /scratch/lock.sha256'
 current_stage=toolchain
 docker run --rm --network none --user "$(id -u):$(id -g)" --read-only --cap-drop ALL \
@@ -260,6 +344,386 @@ r["expectedNext"]=expected
 Path("/metrics/toolchain.json").write_text(json.dumps(r,indent=2)+"\n")
 assert r["node"]=="v24.22.0" and r["bun"]=="1.4.2" and r["typescript"]=="7.0.2"
 ' > "$private/toolchain.log" 2>&1
+# The UI has a separate 1,200s ceiling, still subordinate to the swap host deadline.
+# Reserve 150s for expected service stops, native cleanup and readback.
+ui_remaining() {
+  local maximum="$1" reserve="$2" left
+  left=$((ui_deadline - SECONDS - reserve))
+  (( left > 0 )) || return 1
+  if (( left < maximum )); then printf '%s\n' "$left"; else printf '%s\n' "$maximum"; fi
+}
+ui_docker() {
+  local maximum=30 reserve=150 remaining
+  [[ "$1" != pull ]] || maximum=120
+  [[ "${ui_closing:-0}" != 1 ]] || reserve=0
+  remaining="$(ui_remaining "$maximum" "$reserve")" || return 1
+  timeout --kill-after=5 "$remaining" docker "$@"
+}
+# Fixed, opt-in synthetic journey. Reuses this build and the owned resource trap.
+run_ui_journey() {
+  ui_deadline=$((SECONDS + 1200))
+  current_stage=ui_browser_install
+  [[ "$(node --version)" == v24.22.0 ]] || return 1
+  ui_node="$(command -v node)"
+  export PLAYWRIGHT_BROWSERS_PATH="$private/chromium"
+  local ui_cli
+  ui_cli="$("$ui_node" --input-type=module - "$root" <<'JSUI'
+import { createRequire } from 'node:module'
+const native = createRequire(process.argv[2] + '/apps/sim/package.json')
+if (native('@playwright/test/package.json').version !== '1.61.1') throw Error('browser_version_refused')
+process.stdout.write(native.resolve('@playwright/test/cli'))
+JSUI
+)" || return 1
+  timeout --kill-after=5 "$(ui_remaining 300 150)" "$ui_node" "$ui_cli" install --with-deps chromium > "$private/browser-install.log" 2>&1
+  [[ "$(wc -c < "$private/browser-install.log")" -le 8388608 ]] || return 1
+  current_stage=ui_prepare
+  python3 - "$private" "$prefix" <<'PYUI'
+import json,secrets,sys,uuid
+from pathlib import Path
+p=Path(sys.argv[1]);nonce=secrets.token_hex(16);d=p/'ui';d.mkdir(mode=0o700);(p/'ui-runtime').mkdir(mode=0o700);(p/'ui-runtime/tmp').mkdir(mode=0o700)
+admin=dict(x.split('=',1) for x in (p/'postgres.env').read_text().splitlines())['POSTGRES_PASSWORD']
+passwords={role:secrets.token_hex(32) for role in ('migrate','web','realtime')}
+database='memlia_ui_'+nonce
+url=lambda role: f"postgres://ui_{role}_{nonce}:{passwords[role]}@database:5432/{database}"
+base={'PATH':'/tools/bun-linux-x64:/usr/local/bin:/usr/bin:/bin','HOME':'/scratch','TMPDIR':'/scratch/tmp','NODE_ENV':'production','RECIPE_NONCE':nonce,'NEXT_TELEMETRY_DISABLED':'1','DO_NOT_TRACK':'1','CI':'true'}
+shared={**base,'DATABASE_URL':url('web'),'BETTER_AUTH_SECRET':secrets.token_hex(32),'ENCRYPTION_KEY':secrets.token_hex(32),'INTERNAL_API_SECRET':secrets.token_hex(32),'BETTER_AUTH_URL':'http://localhost:3000','NEXT_PUBLIC_APP_URL':'http://localhost:3000','NEXT_PUBLIC_SOCKET_URL':'http://localhost:3002','SOCKET_SERVER_URL':'http://realtime:3002','INTERNAL_API_BASE_URL':'http://web:3000','REDIS_URL':'redis://valkey:6379/0','DISABLE_AUTH':'false','DISABLE_REGISTRATION':'true','DISABLE_EMAIL_SIGNUP':'true','EMAIL_VERIFICATION_ENABLED':'false','BILLING_ENABLED':'false','NEXT_PUBLIC_BILLING_ENABLED':'false','NEXT_PUBLIC_CHAT_DISABLED':'false','NEXT_PUBLIC_POSTHOG_ENABLED':'false','COPILOT_TOOL_PERMISSIONS_ENABLED':'true','MEMLIA_CHAT_POLICY_FILE':'/etc/memlia/chat-policy.json','TRUSTED_ORIGINS':'http://localhost:3000','SIM_DB_ROLE':'web','DB_APP_NAME':'memlia-ci-ui','MEMLIA_LOCAL_BUILD':'1','DOCKER_BUILD':'true','HOSTNAME':'0.0.0.0','PORT':'3000'}
+def env(name,values):
+    assert all('\n' not in v and '\x00' not in v for v in values.values())
+    (p/(name+'.env')).write_text(''.join(k+'='+v+'\n' for k,v in values.items()))
+env('ui-bootstrap',{**base,'RECIPE_ADMIN_URL':f'postgres://postgres:{admin}@database:5432/postgres',**{'RECIPE_'+k.upper()+'_PASSWORD':v for k,v in passwords.items()}})
+env('ui-grants',{**base,'RECIPE_ADMIN_URL':f'postgres://postgres:{admin}@database:5432/{database}'})
+env('ui-migrate',{**base,'DATABASE_URL':url('migrate'),'MIGRATION_DATABASE_URL':url('migrate')})
+env('ui-metadata',{**base,'MIGRATION_DATABASE_URL':url('migrate')})
+for name in ('ui-baseline','ui-readback','ui-seed','ui-cleanup','ui-web'):env(name,shared)
+env('ui-realtime',{**base,'DATABASE_URL':url('realtime'),'DATABASE_URL_REALTIME':url('realtime'),'SIM_DB_ROLE':'realtime','BETTER_AUTH_SECRET':shared['BETTER_AUTH_SECRET'],'INTERNAL_API_SECRET':shared['INTERNAL_API_SECRET'],'BETTER_AUTH_URL':shared['BETTER_AUTH_URL'],'NEXT_PUBLIC_APP_URL':'http://web:3000','ALLOWED_ORIGINS':'http://localhost:3000','DISABLE_AUTH':'false','REDIS_URL':shared['REDIS_URL'],'PORT':'3002','REALTIME_HOST':'0.0.0.0','LOG_LEVEL':'INFO'})
+fixture={'userId':str(uuid.uuid4()),'accountId':str(uuid.uuid4()),'statsId':str(uuid.uuid4()),'email':'ci-'+uuid.uuid4().hex+'@example.invalid','password':secrets.token_urlsafe(24),'origin':'http://localhost:3000','realtimeOrigin':'http://localhost:3002','socketBucketKeys':[]}
+(d/'credentials.private.json').write_text(json.dumps(fixture)+'\n')
+(p/'ui-policy.json').write_text('{}\n')
+PYUI
+  sudo chown 0:0 "$private/ui-policy.json"
+  sudo chmod 444 "$private/ui-policy.json"
+  # Role-specific environments never reach the browser; the runtime has no owner DSN.
+  phase ui-bootstrap /work/packages/db bun --no-env-file /work/scripts/ci/linux-chat-fixture.ts bootstrap
+  phase ui-migrate /work/packages/db bun --no-env-file ./scripts/migrate.ts
+  phase ui-grants /work/packages/db bun --no-env-file /work/scripts/ci/linux-chat-fixture.ts grants
+  phase ui-metadata /work/packages/db bun --no-env-file /work/scripts/ci/linux-chat-fixture.ts metadata
+  phase ui-baseline /work/packages/db bun --no-env-file /work/scripts/ci/linux-chat-fixture.ts baseline
+  ui_seeded=1 # cleanup must run even if seed partially succeeds then reports failure.
+  phase ui-seed /work/apps/sim bun --no-env-file --tsconfig-override /work/apps/sim/tsconfig.json /work/scripts/ci/linux-chat-fixture.ts seed
+  phase ui-stage /work/apps/sim python3 -c '
+import importlib.util
+from pathlib import Path
+s=importlib.util.spec_from_file_location("smoke","/work/scripts/ci/linux-standalone-smoke.py");m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
+a=Path("/work/apps/sim");m.verify_artifacts(a,True);p=Path("/scratch/ui-stage");p.mkdir();m.stage_artifacts(a,p)
+'
+  current_stage=ui_network_create
+  ui_docker network create --internal --label "org.memlia.ci=$prefix" "$prefix-ui" > "$private/ui-network.log" 2>&1
+  ui_network_created=1
+  # Docker does not publish host ports for services attached only to internal networks.
+  # Only web/realtime join this frontend; database/cache keep their existing networks.
+  ui_docker network create --label "org.memlia.ci=$prefix" "$prefix-ui-front" > "$private/ui-front-network.log" 2>&1
+  ui_front_created=1
+  current_stage=ui_network_connect
+  ui_docker network connect --alias database "$prefix-ui" "$prefix-database" > "$private/ui-network-connect.log" 2>&1
+  current_stage=ui_network_identity
+  ui_docker network inspect "$prefix-ui" "$prefix-ui-front" > "$private/ui-networks-inspect.private.json" 2> "$private/ui-networks-inspect-error.private.log"
+  python3 - "$private" "$prefix-ui" "$prefix-ui-front" <<'PYUI'
+import json,sys
+from pathlib import Path
+p=Path(sys.argv[1]);raw,front=json.loads((p/'ui-networks-inspect.private.json').read_text())
+assert raw['Internal'] and raw['Labels']=={'org.memlia.ci':sys.argv[2].removesuffix('-ui')}
+# Browser host connections enter through the published frontend's gateway.
+assert front['Internal'] is False and front['Labels']==raw['Labels']
+assert front['Id']==(p/'ui-front-network.log').read_text().strip()
+assert raw['Id']==(p/'ui-network.log').read_text().strip()
+gateway=front['IPAM']['Config'][0]['Gateway']
+assert all(c in '0123456789.' for c in gateway)
+f=p/'ui/credentials.private.json';value=json.loads(f.read_text());value['socketBucketKeys']=['route:socket-token-ip:ip:'+gateway,'route:socket-token-ip:ip:::ffff:'+gateway];f.write_text(json.dumps(value)+'\n')
+PYUI
+  local cache_image='valkey/valkey:8.1.10-alpine@sha256:081c2f5cb575efc901aa80ff9cdbd1ec6a301682fd35e1ebb4b0990a4a4a8507'
+  current_stage=ui_cache_pull
+  ui_docker pull --platform linux/amd64 "$cache_image" > "$private/ui-cache-pull.log" 2>&1
+  current_stage=ui_cache_start
+  containers+=("$prefix-ui-cache"); ui_cache_started=1
+  ui_docker run -d --name "$prefix-ui-cache" --label "org.memlia.ci=$prefix" --network "$prefix-ui" --network-alias valkey --memory 128m --memory-swap 128m --cpus .5 --pids-limit 64 --read-only --tmpfs /data:rw,noexec,nosuid,nodev,size=64m --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges:true "$cache_image" valkey-server --save '' --appendonly no > "$private/ui-cache-start.log" 2> "$private/ui-cache-start-error.log"
+  current_stage=ui_cache_inspect
+  ui_owns "$prefix-ui-cache"
+  ui_inspect cache 134217728 500000000 64 1000:1000
+  current_stage=ui_realtime
+  ui_service realtime 256m .5 96 /work/apps/realtime 3002 bun --no-env-file --tsconfig-override /work/apps/realtime/tsconfig.json src/index.ts
+  current_stage=ui_web
+  ui_service web 5g 2 256 /scratch/ui-stage/apps/sim 3000 node server.js
+  current_stage=ui_readiness
+  local readiness_seconds
+  readiness_seconds="$(ui_remaining 180 150)" || return 1
+  python3 - "$readiness_seconds" "$metrics/ui-readiness.json" "$private" "$prefix" "$image" <<'PYUI'
+import http.client,json,time,sys
+from pathlib import Path
+started=time.monotonic()
+end=started+int(sys.argv[1])
+diagnosed=False
+receipt={'phase':'ui-readiness','status':'failed','service':'realtime','httpStatus':None,'errorClass':None}
+def error_class(error):
+    if isinstance(error,TimeoutError):return 'timeout'
+    if isinstance(error,ConnectionError):return 'connection'
+    if isinstance(error,http.client.HTTPException):return 'http'
+    if isinstance(error,OSError):return 'os'
+    return 'unexpected'
+def diagnose_realtime(error):
+    # Diagnostic only: never changes readiness or extends its deadline.
+    import os,re,stat,subprocess
+    result={'phase':'ui-realtime-connection','status':'refused','elapsedMs':0,
+            'ownerVerified':False,'namespaceMatched':False,'publishedIPv4Matched':False,
+            'hostHttpStatus':None,'hostErrorCode':None,'localHttpStatus':None,'localErrorCode':None}
+    # Time of the initial connection failure, relative to readiness start.
+    result['elapsedMs']=max(0,min(180000,int((time.monotonic()-started)*1000)))
+    limit=min(end,time.monotonic()+6)
+    codes={'ECONNREFUSED','ECONNRESET','ETIMEDOUT','EHOSTUNREACH','ENETUNREACH','EACCES'}
+    def remaining():
+        left=limit-time.monotonic()
+        if left<=0:raise TimeoutError()
+        return min(2,left)
+    command_number=0
+    def command(args):
+        import base64
+        nonlocal command_number
+        timeout=remaining()
+        command_number+=1
+        if command_number>3:raise ValueError()
+        stdout=stderr=b'';returncode=None;failure=None
+        try:
+            p=subprocess.run(['docker',*args],stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=timeout)
+            stdout,stderr,returncode=p.stdout,p.stderr,p.returncode
+        except subprocess.TimeoutExpired as error:
+            stdout,stderr=error.stdout or b'',error.stderr or b'';failure=error
+        except OSError as error:failure=error
+        # Preserve bounded bytes before exit-code checks, JSON parsing or public projection.
+        trace={'returnCode':returncode,'timedOut':isinstance(failure,subprocess.TimeoutExpired),
+               'errorType':type(failure).__name__ if failure is not None else None,
+               'errorMessage':str(failure)[:1024] if failure is not None else None,
+               'stdoutBase64':base64.b64encode(stdout[:8193]).decode('ascii'),
+               'stderrBase64':base64.b64encode(stderr[:1025]).decode('ascii'),
+               'stdoutTruncated':len(stdout)>8192,'stderrTruncated':len(stderr)>1024}
+        target=Path(private)/('ui-realtime-command-'+str(command_number)+'.private.json')
+        fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+        with os.fdopen(fd,'w') as f:f.write(json.dumps(trace,sort_keys=True)+'\n')
+        if failure is not None:raise failure
+        if returncode or trace['stdoutTruncated'] or trace['stderrTruncated']:raise ValueError()
+        return json.loads(stdout)
+    try:
+        private,prefix,image=sys.argv[3:6]
+        # The first primitive error stays private, even when ownership/probing refuses.
+        payload=json.dumps({'type':type(error).__name__[:80],'message':str(error)[:1024]},ensure_ascii=True).encode()
+        fd=os.open(Path(private)/'ui-realtime-connection.private.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+        with os.fdopen(fd,'wb') as f:f.write(payload)
+        remaining()
+        if not re.fullmatch(r'memlia-build-[a-f0-9]+',prefix):raise ValueError()
+        fd=os.open(Path(private)/'ui-realtime-start.log',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+        with os.fdopen(fd,'rb') as f:
+            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):raise ValueError()
+            identity=f.read(66).decode().strip()
+        if not re.fullmatch(r'[a-f0-9]{64}',identity):raise ValueError()
+        template='{"id":{{json .Id}},"image":{{json .Config.Image}},"owner":{{json (index .Config.Labels "org.memlia.ci")}},"running":{{json .State.Running}},"networks":{{json .NetworkSettings.Networks}},"ports":{{json .NetworkSettings.Ports}}}'
+        def inspect_owned():
+            state=command(['inspect','--format',template,identity])
+            if (state['id']!=identity or state['image']!=image or state['owner']!=prefix
+                or state['running'] is not True or set(state['networks'])!={prefix+'-ui',prefix+'-ui-front'}):raise ValueError()
+            if any(not re.fullmatch(r'[a-f0-9]{64}',n['NetworkID']) for n in state['networks'].values()):raise ValueError()
+            return state
+        state=inspect_owned();result.update(ownerVerified=True,namespaceMatched=True)
+        result['publishedIPv4Matched']=state['ports']=={'3002/tcp':[{'HostIp':'127.0.0.1','HostPort':'3002'}]}
+        if not result['publishedIPv4Matched']:raise ValueError() # Never probe an unowned host port.
+        c=http.client.HTTPConnection('127.0.0.1',3002,timeout=remaining())
+        try:
+            c.request('GET','/health')
+            c.timeout=remaining()
+            if c.sock is not None:c.sock.settimeout(c.timeout)
+            response=c.getresponse()
+            if type(response.status)is not int or not 100<=response.status<=599:raise ValueError()
+            result['hostHttpStatus']=response.status
+        except (OSError,http.client.HTTPException) as failure:
+            import errno
+            code=errno.errorcode.get(getattr(failure,'errno',None))
+            result['hostErrorCode']=code if code in codes else 'ETIMEDOUT' if isinstance(failure,TimeoutError) else 'OTHER'
+        finally:c.close()
+        milliseconds=max(1,int(remaining()*1000))
+        # Fixed URL and no body collection. The remote timer also closes the exec child
+        # if the Docker client reaches its deadline; all resources belong to this container.
+        probe="""const http=require('node:http');const ms=Number(process.argv[1]);let done=false;
+const codes=new Set(['ECONNREFUSED','ECONNRESET','ETIMEDOUT','EHOSTUNREACH','ENETUNREACH','EACCES']);
+let request;const finish=(httpStatus,errorCode)=>{if(done)return;done=true;clearTimeout(timer);request?.destroy();console.log(JSON.stringify({httpStatus,errorCode}));};
+const timer=setTimeout(()=>finish(null,'ETIMEDOUT'),ms);
+request=http.get('http://127.0.0.1:3002/health',response=>{const status=response.statusCode;response.destroy();finish(status,null);});
+request.on('error',e=>finish(null,codes.has(e.code)?e.code:'OTHER'));"""
+        local=command(['exec',identity,'/usr/local/bin/node','-e',probe,str(milliseconds)])
+        if type(local)is not dict or set(local)!={'httpStatus','errorCode'}:raise ValueError()
+        status,code=local['httpStatus'],local['errorCode']
+        if status is not None and (type(status)is not int or not 100<=status<=599):raise ValueError()
+        if code not in codes|{'OTHER',None} or (status is None)==(code is None):raise ValueError()
+        inspect_owned() # No result is accepted from a replaced or no-longer-owned service.
+        result.update(localHttpStatus=status,localErrorCode=code,status='observed')
+    except (TimeoutError,subprocess.TimeoutExpired):result['status']='budget_expired'
+    except Exception:result['status']='refused'
+    finally:
+        target=Path(sys.argv[2]).with_name('ui-realtime-connection.json')
+        fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+        with os.fdopen(fd,'w') as f:f.write(json.dumps(result,sort_keys=True)+'\n')
+
+try:
+    for service,port,path in (('realtime',3002,'/health'),('web',3000,'/login')):
+        receipt.update(service=service,httpStatus=None,errorClass=None)
+        while True:
+            if time.monotonic()>=end: raise SystemExit(1)
+            c=http.client.HTTPConnection('localhost',port,timeout=min(2,end-time.monotonic()))
+            try:
+                c.request('GET',path);r=c.getresponse()
+                if type(r.status)is not int or not 100<=r.status<=599:raise http.client.HTTPException()
+                receipt.update(httpStatus=r.status,errorClass=None)
+                if r.status==200:break
+            except (OSError,TimeoutError) as error:
+                receipt['errorClass']=error_class(error)
+                if service=='realtime' and isinstance(error,ConnectionError) and not diagnosed:
+                    diagnosed=True
+                    try:diagnose_realtime(error)
+                    except Exception:raise SystemExit(1) from None # Preserve the original readiness failure.
+            finally:c.close()
+            time.sleep(.5)
+    receipt['status']='passed'
+except Exception as error:
+    receipt['errorClass']=error_class(error)
+    raise SystemExit(1) from None
+finally:
+    Path(sys.argv[2]).write_text(json.dumps(receipt,sort_keys=True)+'\n')
+PYUI
+  current_stage=ui_browser
+  # No inherited app environment, keys or DSNs in the host browser process.
+  local code=0
+  timeout --kill-after=5 "$(ui_remaining 900 150)" env -i PATH=/usr/bin:/bin HOME="$private" TMPDIR="$private/tmp" PLAYWRIGHT_BROWSERS_PATH="$private/chromium" \
+    "$ui_node" "$root/scripts/ci/linux-chat-browser.mjs" "$root" "$private/ui/credentials.private.json" "$metrics/chat-ui.json" > "$private/ui-browser.log" 2>&1 || code=$?
+  [[ "$(wc -c < "$private/ui-browser.log")" -le 8388608 && "$code" == 0 ]] || return 1
+  ui_close || return 1
+  (( SECONDS <= ui_deadline )) || return 1
+  ui_verified=1
+}
+ui_service() {
+  local mode="$1" memory="$2" cpu="$3" pids="$4" cwd="$5" port="$6"; shift 6
+  local name="$prefix-ui-$mode"; containers+=("$name"); ui_resources+=("$name")
+  ui_docker run -d --name "$name" --label "org.memlia.ci=$prefix" --platform linux/amd64 --network "name=$prefix-ui,alias=$mode" --network "name=$prefix-ui-front" \
+    --publish "127.0.0.1:$port:$port" --init --user "$(id -u):$(id -g)" --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+    --memory "$memory" --memory-swap "$memory" --cpus "$cpu" --pids-limit "$pids" \
+    --env-file "$private/ui-$mode.env" --mount "type=bind,src=$root,dst=/work,readonly" --mount "type=bind,src=$private/ui-runtime,dst=/scratch" --mount "type=bind,src=$private/ui-policy.json,dst=/etc/memlia/chat-policy.json,readonly" \
+    --mount "type=bind,src=$private/tools,dst=/tools,readonly" --workdir "$cwd" "$image" "$@" > "$private/ui-$mode-start.log" 2> "$private/ui-$mode-start-error.log"
+  ui_owns "$name"
+  if [[ "$mode" == web ]]; then ui_inspect web 5368709120 2000000000 256 "$(id -u):$(id -g)";
+  else ui_inspect realtime 268435456 500000000 96 "$(id -u):$(id -g)"; fi
+}
+ui_inspect() {
+  local mode="$1"; shift
+  ui_owns "$prefix-ui-$mode" || return 1
+  ui_docker inspect "$prefix-ui-$mode" > "$private/ui-$mode-inspect.json"
+  python3 - "$private/ui-$mode-inspect.json" "$prefix" "$mode" "$@" <<'PYUI'
+import json,sys
+raw=json.load(open(sys.argv[1]))[0];h=raw['HostConfig'];mode=sys.argv[3]
+assert raw['State']['Running'] and not raw['State']['OOMKilled']
+assert raw['Config']['User']==sys.argv[7] and raw['Config']['Labels']['org.memlia.ci']==sys.argv[2]
+assert h['ReadonlyRootfs'] and 'ALL' in h['CapDrop'] and 'no-new-privileges:true' in h['SecurityOpt']
+assert (h['Memory'],h['MemorySwap'],h['NanoCpus'],h['PidsLimit'])==(int(sys.argv[4]),int(sys.argv[4]),int(sys.argv[5]),int(sys.argv[6]))
+assert set(raw['NetworkSettings']['Networks'])==({sys.argv[2]+'-ui'} if mode=='cache' else {sys.argv[2]+'-ui',sys.argv[2]+'-ui-front'})
+ports=h['PortBindings'] or {}
+if mode=='cache': assert not ports
+else:
+    port='3000' if mode=='web' else '3002'
+    assert ports=={port+'/tcp':[{'HostIp':'127.0.0.1','HostPort':port}]} and h['Init'] is True
+    assert raw['NetworkSettings']['Ports']==ports # Requested bindings alone do not prove host publication.
+PYUI
+}
+ui_owns() {
+  local name="$1" mode="${1#"$prefix-ui-"}" expected
+  [[ "$mode" == web || "$mode" == realtime || "$mode" == cache ]] || return 1
+  expected="$(cat "$private/ui-$mode-start.log")"
+  [[ "$expected" =~ ^[a-f0-9]{64}$ ]] || return 1
+  [[ "$(ui_docker inspect --format '{{.Id}} {{index .Config.Labels "org.memlia.ci"}}' "$name" 2>/dev/null)" == "$expected $prefix" ]]
+}
+ui_close() {
+  local ok=1 name
+  ui_closing=1
+  [[ -n "${ui_deadline:-}" ]] || return 0
+  for name in "${ui_resources[@]}"; do
+    ui_stop_owned "$name" || ok=0
+  done
+  ui_resources=()
+  if [[ "$ui_seeded" == 1 ]]; then
+    ui_seeded=0 # Native deletion is attempted once, including refusal paths.
+    phase ui-cleanup /work/apps/sim bun --no-env-file --tsconfig-override /work/apps/sim/tsconfig.json /work/scripts/ci/linux-chat-fixture.ts cleanup || ok=0
+    phase ui-readback /work/packages/db bun --no-env-file /work/scripts/ci/linux-chat-fixture.ts readback || ok=0
+  fi
+  if [[ "${ui_cache_started:-0}" == 1 ]]; then
+    # Keep Redis alive for native fixture cleanup; inspect it before expected stop.
+    ui_cache_started=0
+    ui_stop_owned "$prefix-ui-cache" || ok=0
+  fi
+  [[ "$ok" == 1 ]] || ui_cleanup_failed=1
+  [[ "$ok" == 1 && "${ui_cleanup_failed:-0}" == 0 ]]
+}
+
+ui_stop_owned() {
+  local name="$1" ok=1
+  ui_owns "$name" || return 1
+  # An owned service that already died/OOMed cannot become a successful journey.
+  local mode="${name#"$prefix-ui-"}"
+  if [[ "$mode" == realtime ]]; then
+    local collected=0
+    # One bounded, non-following read of this owned service; never publish its raw logs.
+    if (set -C; ui_docker logs --tail 200 "$name" > "$private/ui-realtime-startup.private.log" 2>&1) 2>/dev/null; then collected=1; fi
+    python3 - "$private/ui-realtime-startup.private.log" "$metrics/ui-realtime-startup.json" "$collected" <<'PYSTARTUP' || ok=0
+import json,os,stat,sys
+from pathlib import Path
+receipt={'phase':'ui-realtime-startup','service':'realtime','logStatus':'unavailable','lastMarker':None,'errorCode':None}
+markers={
+    ('CollaborativeSocketServer','Starting Socket.IO server...'):'main_entered',
+    ('SocketIOConfig','Configuring Socket.IO Redis adapter...'):'redis_adapter_connecting',
+    ('SocketIOConfig','Socket.IO Redis adapter connected - cross-pod broadcasting enabled'):'redis_adapter_ready',
+    ('CollaborativeSocketServer','Initializing Redis-backed RoomManager for multi-pod support'):'room_manager_connecting',
+    ('RedisRoomManager','RedisRoomManager connected to Redis and scripts loaded'):'room_manager_ready',
+    ('FileDocStore','FileDocStore ready — shared Yjs backend over Redis Streams enabled'):'file_doc_store_ready',
+    ('SocketPreflight','Schema-compatibility check passed'):'schema_ready',
+    ('CollaborativeSocketServer','Socket.IO server running on port 3002'):'listening',
+}
+codes=('ECONNREFUSED','ENOTFOUND','EAI_AGAIN','ETIMEDOUT','EACCES','ENOSPC','ERR_DLOPEN_FAILED','MODULE_NOT_FOUND')
+if sys.argv[3]=='1':
+    try:
+        fd=os.open(sys.argv[1],os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+        with os.fdopen(fd,'rb') as f:
+            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):raise ValueError()
+            data=f.read(65537)
+        if len(data)>65536:raise ValueError()
+        for line in data.decode('utf-8').splitlines():
+            try:entry=json.loads(line)
+            except Exception:continue
+            if type(entry)is not dict or type(entry.get('module'))is not str or type(entry.get('message'))is not str:continue
+            marker=markers.get((entry['module'],entry['message']))
+            if entry.get('level')=='INFO' and marker is not None:receipt['lastMarker']=marker
+            if entry.get('level')=='ERROR' and entry['module'] in {key[0] for key in markers} and entry.get('errorCode') in codes:receipt['errorCode']=entry['errorCode']
+        receipt['logStatus']='observed' if receipt['lastMarker'] is not None or receipt['errorCode'] is not None else 'empty'
+    except Exception:receipt.update(logStatus='refused',lastMarker=None,errorCode=None)
+Path(sys.argv[2]).write_text(json.dumps(receipt,sort_keys=True)+'\n')
+PYSTARTUP
+    ui_owns "$name" || return 1
+  fi
+  ui_docker inspect --format '{{json .State}}' "$name" > "$private/ui-state.json" || ok=0
+  python3 - "$private/ui-state.json" "$mode" "$metrics/ui-service-$mode.json" <<'PYUI' || ok=0
+import json,sys
+from pathlib import Path
+s=json.load(open(sys.argv[1]));mode=sys.argv[2]
+assert mode in ('web','realtime','cache') and type(s['Running'])is bool and type(s['OOMKilled'])is bool and type(s['Error'])is str
+Path(sys.argv[3]).write_text(json.dumps({'phase':'ui-service-state','service':mode,'running':s['Running'],
+    'oomKilled':s['OOMKilled'],'errorPresent':bool(s['Error'])},sort_keys=True)+'\n')
+assert s['Running'] and not s['OOMKilled'] and not s['Error']
+PYUI
+  ui_docker stop --time 5 "$name" > /dev/null 2>&1 || ok=0
+  [[ "$ok" == 1 ]]
+}
+
 run_product_phases() {
 phase inventory /work/apps/sim bun run ../../packages/sim-cli/scripts/print-command-inventory.ts
 if [[ "${swap_variant:-}" == turbopack* ]]; then
@@ -298,25 +762,9 @@ if(r.productionBrowserSourceMaps!==false||r.serverSourceMaps!==false||r.enablePr
 else
   phase next /work/apps/sim env DEBUG=next:build:webpack-build DEBUG_COLORS=0 NODE_OPTIONS=--max-old-space-size=11264 node ../../node_modules/next/dist/bin/next build --webpack
 fi
-phase standalone /work/apps/sim python3 -c '
-from pathlib import Path
-import json,os
-root=Path(".next")
-assert (root/"BUILD_ID").read_text().strip()
-assert (root/"standalone/apps/sim/server.js").is_file()
-assert (root/"routes-manifest.json").is_file()
-assert (root/"prerender-manifest.json").is_file()
-assert (root/"static").is_dir()
-assert (root/"required-server-files.json").is_file()
-config=json.loads((root/"required-server-files.json").read_text())["config"]
-assert config["output"]=="standalone"
-if os.environ.get("MEMLIA_SWAP_VARIANT"):
-    assert config["productionBrowserSourceMaps"] is False
-    assert config["experimental"]["serverSourceMaps"] is False
-    assert config["enablePrerenderSourceMaps"] is False
-    assert config["experimental"]["cpus"]==2
-'
+phase standalone /work/apps/sim python3 /work/scripts/ci/linux-standalone-smoke.py /work/apps/sim /scratch /metrics/standalone-http.json
 standalone_verified=1
+if [[ "${ui_selected:-0}" == 1 ]]; then run_ui_journey; fi
 current_stage=completed
 completed=1
 }

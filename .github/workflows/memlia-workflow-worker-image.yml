@@ -1,0 +1,46 @@
+# Copyright (c) 2026 Memlia. All rights reserved.
+name: Worker Linux — image non qualifiée
+on:
+  workflow_call:
+    inputs:
+      expected_source_sha:
+        description: Commit public admis et revu (40 caractères hexadécimaux)
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: memlia-workflow-worker-image-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  packaging:
+    # Manual trusted-source campaign only. Never a PR or a private metered runner.
+    if: github.event_name == 'workflow_dispatch' && github.event.repository.private == false && github.repository == 'saphiron222/memlia' && inputs.expected_source_sha == github.sha
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Vérifier les contrats de packaging sans lancer de build
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B scripts/ci/test-workflow-worker-image.py -v
+      - name: Une construction native bornée et nettoyée
+        shell: bash
+        env:
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+        run: |
+          set -euo pipefail
+          umask 077
+          # The input checks identity only: a separate reviewed admission is required.
+          # Existing Docker/Buildx only; no setup action, registry credentials or push.
+          timeout --signal=TERM --kill-after=60s 1200s \
+            python3 -B scripts/ci/workflow-worker-image.py \
+              --expected-commit "$EXPECTED_SOURCE_SHA" \
+              --output "$RUNNER_TEMP/memlia-workflow-worker-image"
+      # Raw logs/context/images are never uploaded; no release or runtime activation.

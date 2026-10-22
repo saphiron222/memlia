@@ -1,7 +1,11 @@
 // Copyright (c) 2026 Memlia. All rights reserved.
 import { type ExcelProcedure, ExcelProcedureSchema } from '@memlia/contracts'
 import { stringifyBoundedJson } from '@/lib/core/utils/bounded-json'
-import { inspectExcelProcedureCapabilities } from './procedure-capabilities'
+import {
+  excelProcedureDraftSchema,
+  inspectExcelProcedureCapabilities,
+  inspectExcelProcedureDraftCapabilities,
+} from './procedure-capabilities'
 
 type Operation = ExcelProcedure['operations'][number]
 type Expression = Extract<Operation, { op: 'derive' }>['expression']
@@ -21,6 +25,14 @@ const MAX_WORK = 25_000
 
 /** Declared types only: never reads a workbook or grants execution authority. */
 export function validateExcelProcedureDataflow(input: unknown) {
+  return validate(input, false)
+}
+
+export function validateExcelProcedureDraftDataflow(input: unknown) {
+  return validate(input, true)
+}
+
+function validate(input: unknown, draft: boolean) {
   const result = {
     schemaValid: false, declaredDataflowValid: false, executionAvailable: false as const,
     diagnostics: [] as Diagnostic[], diagnosticsTruncated: false,
@@ -39,11 +51,15 @@ export function validateExcelProcedureDataflow(input: unknown) {
   }
   const captured = stringifyBoundedJson(input, MAX_BYTES, { strict: true })
   if (captured === undefined) { fail('invalid_input'); return result }
-  const parsed = ExcelProcedureSchema.safeParse(JSON.parse(captured))
+  const parsed = (draft ? excelProcedureDraftSchema : ExcelProcedureSchema).safeParse(
+    JSON.parse(captured)
+  )
   if (!parsed.success) { fail('invalid_input'); return result }
   result.schemaValid = true
   const procedure = parsed.data
-  const capabilities = inspectExcelProcedureCapabilities(procedure)
+  const capabilities = draft
+    ? inspectExcelProcedureDraftCapabilities(procedure)
+    : inspectExcelProcedureCapabilities(procedure)
   if (!capabilities.schemaValid || !capabilities.primitiveOptionsCompatible) {
     fail('primitive_profile_unsupported'); return result
   }

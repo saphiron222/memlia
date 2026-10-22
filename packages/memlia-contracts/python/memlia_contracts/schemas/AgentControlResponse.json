@@ -1,0 +1,769 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "type": "string",
+          "const": "memlia.agent-control-response/v1"
+        },
+        "requestId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+        },
+        "op": {
+          "type": "string",
+          "const": "claim"
+        },
+        "command": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "schemaVersion": {
+                  "type": "string",
+                  "const": "memlia.desktop-command/v2"
+                },
+                "organizationId": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "workspaceId": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                },
+                "agentId": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                },
+                "ownerUserId": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                },
+                "windowsSid": {
+                  "type": "string",
+                  "pattern": "^S-1-(?:[0-9]+-){1,14}[0-9]+(?![\\s\\S])"
+                },
+                "sessionId": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                },
+                "leaseEpoch": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "issuedAt": {
+                  "type": "string",
+                  "allOf": [
+                    {
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                    },
+                    {
+                      "pattern": "^(?!0000)[0-9TZ:.-]+(?![\\s\\S])"
+                    }
+                  ]
+                },
+                "expiresAt": {
+                  "type": "string",
+                  "allOf": [
+                    {
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                    },
+                    {
+                      "pattern": "^(?!0000)[0-9TZ:.-]+(?![\\s\\S])"
+                    }
+                  ]
+                },
+                "resourceLocks": {
+                  "minItems": 1,
+                  "maxItems": 8,
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "desktop",
+                          "workbook",
+                          "com_session"
+                        ]
+                      },
+                      "resourceId": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                      },
+                      "fence": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "resourceId",
+                      "fence"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "commandId": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                },
+                "runId": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                },
+                "digest": {
+                  "type": "string",
+                  "pattern": "^sha256:[a-f0-9]{64}(?![\\s\\S])"
+                },
+                "capabilityId": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                },
+                "bundle": {
+                  "type": "object",
+                  "properties": {
+                    "artifactId": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                    },
+                    "sha256": {
+                      "type": "string",
+                      "pattern": "^sha256:[a-f0-9]{64}(?![\\s\\S])"
+                    }
+                  },
+                  "required": [
+                    "artifactId",
+                    "sha256"
+                  ],
+                  "additionalProperties": false
+                },
+                "qualification": {
+                  "type": "object",
+                  "properties": {
+                    "artifactId": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                    },
+                    "sha256": {
+                      "type": "string",
+                      "pattern": "^sha256:[a-f0-9]{64}(?![\\s\\S])"
+                    }
+                  },
+                  "required": [
+                    "artifactId",
+                    "sha256"
+                  ],
+                  "additionalProperties": false
+                },
+                "action": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "capture.start"
+                        },
+                        "maxDurationSeconds": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 1800
+                        },
+                        "maxBytes": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 2147483648
+                        },
+                        "audio": {
+                          "type": "boolean",
+                          "const": false
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "maxDurationSeconds",
+                        "maxBytes",
+                        "audio"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "procedure.run"
+                        },
+                        "mode": {
+                          "type": "string",
+                          "enum": [
+                            "test",
+                            "production"
+                          ]
+                        },
+                        "procedure": {
+                          "type": "object",
+                          "properties": {
+                            "artifactId": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                            },
+                            "sha256": {
+                              "type": "string",
+                              "pattern": "^sha256:[a-f0-9]{64}(?![\\s\\S])"
+                            }
+                          },
+                          "required": [
+                            "artifactId",
+                            "sha256"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "parameters": {
+                          "type": "object",
+                          "properties": {
+                            "artifactId": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                            },
+                            "sha256": {
+                              "type": "string",
+                              "pattern": "^sha256:[a-f0-9]{64}(?![\\s\\S])"
+                            }
+                          },
+                          "required": [
+                            "artifactId",
+                            "sha256"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "mode",
+                        "procedure",
+                        "parameters"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "const": "excel.apply"
+                        },
+                        "patch": {
+                          "type": "object",
+                          "properties": {
+                            "artifactId": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                            },
+                            "sha256": {
+                              "type": "string",
+                              "pattern": "^sha256:[a-f0-9]{64}(?![\\s\\S])"
+                            }
+                          },
+                          "required": [
+                            "artifactId",
+                            "sha256"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "approvalId": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                        },
+                        "backup": {
+                          "type": "object",
+                          "properties": {
+                            "artifactId": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                            },
+                            "sha256": {
+                              "type": "string",
+                              "pattern": "^sha256:[a-f0-9]{64}(?![\\s\\S])"
+                            }
+                          },
+                          "required": [
+                            "artifactId",
+                            "sha256"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "patch",
+                        "approvalId",
+                        "backup"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "schemaVersion",
+                "organizationId",
+                "workspaceId",
+                "agentId",
+                "ownerUserId",
+                "windowsSid",
+                "sessionId",
+                "leaseEpoch",
+                "issuedAt",
+                "expiresAt",
+                "resourceLocks",
+                "commandId",
+                "runId",
+                "digest",
+                "capabilityId",
+                "bundle",
+                "qualification",
+                "action"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "requestId",
+        "op",
+        "command"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "type": "string",
+          "const": "memlia.agent-control-response/v1"
+        },
+        "requestId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+        },
+        "op": {
+          "type": "string",
+          "const": "checkpoint"
+        },
+        "accepted": {
+          "type": "boolean",
+          "const": true
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "requestId",
+        "op",
+        "accepted"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "type": "string",
+          "const": "memlia.agent-control-response/v1"
+        },
+        "requestId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+        },
+        "op": {
+          "type": "string",
+          "const": "consent"
+        },
+        "capability": {
+          "type": "object",
+          "properties": {
+            "schemaVersion": {
+              "type": "string",
+              "const": "memlia.session-capability/v1"
+            },
+            "organizationId": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "workspaceId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+            },
+            "agentId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+            },
+            "ownerUserId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+            },
+            "windowsSid": {
+              "type": "string",
+              "pattern": "^S-1-(?:[0-9]+-){1,14}[0-9]+(?![\\s\\S])"
+            },
+            "sessionId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+            },
+            "leaseEpoch": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "issuedAt": {
+              "type": "string",
+              "allOf": [
+                {
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                },
+                {
+                  "pattern": "^(?!0000)[0-9TZ:.-]+(?![\\s\\S])"
+                }
+              ]
+            },
+            "expiresAt": {
+              "type": "string",
+              "allOf": [
+                {
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                },
+                {
+                  "pattern": "^(?!0000)[0-9TZ:.-]+(?![\\s\\S])"
+                }
+              ]
+            },
+            "resourceLocks": {
+              "minItems": 1,
+              "maxItems": 8,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "desktop",
+                      "workbook",
+                      "com_session"
+                    ]
+                  },
+                  "resourceId": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                  },
+                  "fence": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "kind",
+                  "resourceId",
+                  "fence"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "capabilityId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+            },
+            "consent": {
+              "type": "object",
+              "properties": {
+                "consentId": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                },
+                "confirmedLocallyAt": {
+                  "type": "string",
+                  "allOf": [
+                    {
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                    },
+                    {
+                      "pattern": "^(?!0000)[0-9TZ:.-]+(?![\\s\\S])"
+                    }
+                  ]
+                },
+                "commandDigest": {
+                  "type": "string",
+                  "pattern": "^sha256:[a-f0-9]{64}(?![\\s\\S])"
+                }
+              },
+              "required": [
+                "consentId",
+                "confirmedLocallyAt",
+                "commandDigest"
+              ],
+              "additionalProperties": false
+            },
+            "capabilities": {
+              "minItems": 1,
+              "maxItems": 4,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "desktop.capture",
+                  "desktop.replay",
+                  "excel.apply",
+                  "excel.recalculate"
+                ]
+              }
+            },
+            "qualification": {
+              "type": "object",
+              "properties": {
+                "artifactId": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+                },
+                "sha256": {
+                  "type": "string",
+                  "pattern": "^sha256:[a-f0-9]{64}(?![\\s\\S])"
+                }
+              },
+              "required": [
+                "artifactId",
+                "sha256"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "schemaVersion",
+            "organizationId",
+            "workspaceId",
+            "agentId",
+            "ownerUserId",
+            "windowsSid",
+            "sessionId",
+            "leaseEpoch",
+            "issuedAt",
+            "expiresAt",
+            "resourceLocks",
+            "capabilityId",
+            "consent",
+            "capabilities",
+            "qualification"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "requestId",
+        "op",
+        "capability"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "type": "string",
+          "const": "memlia.agent-control-response/v1"
+        },
+        "requestId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+        },
+        "op": {
+          "type": "string",
+          "const": "artifact.read"
+        },
+        "reference": {
+          "type": "object",
+          "properties": {
+            "artifactId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}(?![\\s\\S])"
+            }
+          },
+          "required": [
+            "artifactId",
+            "sha256"
+          ],
+          "additionalProperties": false
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 34603008
+        },
+        "totalBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 34603008
+        },
+        "dataBase64": {
+          "type": "string",
+          "maxLength": 349528,
+          "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?(?![\\s\\S])"
+        },
+        "done": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "requestId",
+        "op",
+        "reference",
+        "offset",
+        "totalBytes",
+        "dataBase64",
+        "done"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "type": "string",
+          "const": "memlia.agent-control-response/v1"
+        },
+        "requestId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+        },
+        "op": {
+          "type": "string",
+          "const": "artifact.put"
+        },
+        "reference": {
+          "type": "object",
+          "properties": {
+            "artifactId": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}(?![\\s\\S])"
+            }
+          },
+          "required": [
+            "artifactId",
+            "sha256"
+          ],
+          "additionalProperties": false
+        },
+        "nextOffset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 34603008
+        },
+        "complete": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "requestId",
+        "op",
+        "reference",
+        "nextOffset",
+        "complete"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "type": "string",
+          "const": "memlia.agent-control-response/v1"
+        },
+        "requestId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+        },
+        "op": {
+          "type": "string",
+          "const": "publish"
+        },
+        "accepted": {
+          "type": "boolean",
+          "const": true
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "requestId",
+        "op",
+        "accepted"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schemaVersion": {
+          "type": "string",
+          "const": "memlia.agent-control-response/v1"
+        },
+        "requestId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"
+        },
+        "op": {
+          "type": "string",
+          "const": "refused"
+        },
+        "code": {
+          "type": "string",
+          "enum": [
+            "control_refused",
+            "control_unavailable"
+          ]
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "requestId",
+        "op",
+        "code"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

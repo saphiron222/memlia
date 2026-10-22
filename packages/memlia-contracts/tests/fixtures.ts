@@ -31,6 +31,14 @@ export const backup = {
   verifiedAt: '2026-10-19T03:00:01.000Z',
 }
 export const fixtures = {
+  AgentControlRequest: {
+    schemaVersion: 'memlia.agent-control-request/v1', requestId: 'request-fixture',
+    op: 'claim', session: { windowsSid: 'S-1-5-21-123-456-789-1001', sessionId: 'session-fixture' },
+  },
+  AgentControlResponse: {
+    schemaVersion: 'memlia.agent-control-response/v1', requestId: 'request-fixture',
+    op: 'claim', command: null,
+  },
   Principal: principal,
   Binding: {
     schemaVersion: 'memlia.binding/v1',
@@ -127,7 +135,7 @@ export const fixtures = {
     qualification: artifact,
   },
   AgentCommand: {
-    schemaVersion: 'memlia.desktop-command/v1',
+    schemaVersion: 'memlia.desktop-command/v2',
     ...scope,
     commandId: 'command-fixture',
     runId: 'run-fixture',
@@ -142,7 +150,7 @@ export const fixtures = {
     expiresAt: '2026-10-19T03:00:30.000Z',
     bundle: artifact,
     qualification: artifact,
-    action: { kind: 'procedure.run', procedure: artifact, parameters: artifact },
+    action: { kind: 'procedure.run', mode: 'test', procedure: artifact, parameters: artifact },
     resourceLocks: [{ kind: 'desktop', resourceId: 'desktop-fixture', fence: 4 }],
   },
   ExcelProcedure: {

@@ -2,7 +2,7 @@
 import { type ExcelProcedure, ExcelProcedureSchema } from '@memlia/contracts'
 import { describe, expect, it } from 'vitest'
 import { fixtures } from '../../../../../packages/memlia-contracts/tests/fixtures'
-import { validateExcelProcedureDataflow } from './procedure-dataflow'
+import { validateExcelProcedureDataflow, validateExcelProcedureDraftDataflow } from './procedure-dataflow'
 
 type Op = ExcelProcedure['operations'][number]
 function recipe() {
@@ -280,5 +280,79 @@ describe('conservative type and identifier boundaries', () => {
     expect(codes(value)).toContain('column_duplicate')
     operations(value, [{ op: 'sort', input: 'source', output: 'selected', keys: [{ column: 'amount', direction: 'asc', nulls: 'first' }, { column: 'amount', direction: 'desc', nulls: 'last' }] }])
     expect(codes(value)).toContain('column_duplicate')
+  })
+})
+
+
+describe('P11 draft analysis shares the canonical business fields without invented identity', () => {
+  function draft() {
+    const full = recipe()
+    const {
+      schemaVersion,
+      organizationId,
+      workspaceId,
+      procedureId,
+      version,
+      parentVersion,
+      workflowId,
+      deployedVersionId,
+      ownerUserId,
+      digest,
+      policyVersion,
+      ...value
+    } = full
+    return value
+  }
+  it('accepts the known ordered select without publication identity', () => {
+    const result = validateExcelProcedureDraftDataflow(draft())
+    expect(result).toMatchObject({
+      schemaValid: true,
+      executionAvailable: false,
+      declaredDataflowValid: true,
+      diagnostics: [],
+    })
+    expect(result).toEqual(validateExcelProcedureDataflow(recipe()))
+  })
+  it.each([
+    'schemaVersion',
+    'organizationId',
+    'workspaceId',
+    'procedureId',
+    'version',
+    'parentVersion',
+    'workflowId',
+    'deployedVersionId',
+    'ownerUserId',
+    'digest',
+    'policyVersion',
+    'principal',
+  ])('refuses model authority field %s rather than discarding it', (key) => {
+    expect(
+      validateExcelProcedureDraftDataflow({ ...draft(), [key]: 'MODEL_AUTHORITY' }).schemaValid
+    ).toBe(false)
+  })
+  it('preserves the primitive refusal instead of treating a draft as a complete runtime profile', () => {
+    const value = draft()
+    value.decimalPolicy.precision = 28
+    expect(validateExcelProcedureDraftDataflow(value)).toMatchObject({
+      schemaValid: true,
+      declaredDataflowValid: false,
+      executionAvailable: false,
+    })
+  })
+  it('captures strict JSON without invoking a getter or accepting oversize text', () => {
+    let calls = 0
+    const getter = Object.defineProperty(draft(), 'operations', {
+      enumerable: true,
+      get() {
+        calls++
+        return []
+      },
+    })
+    expect(validateExcelProcedureDraftDataflow(getter).schemaValid).toBe(false)
+    expect(calls).toBe(0)
+    const value = draft()
+    value.inputs[0].columns[0].name = 'x'.repeat(512 * 1024)
+    expect(validateExcelProcedureDraftDataflow(value).schemaValid).toBe(false)
   })
 })

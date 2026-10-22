@@ -1,3 +1,5 @@
+// Modified by Memlia in 2026: test owned Redis handle cleanup and shutdown failure propagation.
+// Upstream Apache-2.0 license and notices retained.
 import { FILE_DOC_SEED } from '@sim/realtime-protocol/file-doc'
 import { sleep } from '@sim/utils/helpers'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -80,7 +82,10 @@ interface Backing {
   onLength?: () => Promise<void>
 }
 
-const state = vi.hoisted(() => ({ backing: null as Backing | null }))
+const state = vi.hoisted(() => ({
+  backing: null as Backing | null,
+  clients: [] as TestRedisClient[],
+}))
 
 function compareStreamIds(left: string, right: string): bigint {
   const [leftMs, leftSequence] = left.split('-').map(BigInt)
@@ -313,6 +318,7 @@ function makeClient(): TestRedisClient {
     },
     expire: async () => 1,
   }
+  state.clients.push(client)
   return client
 }
 
@@ -468,11 +474,41 @@ describe('FileDocStore', () => {
       maxReadCount: 0,
     }
     stores = []
+    state.clients = []
   })
 
   afterEach(async () => {
     await Promise.all(stores.map((s) => s.shutdown()))
   })
+
+  it.each([
+    [0, false],
+    [1, false],
+    [0, true],
+    [1, true],
+  ] as const)(
+    'reports client %s quit failure (synchronous=%s), closes its peer and retains only the failed handle',
+    async (failed, synchronous) => {
+      const store = await newStore()
+      expect(state.clients).toHaveLength(2)
+      const failedQuit = vi.spyOn(state.clients[failed], 'quit')
+      const peerQuit = vi.spyOn(state.clients[1 - failed], 'quit')
+      if (synchronous) {
+        failedQuit.mockImplementationOnce(() => {
+          throw new Error('synthetic quit refusal')
+        })
+      } else {
+        failedQuit.mockRejectedValueOnce(new Error('synthetic quit refusal'))
+      }
+      await expect(store.shutdown()).rejects.toThrow('FileDocStore shutdown incomplete')
+      expect(failedQuit).toHaveBeenCalledOnce()
+      expect(peerQuit).toHaveBeenCalledOnce()
+      // Explicit test-owned reconciliation: never close an already released peer twice.
+      await expect(store.shutdown()).resolves.toBeUndefined()
+      expect(failedQuit).toHaveBeenCalledTimes(2)
+      expect(peerQuit).toHaveBeenCalledOnce()
+    }
+  )
 
   /**
    * A connection that stops serving reads used to spin the tailer at the read cadence — two attempts a

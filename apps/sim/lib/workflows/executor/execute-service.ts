@@ -1,3 +1,4 @@
+// Modified by Memlia in 2026. Upstream Apache-2.0 license and notices retained.
 import type { WorkflowExecutionPrincipal } from '@sim/auth/principal'
 import type { workflow as workflowTable } from '@sim/db/schema'
 import { createLogger } from '@sim/logger'
@@ -19,6 +20,10 @@ import { MAX_MCP_WORKFLOW_RESPONSE_BYTES } from '@/lib/mcp/constants'
 import { hydrateUserFilesWithBase64 } from '@/lib/uploads/utils/user-file-base64.server'
 import { enqueueWorkflowExecution } from '@/lib/workflows/executor/enqueue-execution'
 import { executeWorkflow } from '@/lib/workflows/executor/execute-workflow'
+import {
+  type ExcelTestExecutionPermit,
+  readExcelTestExecutionPermit,
+} from './excel-test-admission'
 import { executeWorkflowCore } from '@/lib/workflows/executor/execution-core'
 import {
   claimExecutionId,
@@ -86,6 +91,8 @@ export interface ExecuteWorkflowServiceParams {
   upstreamBillingAttribution?: BillingAttributionSnapshot
   /** Pin execution to a specific deployment version (MCP bridge). */
   deploymentVersionId?: string
+  /** Opaque native admission for an exact inactive Excel preparation; never an HTTP field. */
+  excelTestExecutionPermit?: ExcelTestExecutionPermit
   includeFileBase64?: boolean
   base64MaxBytes?: number
   selectedOutputs?: string[]
@@ -288,6 +295,16 @@ export async function executeWorkflowService(
 
   let reqLogger = logger.withMetadata({ requestId, workflowId, userId })
 
+  const excelTestExecution = params.excelTestExecutionPermit === undefined
+    ? undefined
+    : readExcelTestExecutionPermit(params.excelTestExecutionPermit, { principal, workflowId, userId })
+  if (excelTestExecution && (
+    mode !== 'async' || useDraftState || useAuthenticatedUserAsActor !== true ||
+    isPublicApiAccess !== false || deploymentVersionId !== excelTestExecution.prepared.deploymentVersionId
+  )) {
+    return failure({ kind: 'precheck', message: 'Excel test execution refused', statusCode: 409 })
+  }
+
   if (useDraftState && mode === 'async') {
     return failure({
       kind: 'precheck',
@@ -395,7 +412,7 @@ export async function executeWorkflowService(
       triggerType,
       executionId,
       requestId,
-      checkDeployment: !useDraftState,
+      checkDeployment: !useDraftState && !excelTestExecution,
       rateLimitCounter,
       loggingSession,
       useAuthenticatedUserAsActor,
@@ -436,6 +453,10 @@ export async function executeWorkflowService(
         statusCode: 500,
       })
     }
+    if (excelTestExecution && (workspaceId !== excelTestExecution.workspaceId || actorUserId !== userId)) {
+      await releaseExecutionSlot(executionId)
+      return failure({ kind: 'precheck', message: 'Excel test execution refused', statusCode: 409 })
+    }
     reqLogger = reqLogger.withMetadata({ workspaceId, userId: actorUserId })
 
     if (mode === 'async') {
@@ -453,6 +474,7 @@ export async function executeWorkflowService(
         enforceCredentialAccess: useAuthenticatedUserAsActor,
         isPublicApiAccess,
         executionTimeoutMs: preprocessResult.executionTimeout.async,
+        ...(excelTestExecution ? { excelTestExecution } : {}),
       })
       executionIdClaimCommitted = enqueue.retainExecutionClaim
       if (enqueue.outcome === 'rejected') {

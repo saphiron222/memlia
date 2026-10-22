@@ -5066,15 +5066,27 @@ export const workflowDeploymentVersion = pgTable(
     version: integer('version').notNull(),
     name: text('name'),
     description: text('description'),
+    // Memlia: exact final graph digest for opt-in Excel; historical snapshots remain NULL.
+    snapshotDigest: text('snapshot_digest'),
+    // Memlia: test preparation is restrictive, never activation or execution authority.
+    preparationKind: text('preparation_kind'),
     state: json('state').notNull(),
     isActive: boolean('is_active').notNull().default(false),
     createdAt: timestamp('created_at').notNull().defaultNow(),
     createdBy: text('created_by'),
   },
   (table) => ({
+    snapshotDigestFormat: check(
+      'workflow_deployment_version_snapshot_digest_check',
+      sql`${table.snapshotDigest} IS NULL OR (char_length(${table.snapshotDigest}) = 71 AND ${table.snapshotDigest} ~ '^sha256:[a-f0-9]{64}$')`
+    ),
     workflowVersionUnique: uniqueIndex('workflow_deployment_version_workflow_version_unique').on(
       table.workflowId,
       table.version
+    ),
+    workflowExcelTestPreparationCheck: check(
+      'workflow_deployment_version_excel_test_preparation_check',
+      sql`${table.preparationKind} IS NULL OR (${table.preparationKind} = 'excel_test_v1' AND ${table.isActive} = false AND ${table.snapshotDigest} IS NOT NULL)`
     ),
     workflowActiveIdx: index('workflow_deployment_version_workflow_active_idx').on(
       table.workflowId,
@@ -8622,3 +8634,6 @@ export const copilotServiceUsage = pgTable(
 
 // Memlia additions remain separate from the Apache upstream schema definitions.
 export { memliaWorkflowCopy } from './memlia-schema'
+export { memliaDesktopAgentEnrollment, memliaDesktopAgentCertificate, memliaDesktopAgentState, memliaDesktopAgentCommand, memliaDesktopAgentReceipt, memliaDesktopProcedure, memliaDesktopProcedureVersion } from './memlia-agent-schema'
+
+export { memliaDesktopAgentArtifact, memliaDesktopAgentArtifactChunk } from './memlia-agent-artifact-schema'

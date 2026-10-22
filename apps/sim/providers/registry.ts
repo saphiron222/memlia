@@ -1,3 +1,5 @@
+// Modified by Memlia in 2026: defer provider selection until module initialization completes.
+// Upstream Apache-2.0 license and notices retained.
 import { createLogger } from '@sim/logger'
 import { anthropicProvider } from '@/providers/anthropic'
 import { azureAnthropicProvider } from '@/providers/azure-anthropic'
@@ -31,40 +33,41 @@ import { zaiProvider } from '@/providers/zai'
 
 const logger = createLogger('ProviderRegistry')
 
-const providerRegistry: Record<ProviderId, ProviderConfig> = {
-  openai: openaiProvider,
-  anthropic: anthropicProvider,
-  'azure-anthropic': azureAnthropicProvider,
-  google: googleProvider,
-  vertex: vertexProvider,
-  deepseek: deepseekProvider,
-  xai: xAIProvider,
-  cerebras: cerebrasProvider,
-  groq: groqProvider,
-  sakana: sakanaProvider,
-  typesafe: typesafeProvider,
-  nvidia: nvidiaProvider,
-  meta: metaProvider,
-  zai: zaiProvider,
-  kimi: kimiProvider,
-  kie: kieProvider,
-  vllm: vllmProvider,
-  litellm: litellmProvider,
-  mistral: mistralProvider,
-  'azure-openai': azureOpenAIProvider,
-  openrouter: openRouterProvider,
-  fireworks: fireworksProvider,
-  together: togetherProvider,
-  baseten: basetenProvider,
-  nebius: nebiusProvider,
-  ollama: ollamaProvider,
-  'ollama-cloud': ollamaCloudProvider,
-  bedrock: bedrockProvider,
-}
-
 export async function getProviderExecutor(
   providerId: ProviderId
 ): Promise<ProviderConfig | undefined> {
+  // Provider implementations import the public barrel for shared helpers. Reading
+  // their bindings at module scope can re-enter this registry before they initialize.
+  const providerRegistry: Record<ProviderId, ProviderConfig> = {
+    openai: openaiProvider,
+    anthropic: anthropicProvider,
+    'azure-anthropic': azureAnthropicProvider,
+    google: googleProvider,
+    vertex: vertexProvider,
+    deepseek: deepseekProvider,
+    xai: xAIProvider,
+    cerebras: cerebrasProvider,
+    groq: groqProvider,
+    sakana: sakanaProvider,
+    typesafe: typesafeProvider,
+    nvidia: nvidiaProvider,
+    meta: metaProvider,
+    zai: zaiProvider,
+    kimi: kimiProvider,
+    kie: kieProvider,
+    vllm: vllmProvider,
+    litellm: litellmProvider,
+    mistral: mistralProvider,
+    'azure-openai': azureOpenAIProvider,
+    openrouter: openRouterProvider,
+    fireworks: fireworksProvider,
+    together: togetherProvider,
+    baseten: basetenProvider,
+    nebius: nebiusProvider,
+    ollama: ollamaProvider,
+    'ollama-cloud': ollamaCloudProvider,
+    bedrock: bedrockProvider,
+  }
   const provider = providerRegistry[providerId]
   if (!provider) {
     logger.error(`Provider not found: ${providerId}`)

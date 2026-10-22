@@ -1,0 +1,30 @@
+{
+ "source": "docker image save, Docker 29.9.2, io.containerd.snapshotter.v1 (build VM run9); member names only",
+ "python": [
+  "blobs",
+  "blobs/sha256",
+  "blobs/sha256/2ed6491b93cd49272ee6de2b5a38440c3448360322c089fc23e370722d74179d",
+  "blobs/sha256/4f228bc1cbcfc794e4878312cfc241d368eff55a21c08d1e2bb263116c4ef524",
+  "blobs/sha256/6e0ba8ba048777f5354b5a7cb497ae5261116fac8246160c06fc045c8300c582",
+  "blobs/sha256/7fd1ebe418b5079d4aa36f416af9b143d127bc75b0155d71cb5fd559b5e04d39",
+  "blobs/sha256/86a9e13e035d8e44ae37bfebc52c7fc68898fde19b4b26dd0585f2231fcfaf2c",
+  "blobs/sha256/f9d2fb07d6f062d06ddc7aa58191cc5359c728f54af6cebe69a37d2c89e72a0d",
+  "index.json",
+  "manifest.json",
+  "oci-layout"
+ ],
+ "buildkit": [
+  "blobs",
+  "blobs/sha256",
+  "blobs/sha256/062997ac353c6485127b7f1c442b6280f1f5c7cb2f584bee0421b6fdf8c4247b",
+  "blobs/sha256/1074353eec0db2c1d81d5af2671e56e00cf5738486f5762609ea33d606f88612",
+  "blobs/sha256/487896c7079e703beba14b37b5f74eacb31f60a7a1e7b969152a5fa479367980",
+  "blobs/sha256/4a177e10126688bb9608de9661b5c2204222e232d261339ff4c94eb785b211fa",
+  "blobs/sha256/ad2d6d203afa10539f8131a519156afb0263d0d2136c07f87bb3d5d3f4b30b92",
+  "blobs/sha256/ca9db05302dc3a4846e3401ecfbd27e349fcc614ab046a7d89a83b0a5c313cee",
+  "blobs/sha256/f07a92a393a56b63eb2ff279b22fb178f232450a6151c728e5ffff323c6b18fa",
+  "index.json",
+  "manifest.json",
+  "oci-layout"
+ ]
+}

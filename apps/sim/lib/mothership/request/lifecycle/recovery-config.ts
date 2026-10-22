@@ -1,3 +1,5 @@
+// Modified by Memlia: persist a local engine identity without worker recovery.
+import { toRecordOrNull } from '@sim/utils/object'
 import { z } from 'zod'
 import { hasCopilotResourceAdmission } from '@/lib/mothership/auth/application-delegation'
 import { COPILOT_REQUEST_MODES } from '@/lib/mothership/constants'
@@ -84,4 +86,49 @@ export async function streamRecoveryConfig(
     requestMode: options.executionContext?.requestMode,
     ...(resourceAuthoringVersion ? { resourceAuthoringVersion } : {}),
   })
+}
+
+/** Persistent engine identity only; no credentials, callbacks or authority to resume. */
+export const LocalChatExecutionSchema = z
+  .object({
+    kind: z.literal('memlia_local_chat'),
+    version: z.literal(1),
+    recovery: z.literal('none'),
+  })
+  .strict()
+export const LOCAL_CHAT_EXECUTION = Object.freeze(
+  LocalChatExecutionSchema.parse({
+    kind: 'memlia_local_chat',
+    version: 1,
+    recovery: 'none',
+  })
+)
+
+/** Local input is separate from the historical worker recovery wire contract. */
+export const LocalChatAdmissionSchema = z
+  .object({
+    kind: z.literal('memlia_local_chat'),
+    version: z.literal(1),
+    request: z
+      .object({
+        userId: ChatPayloadSchema.shape.userId,
+        chatId: z.uuid(),
+        messageId: z.uuid(),
+        workspaceId: z.uuid(),
+        workflowId: z.string().min(1).max(512),
+        message: ChatPayloadSchema.shape.message,
+        mode: z.literal('agent'),
+      })
+      .strict(),
+  })
+  .strict()
+
+export type RunExecutionKind = 'worker' | 'local' | 'unavailable'
+/** A present but invalid marker must never regain historical worker fallback. */
+export function classifyRunExecution(raw: unknown): RunExecutionKind {
+  const context = toRecordOrNull(raw)
+  if (!context || !Object.hasOwn(context, 'localExecution')) return 'worker'
+  const marker = Object.getOwnPropertyDescriptor(context, 'localExecution')
+  if (!marker || !('value' in marker) || Object.hasOwn(context, 'recovery')) return 'unavailable'
+  return LocalChatExecutionSchema.safeParse(marker.value).success ? 'local' : 'unavailable'
 }

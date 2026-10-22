@@ -1,3 +1,4 @@
+// Memlia modifications: session/write-only inactive Excel test preparation.
 import { defineWorkspaceOperation } from '@/lib/core/application/workspace-operation'
 
 const ALL_WORKFLOW_PRINCIPAL_POLICY = {
@@ -38,6 +39,19 @@ const COPILOT_WORKFLOW_PRINCIPAL_POLICY = {
 } as const
 
 export const workflowOperations = {
+  // permission-group-exempt: manual test execution uses write role and native credential authorization; it grants no deployment capability
+  runExcelTest: defineWorkspaceOperation({
+    id: 'workflows.excel.run_test', minimumRole: 'write', workspaceApiKey: 'deny',
+    capability: 'none', principalKinds: ['session'],
+  }),
+  // permission-group-exempt: inactive authoring snapshots are governed by write role and the native block allowlist, not execution or deployment capabilities
+  prepareExcelTest: defineWorkspaceOperation({
+    id: 'workflows.excel.prepare_test',
+    minimumRole: 'write',
+    workspaceApiKey: 'deny',
+    capability: 'none',
+    principalKinds: ['session'],
+  }),
   // permission-group-exempt: listing the workflows in a workspace is governed by workspace role; no group hides the workflow module
   list: defineWorkspaceOperation({
     id: 'workflows.list',

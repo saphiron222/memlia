@@ -120,3 +120,11 @@ répétée après perte d’ACK. Aucun handler métier n’est exécuté. Nettoy
 aux IDs de fixtures créés par chaque run ; les queues du test de transport isolé
 peuvent rester pour inspection. Le build global, l’activation du backend, les
 workflows réels et le scénario crash après effet externe restent NON TESTÉS.
+
+### Publication planifiée
+
+`readPgBossPublication` expose aussi `runAt` (ISO UTC canonique validé) et
+`maxDurationSeconds` (entier natif normalisé, entre 5 et 2 147 483 647 secondes).
+Ces deux valeurs proviennent de la même admission vérifiée, sans reconstruction
+ou seconde lecture. Elles ne changent ni le digest ni l'autorité. Le transport
+peut imposer une borne plus étroite ; voir la tranche du worker avant activation.

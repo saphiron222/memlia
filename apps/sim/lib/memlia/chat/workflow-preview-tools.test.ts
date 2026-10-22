@@ -661,3 +661,423 @@ it('previews a server-owned proposal through the real native engine and applies 
   expect(auditMockFns.mockRecordAudit).toHaveBeenCalledOnce()
   expect(realtimeNotifyMockFns.mockNotifyWorkflowUpdated).toHaveBeenCalledOnce()
 })
+
+function referenceBatch(head = 'donnees-block', name = 'Donnees') {
+  return {
+    expectedRevision: 7,
+    layout: 'none',
+    operations: [
+      {
+        operation_type: 'add',
+        block_id: 'donnees-block',
+        params: {
+          type: 'function',
+          name,
+          inputs: { code: 'return "PRIVATE_DATA_CODE"' },
+          connections: { source: 'total-block' },
+        },
+      },
+      {
+        operation_type: 'add',
+        block_id: 'total-block',
+        params: {
+          type: 'function',
+          name: 'Total',
+          inputs: { code: `return <${head}.result>` },
+        },
+      },
+    ],
+  }
+}
+
+it('gives native corrective reference heads for an evaluated batch with unresolved references', async () => {
+  const input = referenceBatch()
+  const before = structuredClone(input)
+  const result = await createWorkflowPreviewTools(scope).dispatch(
+    'preview_workflow_operations',
+    input
+  )
+  expect(input).toEqual(before)
+  expect(result).toMatchObject({
+    ok: true,
+    data: {
+      applied: 2,
+      persisted: false,
+      lint: { hasUnresolvedReferences: true },
+      referenceCorrection: {
+        scope: 'evaluated_operations',
+        targets: [
+          { operationIndexes: [0], referenceHead: 'donnees' },
+          { operationIndexes: [1], referenceHead: 'total' },
+        ],
+      },
+    },
+  })
+  const wire = JSON.stringify(result)
+  expect(wire).not.toMatch(
+    /PRIVATE_|"Before"|"before"|donnees-block|total-block|[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/
+  )
+  expect(infra.replace).not.toHaveBeenCalled()
+})
+
+it('uses the real normalized name to correct code references without rewriting inputs', async () => {
+  const result = await createWorkflowPreviewTools(scope).dispatch(
+    'preview_workflow_operations',
+    referenceBatch('donnees')
+  )
+  expect(result).toMatchObject({ ok: true, data: { lint: { hasUnresolvedReferences: false } } })
+  expect(result).not.toHaveProperty('data.referenceCorrection')
+  expect(infra.replace).not.toHaveBeenCalled()
+})
+
+it('reports existing reference lint without blocking an otherwise valid rename', async () => {
+  const stored = state()
+  stored.blocks[blockId].subBlocks.code.value = 'return <missing.result>'
+  infra.snapshot.mockResolvedValue({ state: stored, draftRevision: 7 })
+  const result = await createWorkflowPreviewTools(scope).dispatch(
+    'preview_workflow_operations',
+    body()
+  )
+  expect(result).toMatchObject({
+    ok: true,
+    data: {
+      applied: 1,
+      persisted: false,
+      lint: { hasUnresolvedReferences: true },
+      referenceCorrection: { targets: [{ operationIndexes: [0], referenceHead: 'after' }] },
+    },
+  })
+  expect(JSON.stringify(result)).not.toMatch(/missing\.result|return|PRIVATE_/)
+  expect(stored.blocks[blockId].name).toBe('Before')
+  expect(infra.replace).not.toHaveBeenCalled()
+})
+
+it('never includes untouched names, code, credential or arbitrary lint strings in reference correction', async () => {
+  const stored = state()
+  stored.blocks[blockId].name = 'PRIVATE_UNTOUCHED_NAME'
+  stored.blocks[blockId].subBlocks.code.value = 'return "PRIVATE_CREDENTIAL"'
+  infra.snapshot.mockResolvedValue({ state: stored, draftRevision: 7 })
+  const result = await createWorkflowPreviewTools(scope).dispatch(
+    'preview_workflow_operations',
+    referenceBatch()
+  )
+  expect(result).toHaveProperty('data.referenceCorrection')
+  expect(JSON.stringify(result).toLowerCase()).not.toMatch(
+    /private_|credential|reason|"code":"return|"value"|"subblocks"|"outputs"/
+  )
+  expect(infra.replace).not.toHaveBeenCalled()
+})
+
+it('refuses an oversized corrective projection rather than truncating its targets', async () => {
+  const result = await createWorkflowPreviewTools(scope).dispatch(
+    'preview_workflow_operations',
+    referenceBatch('donnees-block', 'n'.repeat(256 * 1024))
+  )
+  expect(result).toMatchObject({ ok: false, error: { code: 'result_too_large' } })
+  expect(result).not.toHaveProperty('data')
+  expect(infra.replace).not.toHaveBeenCalled()
+})
+
+it('publishes no reference correction when native authorization refuses', async () => {
+  infra.permission.mockResolvedValue('read')
+  const result = await createWorkflowPreviewTools(scope).dispatch(
+    'preview_workflow_operations',
+    referenceBatch()
+  )
+  expect(result).toMatchObject({ ok: false, error: { code: 'forbidden' } })
+  expect(result).not.toHaveProperty('data')
+  expect(infra.snapshot).not.toHaveBeenCalled()
+})
+
+// As in the existing result-boundary tests, this alters only a native result
+// after evaluation; it does not qualify persistence of these malformed names.
+it.each(['empty', 'collision'])(
+  'omits %s reference hints without asserting reference validity',
+  async (kind) => {
+    const stored = state()
+    stored.blocks[blockId].subBlocks.code.value = 'return <missing.result>'
+    infra.snapshot.mockResolvedValue({ state: stored, draftRevision: 7 })
+    const { applyWorkflowOperations } = await import(
+      '@/lib/workflows/application/apply-workflow-operations'
+    )
+    const execute = applyWorkflowOperations.execute
+    const spy = vi.spyOn(applyWorkflowOperations, 'execute').mockImplementation(async (args) => {
+      const result = await execute(args)
+      if (kind === 'empty') result.graph.blocks[blockId].name = ' .\t'
+      else
+        result.graph.blocks.untouched = {
+          ...result.graph.blocks[blockId],
+          id: 'untouched',
+          name: 'A f.t e r',
+        }
+      return result
+    })
+    try {
+      const result = await createWorkflowPreviewTools(scope).dispatch(
+        'preview_workflow_operations',
+        body()
+      )
+      expect(result).toMatchObject({
+        ok: true,
+        data: {
+          applied: 1,
+          lint: { hasUnresolvedReferences: true },
+          referenceCorrection: { completeness: 'best_effort', targets: [], omittedTargetCount: 1 },
+        },
+      })
+      expect(infra.replace).not.toHaveBeenCalled()
+    } finally {
+      spy.mockRestore()
+    }
+  }
+)
+
+it('does not publish a corrective name for an edit declined by the native engine', async () => {
+  const stored = state()
+  stored.blocks[blockId].subBlocks.code.value = 'return <missing.result>'
+  const otherId = '22222222-2222-4222-8222-222222222222'
+  const snapshot = {
+    ...stored,
+    blocks: {
+      ...stored.blocks,
+      [otherId]: { ...stored.blocks[blockId], id: otherId, name: 'After' },
+    },
+  }
+  infra.snapshot.mockResolvedValue({ state: snapshot, draftRevision: 7 })
+  const result = await createWorkflowPreviewTools(scope).dispatch(
+    'preview_workflow_operations',
+    body()
+  )
+  expect(result).toMatchObject({
+    ok: true,
+    data: { applied: 0, referenceCorrection: { targets: [] } },
+  })
+  expect(JSON.stringify(result).toLowerCase()).not.toMatch(/"before"|"after"/)
+  expect(infra.replace).not.toHaveBeenCalled()
+})
+
+it('diagnoses the observed V5 unbound Function read without executing or publishing code', async () => {
+  const code =
+    'const donnees = inputs.Donnees; const total = donnees.montants.reduce((sum,val)=>sum+val,0); return {total};'
+  const result = await createWorkflowPreviewTools(scope).dispatch('preview_workflow_operations', {
+    ...body(),
+    operations: [{ operation_type: 'edit', block_id: blockId, params: { inputs: { code } } }],
+  })
+  expect(result).toMatchObject({
+    ok: true,
+    data: {
+      functionCode: {
+        completeness: 'best_effort',
+        targets: [
+          {
+            operationIndexes: [0],
+            status: 'analyzed',
+            diagnostics: [{ code: 'unbound_identifier', line: 1, column: 17 }],
+          },
+        ],
+      },
+    },
+  })
+  expect(JSON.stringify(result)).not.toMatch(/inputs|Donnees|montants|reduce|PRIVATE_GRAPH/)
+  expect(infra.replace).not.toHaveBeenCalled()
+})
+
+it('keeps a legal locally declared inputs object and native references distinguishable', async () => {
+  const result = await createWorkflowPreviewTools(scope).dispatch('preview_workflow_operations', {
+    ...body(),
+    operations: [
+      {
+        operation_type: 'edit',
+        block_id: blockId,
+        params: {
+          inputs: { code: 'const inputs = {value: 2}; return inputs.value + <missing.result>' },
+        },
+      },
+    ],
+  })
+  expect(result).toMatchObject({
+    ok: true,
+    data: {
+      functionCode: {
+        targets: [{ status: 'analyzed', diagnostics: [] }],
+      },
+      lint: { hasUnresolvedReferences: true },
+    },
+  })
+})
+
+it('analyzes only evaluated Function targets and never unchanged or skipped code', async () => {
+  const stored = state()
+  stored.blocks[blockId].subBlocks.code.value = 'return PRIVATE_UNTOUCHED_GLOBAL'
+  infra.snapshot.mockResolvedValue({ state: stored, draftRevision: 7 })
+  const added = await createWorkflowPreviewTools(scope).dispatch('preview_workflow_operations', {
+    ...body(),
+    operations: [
+      {
+        operation_type: 'add',
+        block_id: 'new-function',
+        params: { type: 'function', name: 'New', inputs: { code: 'return 1' } },
+      },
+    ],
+  })
+  expect(added).toMatchObject({
+    ok: true,
+    data: {
+      functionCode: { targets: [{ operationIndexes: [0], status: 'analyzed', diagnostics: [] }] },
+    },
+  })
+  expect(JSON.stringify(added)).not.toMatch(/PRIVATE_UNTOUCHED_GLOBAL|new-function|11111111/)
+  const skipped = await createWorkflowPreviewTools(scope).dispatch('preview_workflow_operations', {
+    ...body(),
+    operations: [
+      {
+        operation_type: 'edit',
+        block_id: '22222222-2222-4222-8222-222222222222',
+        params: { name: 'Missing' },
+      },
+    ],
+  })
+  expect(skipped).toMatchObject({ ok: true, data: { functionCode: { targets: [] } } })
+  expect(infra.replace).not.toHaveBeenCalled()
+})
+
+it('keeps other languages explicitly unavailable without blocking the native dry run', async () => {
+  const result = await createWorkflowPreviewTools(scope).dispatch('preview_workflow_operations', {
+    ...body(),
+    operations: [
+      {
+        operation_type: 'edit',
+        block_id: blockId,
+        params: { inputs: { code: 'return 1', language: 'python' } },
+      },
+    ],
+  })
+  expect(result).toMatchObject({
+    ok: true,
+    data: { functionCode: { targets: [{ status: 'unavailable', reason: 'context' }] } },
+  })
+})
+
+it('bounds the corrective target list without presenting omitted targets as analyzed', async () => {
+  const result = await createWorkflowPreviewTools(scope).dispatch('preview_workflow_operations', {
+    ...body(),
+    operations: Array.from({ length: 17 }, (_, i) => ({
+      operation_type: 'add',
+      block_id: `new-function-${i}`,
+      params: { type: 'function', name: `New${i}`, inputs: { code: 'return 1' } },
+    })),
+  })
+  expect(result).toMatchObject({ ok: true, data: { functionCode: { omittedTargetCount: 1 } } })
+  expect(result).toHaveProperty('data.functionCode.targets.length', 16)
+  expect(JSON.stringify(result)).not.toMatch(/return 1|new-function-/)
+  expect(infra.replace).not.toHaveBeenCalled()
+})
+
+it.each([
+  'return require("fs").readFileSync(params.path)',
+  'const file = <source.files[0].path>; return process.version',
+])(
+  'does not apply the fast globals contract to a filesystem/import target without sandboxId',
+  async (code) => {
+    const result = await createWorkflowPreviewTools(scope).dispatch('preview_workflow_operations', {
+      ...body(),
+      operations: [{ operation_type: 'edit', block_id: blockId, params: { inputs: { code } } }],
+    })
+    expect(result).toMatchObject({
+      ok: true,
+      data: { functionCode: { targets: [{ status: 'unavailable', reason: 'context' }] } },
+    })
+    expect(JSON.stringify(result)).not.toMatch(/process|require|readFileSync|source.files/)
+    expect(infra.replace).not.toHaveBeenCalled()
+  }
+)
+
+it('diagnoses V6 workflow params in the authorized evaluated batch without exposing values', async () => {
+  const code = 'const values = params.donnees_result; return values.a+values.b+values.c;'
+  const result = await createWorkflowPreviewTools(scope).dispatch('preview_workflow_operations', {
+    ...body(),
+    operations: [{ operation_type: 'edit', block_id: blockId, params: { inputs: { code } } }],
+  })
+  expect(result).toMatchObject({
+    ok: true,
+    data: {
+      functionCode: {
+        targets: [
+          {
+            operationIndexes: [0],
+            status: 'analyzed',
+            diagnostics: [{ code: 'unprovided_workflow_parameter', line: 1, column: 23 }],
+          },
+        ],
+      },
+    },
+  })
+  expect(JSON.stringify(result)).not.toMatch(/donnees_result|values|params|PRIVATE_GRAPH/)
+  expect(infra.replace).not.toHaveBeenCalled()
+})
+
+it('completion protocol — next step requires the actual server proposal binding, never preview success alone', async () => {
+  const standalone = await createWorkflowPreviewTools(scope).dispatch(
+    'preview_workflow_operations',
+    body()
+  )
+  expect(standalone).toMatchObject({ ok: true })
+  expect(standalone).not.toHaveProperty('data.nextStep')
+  const bound = await createWorkflowPreviewTools({ ...scope, proposalRunId: 'run-owned' }).dispatch(
+    'preview_workflow_operations',
+    body()
+  )
+  expect(bound).toHaveProperty('data.nextStep', {
+    kind: 'review_diagnostics_then_propose_or_clarify',
+    proposalTool: 'propose_workflow_operations',
+    humanApprovalRequired: true,
+  })
+  expect(JSON.stringify(bound)).not.toMatch(/run-owned|PRIVATE_/)
+  expect(infra.replace).not.toHaveBeenCalled()
+})
+
+it('completion protocol — next step never promotes unresolved diagnostics to valid code', async () => {
+  const result = await createWorkflowPreviewTools({
+    ...scope,
+    proposalRunId: 'run-owned',
+  }).dispatch('preview_workflow_operations', {
+    ...body(),
+    operations: [
+      {
+        operation_type: 'edit',
+        block_id: blockId,
+        params: { inputs: { code: 'return inputs.Donnees' } },
+      },
+    ],
+  })
+  expect(result).toMatchObject({
+    ok: true,
+    data: {
+      nextStep: { kind: 'review_diagnostics_then_propose_or_clarify' },
+      functionCode: { completeness: 'best_effort' },
+    },
+  })
+  expect(JSON.stringify(result)).toContain('unbound_identifier')
+  expect(result).not.toHaveProperty('data.valid')
+  expect(JSON.stringify(result)).not.toMatch(/return inputs|PRIVATE_/)
+  expect(infra.replace).not.toHaveBeenCalled()
+})
+
+it('refuses a string trigger mode before evaluating the native preview engine', async () => {
+  const rowsBefore = structuredClone([...infra.rows.entries()])
+  const result = await createWorkflowPreviewTools(scope).dispatch('preview_workflow_operations', {
+    expectedRevision: 7,
+    layout: 'targeted',
+    operations: [
+      {
+        operation_type: 'add',
+        block_id: 'start',
+        params: { type: 'start_trigger', name: 'Départ', triggerMode: 'manual' },
+      },
+    ],
+  })
+  expect(result).toMatchObject({ ok: false, error: { code: 'invalid_input' } })
+  expect(infra.snapshot).not.toHaveBeenCalled()
+  expect(infra.replace).not.toHaveBeenCalled()
+  expect([...infra.rows.entries()]).toStrictEqual(rowsBefore)
+})

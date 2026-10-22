@@ -1,0 +1,63 @@
+# Copyright (c) 2026 Memlia. All rights reserved.
+# OPTIONAL, NOT QUALIFIED. Explicit administrator selection only.
+# Long-lived native mTLS controller; no automatic command restart/replay or health claim.
+services:
+  agent-control:
+    image: ${MEMLIA_IMAGE_PREFIX:?Memlia image prefix required}/workflow-worker@sha256:${MEMLIA_WORKFLOW_WORKER_SHA256:?Qualified worker digest required}
+    pull_policy: never
+    command: [node, dist/memlia-agent-control.mjs]
+    working_dir: /app/apps/sim
+    user: '1001:1001'
+    init: true
+    restart: 'no'
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    cpus: '1.0'
+    mem_limit: 1g
+    memswap_limit: 1g
+    pids_limit: 128
+    stop_signal: SIGTERM
+    stop_grace_period: 160s
+    healthcheck: {disable: true}
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: '3'}
+    networks: [backend]
+    ports:
+      - host_ip: ${MEMLIA_AGENT_CONTROL_BIND_ADDRESS:-127.0.0.1}
+        target: 9443
+        published: '9443'
+        protocol: tcp
+    environment:
+      NODE_ENV: production
+      SIM_DB_ROLE: web
+      DB_APP_NAME: memlia-agent-control
+      DATABASE_URL: ${DATABASE_URL:?Existing non-DDL web database URL required}
+      MEMLIA_AGENT_CONTROL_CONFIG: /etc/memlia-agent-control/config.json
+      DO_NOT_TRACK: '1'
+      SIM_TELEMETRY_DISABLED: '1'
+    volumes:
+      - type: bind
+        source: ${MEMLIA_AGENT_CONTROL_CONFIG_SOURCE:?Protected controller config required}
+        target: /etc/memlia-agent-control/config.json
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${MEMLIA_AGENT_CONTROL_CERTIFICATE_SOURCE:?Pinned server leaf required}
+        target: /etc/memlia-agent-control/server.pem
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${MEMLIA_AGENT_CONTROL_CLIENT_CA_SOURCE:?Pinned public client CA required}
+        target: /etc/memlia-agent-control/client-ca.pem
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${MEMLIA_AGENT_CONTROL_SECRETS_SOURCE:?Private UID1001 secret directory required}
+        target: /run/memlia-agent-control
+        read_only: true
+        bind: {create_host_path: false}
+    depends_on:
+      db: {condition: service_healthy}
+      migrations: {condition: service_completed_successfully}

@@ -197,9 +197,120 @@ le job `build` modifié qui devra s’exécuter sur son propre candidat. Aucun a
 statut `measure(...)` n’est renommé en `build` ni reporté sur un autre commit.
 La protection de `main` n’est pas modifiée ; le vrai contrôle requis reste à passer.
 
-La phase Linux `standalone` vérifie **les fichiers et configurations**, elle ne
-lance aucun serveur HTTP : health/login/assets Linux, inventaire complet de
-licences/secrets d’un artefact redistribué, Docker Compose et Hyper-V restent hors
-de cette preuve. Une compilation réussie n’est pas une release commerciale.
+Les résultats historiques ci-dessus vérifiaient seulement les fichiers et
+configurations standalone, sans serveur HTTP. Ils ne qualifient pas le smoke
+HTTP ajouté ci-dessous. Inventaire complet de licences/secrets d’un artefact
+redistribué, Docker Compose et Hyper-V restent hors de ces preuves. Une
+compilation réussie n’est pas une release commerciale.
 Le workflow expérimental et sa matrice restent inchangés et ne fournissent pas le
 check `build` ; aucune fusion ou publication n’est effectuée par ce patch.
+
+
+## Smoke HTTP standalone — protocole ajouté, Linux réel encore à mesurer
+
+La même phase `standalone` conserve les contrôles BUILD_ID, server.js, manifests,
+static et output standalone. En mode swap, les trois source maps doivent toujours
+être désactivées et cpus=2. `--validation-only` ne démarre ni Next ni ce serveur.
+Le succès de la phase exige désormais aussi une réponse `/api/health` JSON avec
+status=ok, `/login` en HTML200 et deux ressources distinctes `/_next/static/`
+référencées par ce HTML, non vides et de type CSS ou JavaScript.
+
+`scripts/ci/linux-standalone-smoke.py` copie la sortie standalone dans un stage
+privé possédé puis y ajoute public et .next/static, selon les premières copies du
+Dockerfile natif. Les liens internes relatifs peuvent être conservés ; les liens
+absolus, sortant de leur source, les racines/ancêtres de copie symboliques et les
+collisions de destination symboliques sont refusés. Les surcharges de packages
+runtime du Dockerfile (notamment sharp/oracledb et bundles spécifiques) ne sont
+pas requalifiées par ce stage.
+
+Node24 démarre en production sur un port IPv4 loopback libre. Avant chaque GET,
+le listener doit être associé à un inode socket du PID Node enfant encore
+possédé dans procfs ; un listener étranger n'est jamais interrogé. Aucune
+redirection n'est suivie, chaque réponse est bornée à1Mio et chaque attente HTTP
+à5s au plus, dans une fenêtre HTTP de67s. Huit secondes sont réservées à l'arrêt ;
+la phase entière est plafonnée à120s par le superviseur existant. TERM, puis KILL
+si nécessaire, ciblent uniquement cet enfant avec wait. Une interruption ou une
+lecture HTTP refusée reste un échec, même quand le nettoyage réussit.
+
+L'environnement runtime est une sélection fermée des fixtures du build possédé,
+avec télémétrie désactivée, aucun compte ni clé IA, aucun DSN de migration transmis
+au serveur. La base éphémère existante n'est pas migrée pour ce smoke. Le health
+natif ne consulte pas la DB ; ni health, ni la page login sans session ne prouvent
+une autorisation, une authentification ou un fonctionnement métier PostgreSQL.
+
+Les logs serveur restent dans un fichier temporaire privé puis sont supprimés,
+sans impression ni upload. Le seuil8Mio est contrôlé pendant l'attente du listener
+et après les lectures HTTP, pas un quota disque continu. Le reçu fermé
+`standalone-http.json` ne contient aucun corps, chemin d'asset, URL, argument,
+environnement, secret ou exception brute. Les reçus phase/cgroup/cleanup/OOM
+existants restent bloquants ; aucun ancien succès n'est attribué à ce protocole.
+
+La phase de tests existante exécute les tests du contrôleur puis
+`python3 scripts/ci/test-linux-standalone-smoke.py -v` avant les étapes lourdes.
+Les tests portables utilisent de petits serveurs Python fictifs possédés avec un
+listener doublé hors Linux. Le cas Linux procfs utilise réellement les inodes du
+socket enfant et est explicitement ignoré sur Mac. Ces tests ne remplacent pas
+une exécution du standalone Next réel dans la future CI. Aucun build Linux avec
+ce nouveau smoke, aucune recette navigateur, Windows ou release n'est revendiqué
+par l'ajout du code.
+
+## Recette navigateur du standalone, sans fournisseur
+
+Le job de build Linux sélectionne explicitement `MEMLIA_CI_CHAT_UI=1`, uniquement
+avec `--swap turbopack`. Il réemploie le standalone de cette même compilation,
+après le smoke health/login/deux assets existant. Aucun second build n'est lancé.
+Les modes sans sélection UI et `--validation-only` conservent leur parcours ;
+la sélection UI avec un mode incompatible est refusée.
+
+La recette installe le Chromium attendu par `@playwright/test` déjà verrouillé,
+avec le Node24.22.0 du runner, puis crée une base et trois rôles synthétiques dans
+le PostgreSQL possédé par le job. Le rôle de migration seul migre le journal0440 ;
+les rôles web/realtime n'ont ni DDL, ni superuser, ni création de rôle/base.
+Un utilisateur fictif est créé par la fixture avec le hachage Better Auth natif.
+Le navigateur remplit le vrai formulaire, sans cookie ni session injectés.
+Il doit observer une vraie session, le token natif et une connexion Socket.IO
+encore ouverte, la création native d'un workflow, puis son graphe sauvegardé et
+ses nœuds DOM visibles sans spinner. Enfin, le panneau doit afficher le refus
+Chat et l'API capabilities doit répondre `unavailable` avec `no-store`.
+
+La policy root-owned est délibérément `{}` et donc invalide. Aucune clé ni aucun
+appel fournisseur n'est configuré. Cette preuve ne qualifie ni conversation IA,
+ni qualité d'une proposition, ni confirmation d'une modification par modèle.
+Elle ne qualifie pas non plus le déploiement Compose ou Windows.
+Les seules deux origines du contexte navigateur sont `localhost:3000` et
+`localhost:3002` (ainsi que leur transport WebSocket). Web/realtime/Valkey sont
+sur un réseau Docker interne, ports web/realtime publiés sur127.0.0.1 seulement.
+Ce contrôle du contexte Playwright ne prétend pas être une sandbox OS du navigateur.
+
+Après le build, web est limité à5Gio, realtime256Mio et Valkey128Mio, sans swap
+supplémentaire, avec CPU/PID bornés, filesystem racine RO et capabilities retirées.
+Les options effectives et identités/labels possédés sont inspectés. Les mesures
+cgroup des phases restent celles du contrôleur existant ; l'inspection des options
+n'est pas une mesure de pic des services. Le plafond UI est1200s, readiness180s et
+navigateur900s au maximum, avec150s réservées aux arrêts et au nettoyage. Ces
+plafonds n'étendent jamais le superviseur global6900s ni le job120min existants.
+
+Les services sont arrêtés avant la suppression native du compte et des seuls
+résidus attribués à la fixture. Les183 inventaires doivent retrouver exactement
+leur baseline avant commit et en readback. Une erreur HTTP, un service mort/OOM,
+un signal, un dépassement ou un nettoyage incomplet interdit le succès global.
+La base/les rôles temporaires disparaissent avec le PostgreSQL possédé du job.
+Les logs, DSN, mots de passe, cookies, captures et traces réseau restent privés
+sur le runner éphémère, sans upload. Seul le reçu JSON fermé `chat-ui.json`
+(borne4Kio, champs exacts, pas de symlink) et les métriques fermées sont publiés.
+
+Les tests locaux de préparation couvrent les frontières et le shell avec des
+doubles explicités, sans lancer Docker, PostgreSQL, Chromium ou Next. La vraie
+recette Linux navigateur reste NON TESTÉE jusqu'à une exécution Actions relue.
+Le runner standard gratuit n'offre pas une garantie de disque40Gio : la réserve
+existante du swap et les contrôles disque restent bloquants, sans suppression
+globale de SDK. La revue et les gates de publication précèdent tout lancement.
+
+La CLI Playwright est résolue depuis `apps/sim/package.json` par le résolveur Node
+natif, avec version `1.61.1` contrôlée avant téléchargement ; aucune disposition
+particulière de `node_modules` n'est supposée. Le cache reste disponible pour le
+nettoyage natif de la fixture, puis son identité, son état vivant et l'absence
+d'OOM sont contrôlés avant son arrêt attendu. Un échec reste bloquant même si le
+nettoyage est rappelé. L'observation du canvas vérifie aussi la visibilité et
+l'opacité des nœuds et de leurs ancêtres ; les tests locaux de cette logique
+restent des doubles DOM, pas une qualification Chromium/Linux.

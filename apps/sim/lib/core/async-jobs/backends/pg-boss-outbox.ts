@@ -23,7 +23,10 @@ export const pgBossOutboxHandlers: OutboxHandlerRegistry = {
       const transport = await pgBossClient.get()
       context.signal.throwIfAborted()
       // Unknown acceptance propagates unchanged. Retry uses exactly this ID/envelope.
-      await transport.publish(admission.jobId, admission.envelope)
+      await transport.publish(admission.jobId, admission.envelope, {
+        runAt: admission.runAt,
+        maxDurationSeconds: admission.maxDurationSeconds,
+      })
       context.signal.throwIfAborted()
     } catch (error) {
       if (

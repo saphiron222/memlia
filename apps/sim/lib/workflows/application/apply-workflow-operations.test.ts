@@ -1,4 +1,4 @@
-// Modified by Memlia: common workflow draft revision and regression coverage.
+// Modified by Memlia: common workflow draft revision and atomic container-counter regressions.
 import { WorkflowLockedError } from '@sim/platform-authz/workflow'
 import { workflowAuthzMockFns } from '@sim/testing'
 import {
@@ -686,6 +686,49 @@ describe('applyWorkflowOperations', () => {
     expect((failure as WorkflowOperationsNotAppliedError).droppedInputs).toEqual([dropped])
     expect(mocks.replace).not.toHaveBeenCalled()
   })
+
+  it.each([true, false])(
+    'refuses native counter validation before an atomic write (dryRun=%s)',
+    async (dryRun) => {
+      const { validateInputsForBlock } = await vi.importActual<
+        typeof import('@/lib/workflows/editing/validation')
+      >('@/lib/workflows/editing/validation')
+      const inputs = { loopType: 'for', iterations: '3wrong' }
+      const errors = validateInputsForBlock('loop', inputs, 'block-2').errors
+      const batch = [
+        {
+          operation_type: 'add' as const,
+          block_id: 'block-2',
+          params: { type: 'loop', name: 'Counted', inputs },
+        },
+      ]
+      mocks.preValidate.mockResolvedValue({ filteredOperations: batch, errors: [] })
+      mocks.applyOperations.mockReturnValue({
+        state: graph(),
+        validationErrors: errors,
+        skippedItems: [],
+        mintedBlockIds: {},
+      })
+
+      const failure = await applyWorkflowOperations
+        .execute({
+          principal: sessionPrincipal,
+          input: { workflowId: 'workflow-1', operations: batch, atomic: true, dryRun },
+        })
+        .catch((error: unknown) => error)
+
+      expect(failure).toBeInstanceOf(WorkflowOperationsNotAppliedError)
+      if (!(failure instanceof WorkflowOperationsNotAppliedError))
+        throw new Error('Expected atomic refusal')
+      expect(failure.droppedInputs).toHaveLength(1)
+      expect(failure.droppedInputs[0]).toMatchObject({
+        blockId: 'block-2',
+        blockType: 'loop',
+        field: 'iterations',
+      })
+      expect(mocks.replace).not.toHaveBeenCalled()
+    }
+  )
 
   /**
    * `collectUnresolvedReferences` is read-only: the values it flags stay

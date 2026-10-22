@@ -5,7 +5,9 @@ Il ne lit aucune clé, ne lance aucun provider, ne charge aucun `.env`, ne consu
 aucune DB et ne crée aucune route. Les seules métadonnées qu'il consulte sont le
 catalogue natif des modèles et leurs statuts de retrait.
 
-**L'activation reste bloquée.** Aucun consommateur HTTP ou UI n'est raccordé.
+**Le marqueur du parseur reste `activation: blocked`.** Le funnel HTTP local séparé
+réutilise cette décision, ses permissions natives et les engagements budgétaires ;
+ce parseur seul n'autorise aucun envoi.
 Le contrôle effectif du transport et l'autorisation du premier envoi doivent
 être réalisés et revus avant toute activation. Ce module n'est pas un contrôle
 de destination du client Anthropic déjà en cache.
@@ -22,6 +24,7 @@ du modèle. Elle exige tous les champs suivants :
 | `provider` | `openai` ou `anthropic`, les deux ports P05 déjà qualifiés |
 | `model` | ID exact du catalogue natif de ce provider, non deprecated ; 1–256 caractères |
 | `destination` | `official` uniquement, une intention à appliquer au transport |
+| `anthropicWorkspaceId` | Facultatif, Anthropic seulement ; `^wrkspc_[A-Za-z0-9]{8,100}$`, configuration serveur |
 | `data.conversation` | `true` explicite : le texte de conversation peut sortir |
 | `data.catalogue` | `true` explicite : les projections catalogue peuvent sortir |
 | `data.workflow` | `catalogue_only`, `summary_only` ou `sanitized_details`, sans défaut |
@@ -37,14 +40,86 @@ Les objets doivent être des records ordinaires (prototype objet ou nul), avec
 uniquement des propriétés propres, énumérables et de données. Accesseurs,
 propriétés cachées, symboles et champs hérités sont refusés. Les erreurs publiques
 restent `Chat installation policy is unavailable.`, sans contenu de configuration
-ni cause brute. Les configurations sémantiques sont strictes aux deux niveaux.
+ni cause brute. Les configurations sémantiques et leurs sous-objets sont stricts.
 Les bornes de champs ne sont pas une limite mémoire d'un futur lecteur JSON/HTTP.
 
 Le résultat est un clone figé, y compris `data`, portant les mêmes champs validés
 et deux marqueurs : `kind: 'configuration_decision'`, `activation: 'blocked'`.
 Il ne contient ni clé, ciphertext, référence de credential, identité utilisateur,
-endpoint, header, prompt, graphe ou catalogue. Il n'est pas une preuve d'autorité
+endpoint, headers libres, prompt, graphe ou catalogue. L'ID workspace API
+Anthropic est une métadonnée serveur de routage, distincte de l'espace Sim ;
+il n'est ni une clé ni une permission. Il n'est pas une preuve d'autorité
 administrateur. Passer un objet au parseur ne prouve pas sa provenance serveur.
+
+## Sélection explicite du moteur local
+
+La même configuration peut comporter `localBackend`, sous forme stricte :
+
+```json
+{
+  "kind": "memlia_local_chat",
+  "version": 1,
+  "budgetWindow": { "id": "cabinet_chat_v1", "version": 7 }
+}
+```
+
+Ce champ ne contient ni secret, prix, utilisateur, endpoint ni règle de permission.
+Il est facultatif ; son absence conserve la décision historique. Toute présence
+malformée, même NULL ou undefined en mémoire, est refusée sans repli worker.
+La version de format est1 ; la référence de fenêtre doit comporter un ID ASCII
+alphanumérique/underscore/tiret de1à128caractères et une version entière1à2147483647.
+Les objets et sous-objets sont copiés et figés ; les getters, symboles, champs
+cachés et clés supplémentaires restent interdits.
+
+`localBackend.thinkingLevel` est un réglage administrateur facultatif, réservé à
+Anthropic où le provider natif le consomme. Son absence conserve le comportement
+précédent : aucun niveau n'est ajouté à la requête. Une valeur présente doit être
+une chaîne exacte du catalogue `getThinkingCapability(model).levels`, ou `none`
+si ce modèle déclare explicitement `noneMode`. Aucun alias, normalisation ou
+substitution ; OpenAI, les niveaux inconnus, NULL et undefined présents refusent
+avant attente d'autorisation et lecture de clé. Le navigateur, le prompt et les
+résultats d'outils ne peuvent choisir ce réglage.
+
+`none` ne signifie pas uniformément « raisonnement désactivé » : le mode natif
+déclaré peut être `disabled` (Haiku5.5) ou `between_tools` (Sonnet5.5, raisonnement
+entre les appels d'outils). Si aucun `noneMode` explicite n'existe, cette option
+administrateur refuse `none` au lieu de promettre une désactivation lorsque le
+provider omettrait simplement le champ. Les noms ici illustrent le catalogue de
+cette version ; aucune liste parallèle ni qualification des modèles n'est créée.
+
+Le niveau est copié comme primitive avant le premier await puis détaché avec les
+options locales. Il ne rejoint ni l'intent utilisateur persistant ni une clé.
+`maxTokens` reste exactement `pricingProfile.bounds.outputTokens` de la fenêtre
+versionnée ; prix, réserves et plafonds12appels/40outils/180s ne changent pas. Un
+niveau déclaré avec un budget manuel peut pousser le provider à relever sa sortie :
+le garde Anthropic observé refuse toujours cet ajustement avant transport, sans
+repli ni réévaluation implicite du budget. Niveau déclaré compatible et requête
+réellement admissible sont donc distincts. Des tests SDK/API doublée vérifient les
+payloads ; ils ne garantissent ni acceptation réelle, ni qualité, ni économie IA.
+
+Cette sélection admet `openai` ou `anthropic`, avec un profil budgétaire canonique
+portant exactement le même provider et modèle. Le chemin Anthropic observé exige
+la boucle streaming d'outils native, un usage complet et `service_tier: standard` ;
+le SDK reçoit `standard_only`. Les autres architectures observées sont refusées
+avant transport. Le modèle reste choisi dans le catalogue natif.
+
+`anthropicWorkspaceId`, si présent, est copié avant les attentes d'autorisation.
+Il traverse seulement les options serveur et le contexte ALS jusqu'au client
+contrôlé, sous l'unique header `anthropic-workspace-id`. Il est exclu des
+capabilities, du corps LLM et des admissions persistées. OpenAI refuse ce champ.
+`ANTHROPIC_CUSTOM_HEADERS` reste refusé même avec un ID valide. Aucun objet de
+headers libre n'est admis. Le besoin API est décrit dans la [documentation
+Models](https://platform.claude.com/docs/en/api/models/list) ; aucun ID réel
+ou credential n'est inclus ici.
+
+**L'activation reste blocked**, même avec ce champ. Le lecteur de fichier
+administrateur existant reste la seule source de cette décision. Avant un envoi,
+le futur compositeur devra relire la fenêtre canonique avec exactement cet ID
+et cette version, exiger son état/période/profil valide et le même modèle, puis
+passer par les autorisations natives et la réservation après COMMIT de chaque
+transport. Une référence de fenêtre n'est ni un budget disponible ni une
+permission de dépenser. Aucune création de fenêtre, clé, route ou activation
+HTTP n'est réalisée par cette extension du parseur.
 
 ## Source administrateur : fichier Linux POSIX
 
@@ -140,10 +215,10 @@ reproduites depuis des objets valides ; elles ne sont pas des jetons de capacit�
 - Vérifier la destination et les réglages **effectifs** des transports. OpenAI
   utilise son URL native fixe et le post Responses refuse désormais les redirections
   sous `controlledRun` ALS ; cette protection contextuelle est détaillée ci-dessous.
-  Anthropic peut conserver baseURL, authToken,
-  headers ou logging issus de son SDK/cache. L'intention `official` ne neutralise
-  pas ces paramètres. Leur durcissement contextuel doit précéder l'activation ;
-  aucun changement temporaire d'env ou nettoyage global du cache n'est proposé.
+  Le client Anthropic contrôlé fixe l'origine officielle, les redirects refusés,
+  `maxRetries: 0`, le logging désactivé et la clé explicite, sans reprendre le
+  cache ni les credentials ambiants. Le chemin hors contrôle conserve sa
+  fabrique native ; aucune mutation temporaire d'env/cache n'est utilisée.
 - Conserver les réservations de chaque tentative, quotas, annulation et compteurs
   P05 ; ajouter ensuite les réservations/rapprochements monétaires persistants
   P06. Ce module ne calcule pas un coût et n'appelle pas un modèle.
@@ -195,3 +270,17 @@ Pas de qualification d'une route, clé réelle, modèle distant, endpoint local,
 interface admin, transport Anthropic, budget monétaire ou Chat complet.
 
 Copyright 2026 Memlia. Tous droits réservés.
+
+## Extension locale Anthropic et portée des preuves
+
+Le POST capture provider/modèle des capabilities autorisées puis vérifie leur
+égalité avec l'admission après attente ; ni modèle ni workspace API ne viennent
+du navigateur. Les permissions courantes et la confirmation de toute proposition
+restent natives. Le budget est une estimation USD au tarif liste versionné,
+pas une facture fournisseur. Usage manquant/invalide, transport incertain ou
+règlement ambigu conservent l'engagement ; aucun fallback gratuit n'est ajouté.
+
+Les tests de cette extension emploient les vrais SDK, parseurs, estimateurs,
+contrôles et références COMMIT, avec HTTP/SQL/ACK et recherches d'autorité doublés
+selon la suite. Ils ne qualifient pas un appel Anthropic réel, un montage Linux,
+la facturation, une clé d'installation ou une nouvelle activation de déploiement.

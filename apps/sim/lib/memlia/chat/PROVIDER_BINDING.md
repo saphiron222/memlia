@@ -193,20 +193,21 @@ coopérer pour arrêter son propre travail : cette primitive ne peut pas annuler
 
 Un rejet du callback devient `Server model transport guard refused.`, sans cause,
 code réseau ni message privé, et ne déclenche pas de retry de transport. Les autres
-erreurs natives et compteurs conservent leur sémantique. Sans observateur OpenAI, le callback ne reçoit que
+erreurs natives et compteurs conservent leur sémantique. Sans observateur, le callback ne reçoit que
 le signal ; sa résolution n'est **pas** une preuve d'autorité, de tarif, de réservation
 COMMIT ou de règlement. Aucun port budgétaire, principal, clé, route HTTP ou politique
 d'activation n'est ajouté ici. Le futur raccordement P06 doit encore établir ces
 preuves avant chaque envoi ; un refus ou une annulation ne libère aucun engagement
 budgétaire par cette seule interface.
 
-## Observation optionnelle OpenAI par tentative physique
+## Observation optionnelle par tentative physique
 
 `observeModelAttempt(attempt, observation): Promise<void>` est une seconde option
-serveur, capturée une fois par le binding. Elle exige OpenAI ; Anthropic est refusé
-avant transport, son mécanisme d'attente existant restant inchangé. Le port natif
-OpenAI refuse également l'observation hors streaming ou pour un autre provider
-compatible Responses. Aucun champ d'observation n'est transmis au modèle ou au SDK.
+serveur, capturée une fois par le binding. Elle admet OpenAI Responses et la
+boucle Anthropic streaming avec outils. Les autres chemins Anthropic observés
+(non streaming, sans outils ou Azure) refusent avant construction du client ou
+transport. Le port OpenAI conserve son refus hors streaming ou pour un autre
+provider compatible Responses. Aucun callback ne devient un champ LLM/SDK.
 
 Avec cette option, le hook prétransport reçoit en second argument une référence
 opaque locale, vide et gelée. Elle existe avant l'attente et peut corréler une future
@@ -290,3 +291,28 @@ Le binding crée une requête et un contexte propres, sans `agentConversation`.
 Le helper natif `recordProviderConversationToolError` ne possède donc aucune
 cible durable dans ce contexte fermé. Cela ne garantit pas la même propriété
 pour une autre composition ALS qui ajouterait explicitement une conversation.
+
+## Observation et workspace Anthropic contrôlés
+
+Chaque appel physique de la boucle, synthèse comprise, attend sa réserve COMMIT
+puis transmet `service_tier: standard_only` et `maxRetries: 0`. Le SDK natif assemble
+les deltas cumulatifs ; le port strict exige un `message_stop` et une raison de fin
+reconnue. Il exige les quatre compteurs entiers sûrs non négatifs et le service
+`standard`, sans remplacer une absence ou NULL par zéro. Les écritures 5 minutes /
+1 heure sont disjointes, leur somme doit égaler le total des créations. Un server
+outil facturable ou un usage incomplet reste inconnu. Les [événements officiels](https://platform.claude.com/docs/en/build-with-claude/streaming) sont interprétés
+par le SDK existant, sans second parseur SSE.
+
+L'observateur est attendu avant exécution d'un outil ou `turn_end`. Refus, usage
+invalide et ambiguïté de règlement interrompent la boucle avec erreurs/logs fixes,
+sans cause brute ni retry. Une dépense complète reste comptabilisée après abort,
+mais aucun outil ni frontière finale n'est livré ensuite. Les erreurs d'outil
+contrôlées ne recopient pas leur cause dans l'historique au tour suivant.
+Les chemins hors contrôle conservent leurs conventions natives.
+
+`anthropicWorkspaceId` est une option interne facultative, validée/capturée avant
+await puis portée par ALS. Le client contrôlé l'ajoute seulement comme
+`anthropic-workspace-id`, jamais au corps du modèle. Aucune clé libre de headers,
+workspace choisi par LLM, héritage dans OpenAI ou reprise de CUSTOM_HEADERS n'est
+possible par cette option. Elle n'établit aucune permission Sim ou fournisseur.
+Les tests SDK/HTTP doublé couvrent deux workspaces concurrents et leur isolation.

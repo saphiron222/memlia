@@ -1,3 +1,4 @@
+// Modified by Memlia: retain Function diagnostic compiler and fixed ECMAScript libraries.
 // Modified by Memlia in 2026. Upstream Apache-2.0 license and notices retained.
 import path from 'node:path'
 import { SIM_SITE_URL } from '@sim/utils/site'
@@ -8,6 +9,7 @@ import {
   FILE_DELIVERY_CSP_PATH_PATTERN,
   getChatEmbedCSPPolicy,
   getMainCSPPolicy,
+  getOfficeTaskpaneCSPPolicy,
   getWorkflowExecutionCSPPolicy,
 } from './lib/core/security/csp'
 import { LANDING_ROUTES } from './lib/landing/routes'
@@ -114,6 +116,7 @@ const nextConfig: NextConfig = {
   },
   output: isTruthy(env.DOCKER_BUILD) ? 'standalone' : undefined,
   serverExternalPackages: [
+    '@typescript/typescript6',
     '@1password/sdk',
     'ws',
     'isolated-vm',
@@ -169,6 +172,9 @@ const nextConfig: NextConfig = {
      * monorepo root, so they matched nothing. docker/app.Dockerfile copies them instead.
      */
     '/*': [
+      // typescript6 is a native shim to @typescript/old; both hoist to the root.
+      // The compiler reads its standard declarations dynamically, outside JS tracing.
+      '../../node_modules/@typescript/old/lib/lib.*.d.ts',
       './lib/execution/sandbox/bundles/*.cjs',
       './node_modules/ws/**/*',
       '../../packages/sim-cli/dist/runtime.js',
@@ -459,6 +465,18 @@ const nextConfig: NextConfig = {
         // File routes preserve their representation CSP in withRouteHandler.
         source: `/((?!workspace|chat|login|signup|${FILE_DELIVERY_CSP_PATH_PATTERN.slice(1)}$|$).*)`,
         headers: [{ key: 'Content-Security-Policy', value: getMainCSPPolicy() }],
+      },
+      {
+        // Memlia desktop WebView: only this page loads the official Office SDK.
+        // Last matching values override generic headers; keep framing restricted.
+        source: '/excel-addin',
+        headers: [
+          { key: 'Content-Security-Policy', value: getOfficeTaskpaneCSPPolicy() },
+          { key: 'Cross-Origin-Embedder-Policy', value: 'unsafe-none' },
+          { key: 'X-Frame-Options', value: 'SAMEORIGIN' },
+          { key: 'X-Robots-Tag', value: 'noindex, nofollow' },
+          { key: 'Cache-Control', value: 'no-store' },
+        ],
       },
     ]
   },

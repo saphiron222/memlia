@@ -1,6 +1,6 @@
 # Composition du budget estimatif et du provider catalogue
 
-`runBudgetedCatalogProvider` raccorde les ports existants : `runCatalogProvider`, corrélation opaque des tentatives OpenAI, réservation après COMMIT, règlement natif et ledger. Aucun endpoint, fournisseur réel, clé, politique d’installation ou Chat n’est activé.
+`runBudgetedCatalogProvider` raccorde les ports existants : `runCatalogProvider`, corrélation opaque des tentatives OpenAI ou Anthropic, réservation après COMMIT, règlement natif et ledger. Aucun endpoint, fournisseur réel, clé, politique d’installation ou Chat n’est activé.
 
 Le caller serveur doit avoir authentifié la session et autorisé son accès au workspace avant cet appel. Cette première composition accepte la forme native `SessionPrincipal`, sans vérifier une session en DB ni créer une autorité à partir de sa forme. Le résolveur natif d’attribution choisit le payeur ; il ne remplace pas ce contrôle d’accès. La source administrateur de la fenêtre/profil et le funnel d’envoi restent des raccordements nécessaires.
 
@@ -8,9 +8,9 @@ Le caller serveur doit avoir authentifié la session et autorisé son accès au 
 
 Les options reprennent le binding catalogue, avec un budget serveur explicite `{windowId, windowVersion, pricingProfile}`. Les hooks, le provider et l’identité ne sont jamais sélectionnés par un argument d’outil modèle. La copie JSON stricte précède toute attente. Le signal reste un signal natif séparé, jamais une valeur sérialisée.
 
-Le profil0438 doit porter `native_list_price_estimate_v1`, le modèle OpenAI statique exact et le tarif natif complet actuel, avec ses paliers et sa date. Le contexte doit égaler la limite explicitement déclarée du modèle ; une limite de sortie native explicite est indispensable. `request.maxTokens` doit égaler `profile.bounds.outputTokens` et rester inférieur ou égal à cette limite native. Aucun fallback2048/4096 ne sert à prouver une borne. Le binding transmet ensuite cette limite en `max_output_tokens`, y compris aux retries, fallback de résumé et synthèse finale.
+Le profil0438 doit porter `native_list_price_estimate_v1`, le provider OpenAI/Anthropic et son modèle statique exact et le tarif natif complet actuel, avec ses paliers et sa date. Le contexte doit égaler la limite explicitement déclarée du modèle ; une limite de sortie native explicite est indispensable. `request.maxTokens` doit égaler `profile.bounds.outputTokens` et rester inférieur ou égal à cette limite native. Aucun fallback2048/4096 ne sert à prouver une borne. Le binding transmet ensuite cette limite en `max_output_tokens` pour OpenAI ou `max_tokens` pour Anthropic, jusqu’à la synthèse finale ; retries/fallback restent ceux du provider.
 
-Le plafond couvre tout le contexte déclaré, pas seulement le premier prompt. Pour chaque intervalle de tarifs, le helper soumet à **l’estimateur natif** `priceModelUsage` les extrémités supérieures et les trois allocations extrêmes : entrée non cachée, lecture de cache, écriture de cache avec le multiplicateur natif exporté. Les taux non négatifs sont constants dans chaque intervalle ; chaque mélange est donc borné par ces extrêmes. Les paliers ouverts, non monotones et le fallback natif `cachedInput ?? input` sont conservés. Le coût de sortie utilise le plafond réellement transmis. Aucun calculateur de prix parallèle ni tarif supplémentaire n’est ajouté.
+Le plafond couvre tout le contexte déclaré, pas seulement le premier prompt. Pour chaque intervalle de tarifs, le helper soumet à **l’estimateur natif** `priceModelUsage` les extrémités supérieures et les allocations extrêmes : entrée non cachée, lecture de cache et écriture de cache. OpenAI conserve son multiplicateur natif ; Anthropic réutilise `buildAnthropicModelUsage` pour les deux durées natives, 5 minutes à 1,25× et 1 heure à 2×, en compartiments disjoints. Les taux non négatifs sont constants dans chaque intervalle ; chaque mélange est donc borné par ces extrêmes. Les paliers ouverts, non monotones et le fallback natif `cachedInput ?? input` sont conservés. Le coût de sortie utilise le plafond réellement transmis. Aucun calculateur de prix parallèle ni tarif supplémentaire n’est ajouté.
 
 Cette borne est conditionnelle aux limites déclarées du modèle et au tarif liste enregistré. Elle n’est ni une facture fournisseur, ni un plafond global des workflows ou de l’installation. Les seules tentatives de ce port consomment la fenêtre USD explicite. Un compteur fournisseur hors borne peut encore produire un dépassement : le port natif enregistre alors le coût connu et bloque la fenêtre, sans rollback de la dépense.
 
@@ -26,6 +26,28 @@ Une erreur/refus/COMMIT inconnu du ledger ou un dépassement arrête la boucle a
 
 ## Preuves et limites
 
-La suite utilise PostgreSQL dédié pour attribution, fenêtres, réserves, COMMIT et ledger, avec un rôle applicatif DML sans DDL et un propriétaire distinct pour les fixtures. Le vrai binding, les boucles OpenAI, le parseur SSE, la normalisation et les prix sont conservés. HTTP est doublé ; les outils catalogue/workflow non concernés et le nombre de tours avant synthèse sont doublés explicitement. Un recorder transparent capture les callbacks pour les sondes de références, puis délègue sans modifier leurs arguments. Les barrières d’ACK COMMIT, d’erreur de transaction et d’annulation sont des doubles de frontières autour de transactions réelles, pas des coupures réseau PostgreSQL.
+La preuve historique OpenAI utilise PostgreSQL dédié pour attribution, fenêtres, réserves, COMMIT et ledger, avec un rôle applicatif DML sans DDL et un propriétaire distinct pour les fixtures. Le vrai binding, les boucles OpenAI, le parseur SSE, la normalisation et les prix sont conservés. HTTP est doublé ; les outils catalogue/workflow non concernés et le nombre de tours avant synthèse sont doublés explicitement. Un recorder transparent capture les callbacks pour les sondes de références, puis délègue sans modifier leurs arguments. Les barrières d’ACK COMMIT, d’erreur de transaction et d’annulation sont des doubles de frontières autour de transactions réelles, pas des coupures réseau PostgreSQL.
 
 Les preuves couvrent notamment refus avant HTTP, COMMIT visible, concurrence, retry/fallback/synthèse, plafond transmis, cache/paliers, mutation pendant attente, dette inconnue et règlement après abort. Elles ne qualifient ni un fournisseur payant, ni l’authentification/funnel HTTP, ni l’UI, ni Anthropic, ni le chargeur administrateur, ni le build global. Les tests historiques des ports et providers restent requis en composition, puis une revue distincte avant intégration.
+
+## Extension Anthropic
+
+Le schéma canonique V1 accepte aussi `provider: anthropic` sans modifier l'ordre
+canonique ni l'empreinte des profils OpenAI existants. La borne native de Haiku
+4.5 est de 200 000 tokens de contexte / 64 000 de sortie, avec le tarif enregistré ;
+aucune limite ou date de registre n'est changée ici. Les [tarifs officiels](https://platform.claude.com/docs/en/about-claude/pricing) distinguent les caches ;
+la composition n'invente pas de remise ou de prix facturé.
+
+L'observation exige le `message_stop` terminal et les compteurs complets du SDK,
+avec le service standard demandé explicitement. Le règlement doit être confirmé
+avant un outil ou une frontière de fin de tour. L'annulation pendant ce règlement
+n'empêche pas l'enregistrement d'une dépense connue et n'autorise aucun nouvel
+outil/envoi. Les erreurs fermées n'entraînent aucun retry Anthropic.
+
+Le workspace API Anthropic facultatif est une option serveur copiée avant await,
+jamais un argument LLM ou une identité d'autorisation. Il est refusé pour OpenAI.
+Les tests supplémentaires utilisent les vrais ports de corrélation/COMMIT et prix,
+mais doublent les transactions/ACK et le transport. La composition lifecycle →
+proposition → confirmation utilise le vrai SDK et les handlers natifs avec HTTP,
+permissions, décisions de confirmation et stockage explicitement doublés. Elle
+ne prouve ni PostgreSQL Anthropic, ni un accord humain réel, ni un appel payant.

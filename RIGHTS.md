@@ -2,6 +2,8 @@
 
 ## Sources tierces
 
+Les paragraphes suivants retracent les adaptations successives ; les mentions de raccordements encore absents décrivent leur étape historique. L’état actuel et ses limites sont précisés dans README.md et dans le complément ci-dessous.
+
 Le socle Sim provient du dépôt officiel https://github.com/simstudioai/sim au commit `c6cef5f87b6a1d1d01df89e7140bad9e9fd4c2e2`. Les fichiers réutilisés conservent leurs droits et leurs notices Apache-2.0, disponibles sous `compliance/upstream/sim/`. Les licences imbriquées restent à leur emplacement. Les textes de licence des bibliothèques ne sont pas remplacés par les présentes indications.
 
 Le répertoire Enterprise `apps/sim/ee`, les empreintes Enterprise interdites, les polices Season Sans et Söhne et les archives/exécutables opaques non admis sont exclus de cet export. Le dépôt ne distribue pas actuellement les moteurs OpenAdapt ; leur intégration est en cours de développement.
@@ -33,3 +35,21 @@ Les composants nouveaux sont notamment `agents/windows/`, `packages/memlia-contr
 ## Limites de cette publication de développement
 
 Cet export source n’est pas une release commerciale. Les dépendances téléchargées, binaires générés, images conteneur, source maps, ressources graphiques et archives de livraison ont leurs propres obligations et gates. Aucun résultat de compilation n’autorise à distribuer un artefact dont les licences n’ont pas été contrôlées. Les preuves internes, secrets, données du laboratoire et l’historique de travail privé ne sont pas publiés.
+
+## Complément de cette composition Chat, Windows et Excel
+
+Le raccordement HTTP local, les capacités serveur, le consentement et l’interface native de Chat, ainsi que la création explicite d’un brouillon depuis Home réemploient les moteurs Sim. Leurs adaptations amont conservent Apache-2.0 et leurs mentions de modification. Les nouveaux modules Memlia, le profil Compose, le protocole Excel, son superviseur, son image et ses recettes restent sous droits réservés, sans attribution implicite Apache/MIT. Les dépendances Polars/openpyxl, HTTPX/cryptography et les composants OpenAdapt gardent leurs droits propres ; les textes de licence tiers et les réserves publiques Windows/contrats sont préservés.
+
+Le contrôle HTTP standalone, la recette Linux Excel et ses sondes sont des sources de test, pas une image, une roue tierce, un moteur OpenAdapt embarqué ou une activation de service. Aucun code util-linux/Linux n’est copié dans les sondes. Le verrou Bun reste identique ; aucune distribution de cache, poids, bundle généré non admis, source map ou sortie de test n’est ajoutée. Le candidat exige ses contrôles frais et les jobs GitHub requis ; les succès historiques ne sont pas réattribués.
+
+## Complément de la composition courante
+
+Les nouvelles préparations et instantanés de tests Excel, les ports déclaratifs de fichiers, la découverte bornée d’entrées et les raccordements de worker réutilisent les validateurs, permissions, moteurs d’exécution et bibliothèques déjà sélectionnés. Les ajouts originaux Memlia restent sous droits réservés ; les adaptations Sim, ses migrations et métadonnées générées conservent leurs droits Apache et leurs mentions de modification. Les adaptations du provider Anthropic réemploient son SDK et le ledger natifs ; aucun moteur distant propriétaire n’est copié.
+
+Le patch dérivé `agents/windows/patches/openadapt-capture-1.3.0-source-time.patch` conserve MIT ; le texte intégral et l’attribution OpenAdapt.AI figurent dans `agents/windows/patches/OPENADAPT_CAPTURE_PATCH.md`. Cette licence du patch n’est pas attribuée aux adapters et tests originaux Memlia. Aucun wheel, binaire, journal, clé, profil ou harnais privé de qualification n’est distribué par cet export source. Les helpers Linux et textes de droits réservés déjà publics sont conservés, sans nouvelle licence libre ni régression des contrôles de notices/historique.
+
+## Complément des tests rapides et du parcours Excel Linux
+
+Le sélecteur de tests rapides, les recettes et fixtures synthétiques Excel Linux ainsi que les adaptateurs originaux Memlia restent sous droits réservés. Les évolutions nécessaires des modules, tests et providers Sim conservent leurs droits Apache-2.0 et leurs mentions de modification. Cette publication visible ne leur attribue aucune nouvelle licence libre.
+
+Le trajet Excel réemploie les contrats, l'authentification par clé API, les permissions, les fichiers et le moteur de workflows existants. La fixture native est une source de test publique déterministe ; aucun profil privé, secret, compte réel, journal, donnée de laboratoire, image, roue ou commit d'historique privé n'est distribué. Les licences des bibliothèques et les textes amont restent inchangés. Une admission exacte de chaîne fictive de test ne désactive ni le scanner ni les contrôles historiques. La recette et les tests ne qualifient pas une installation commerciale, Office Desktop ou une image de production.

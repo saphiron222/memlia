@@ -1,10 +1,12 @@
 // Modified by Memlia: qualify required draft CAS contracts and read/write receipts.
 import { describe, expect, it } from 'vitest'
+import { z } from 'zod'
 import {
   v2ApplyWorkflowOperationsBodySchema,
   v2ApplyWorkflowOperationsDataSchema,
   v2ReplaceWorkflowStateBodySchema,
   v2WorkflowGraphSchema,
+  v2WorkflowOperationSchema,
 } from '@/lib/api/contracts/v2/workflows'
 import { WORKFLOW_SKIPPED_ITEM_TYPES } from '@/lib/workflows/editing/types'
 
@@ -300,4 +302,54 @@ describe('draft revision wire contract', () => {
         .success
     ).toBe(false)
   })
+})
+
+describe('workflow operation trigger-mode contract', () => {
+  const operations = ['add', 'edit', 'insert_into_subflow'] as const
+  const request = (operation_type: (typeof operations)[number], extra: Record<string, unknown>) => ({
+    expectedRevision: 7,
+    operations: [
+      {
+        operation_type,
+        block_id: 'start',
+        params: { type: 'start_trigger', name: 'Départ', subflowId: 'loop', ...extra },
+      },
+    ],
+  })
+
+  it.each(operations)('rejects non-boolean triggerMode for %s without coercion', (operation) => {
+    for (const triggerMode of ['manual', 'true', 0, 1, null, {}, []]) {
+      const result = v2ApplyWorkflowOperationsBodySchema.safeParse(
+        request(operation, { triggerMode })
+      )
+      expect(result.success).toBe(false)
+      expect(result.error?.issues).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ path: ['operations', 0, 'params', 'triggerMode'] }),
+        ])
+      )
+    }
+  })
+
+  it.each(operations)('preserves booleans and omission for %s', (operation) => {
+    for (const extra of [{}, { triggerMode: false }, { triggerMode: true }]) {
+      const input = request(operation, extra)
+      const parsed = v2ApplyWorkflowOperationsBodySchema.parse(input)
+      expect(parsed.operations[0]).toStrictEqual(input.operations[0])
+    }
+  })
+})
+
+it('publishes boolean triggerMode in every native block-parameter envelope', () => {
+  const published = z.toJSONSchema(v2WorkflowOperationSchema, { io: 'input' })
+  for (const operation of ['add', 'edit', 'insert_into_subflow']) {
+    const variant = published.oneOf?.find(
+      (entry) => entry.properties?.operation_type?.const === operation
+    )
+    expect(variant).toBeDefined()
+    const params = variant?.properties?.params
+    const envelope = operation === 'edit' ? params?.allOf?.[0] : params
+    expect(envelope?.properties?.triggerMode).toMatchObject({ type: 'boolean' })
+    expect(envelope?.required ?? []).not.toContain('triggerMode')
+  }
 })

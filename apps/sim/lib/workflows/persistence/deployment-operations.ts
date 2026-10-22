@@ -1,10 +1,31 @@
-import { db, workflow, workflowDeploymentOperation, workflowDeploymentVersion } from '@sim/db'
+// Modified by Memlia: opt-in Excel materialization and refusal to activate test-only snapshots.
+import {
+  db,
+  workflow,
+  workflowDeploymentOperation,
+  workflowDeploymentVersion,
+  workspace,
+} from '@sim/db'
+import { createLogger } from '@sim/logger'
+import { sha256Hex } from '@sim/security/hash'
 import { generateId } from '@sim/utils/id'
+import { loadWorkflowFromNormalizedTablesRaw } from '@sim/workflow-persistence/load'
+import {
+  assertWorkflowDraftTransaction,
+  lockWorkflowDraft,
+  WorkflowDraftError,
+} from '@sim/workflow-persistence/revision'
 import type { DbOrTx } from '@sim/workflow-persistence/types'
 import type { WorkflowState } from '@sim/workflow-types/workflow'
 import type { InferSelectModel } from 'drizzle-orm'
 import { and, desc, eq, inArray, or, sql } from 'drizzle-orm'
+import { readOwnDataString, stringifyBoundedJson } from '@/lib/core/utils/bounded-json'
 import type { DbTransaction } from '@/lib/db/types'
+import {
+  materializeExcelProcedureSnapshot,
+  readExcelProcedureSnapshotCapture,
+} from '@/lib/memlia/excel/materialize-procedure-snapshot'
+import { normalizedStringify } from '@/lib/workflows/comparison/normalize'
 import {
   canTransitionDeploymentOperation,
   createDeploymentReadiness,
@@ -19,6 +40,8 @@ import {
   parseDeploymentReadiness,
   toSafeDeploymentError,
 } from '@/lib/workflows/deployment-lifecycle'
+
+const logger = createLogger('DeploymentOperations')
 
 export type WorkflowDeploymentOperation = InferSelectModel<typeof workflowDeploymentOperation>
 
@@ -57,8 +80,12 @@ interface PrepareOperationBase {
 
 export interface PrepareWorkflowDeploymentParams extends PrepareOperationBase {
   workflowState: WorkflowState
+  /** Server-owned opaque capture; present invalid values refuse, never fall back. */
+  excelProcedureSnapshot?: unknown
   name?: string | null
   description?: string | null
+  /** Correlation ID for logging only. */
+  requestId?: string
 }
 
 export interface PrepareWorkflowVersionActivationParams extends PrepareOperationBase {
@@ -155,6 +182,7 @@ export async function setDeploymentTxTimeouts(tx: DbOrTx): Promise<void> {
 export async function prepareWorkflowDeployment(
   params: PrepareWorkflowDeploymentParams
 ): Promise<PrepareDeploymentOperationResult> {
+  if (Object.hasOwn(params, 'excelProcedureSnapshot')) return prepareExcelSnapshotDeployment(params)
   return prepareOperation(params, 'deploy', async ({ tx, now, actorId, workflowId }) => {
     const [{ maxVersion }] = await tx
       .select({ maxVersion: sql<number>`COALESCE(MAX(${workflowDeploymentVersion.version}), 0)` })
@@ -183,6 +211,194 @@ export async function prepareWorkflowDeployment(
   })
 }
 
+type LockedExcelSnapshot = { capture: object; current: unknown; requestId?: string }
+type ExcelRefusalContext = { requestId?: string; workflowId?: string }
+
+const ERROR_NAME = /^[A-Za-z][A-Za-z0-9_]{0,63}$/
+const SQLSTATE = /^[0-9A-Z]{5}$/
+function errorName(error: unknown): string | undefined {
+  return error instanceof Error && ERROR_NAME.test(error.name) ? error.name : undefined
+}
+function sqlState(error: unknown): string | undefined {
+  const code = (error as { code?: unknown } | null | undefined)?.code
+  return typeof code === 'string' && SQLSTATE.test(code) ? code : undefined
+}
+
+/**
+ * Error class and SQLSTATE only, never a message: a Drizzle query error's message carries the SQL
+ * and its parameters. Drizzle wraps driver errors, so the SQLSTATE is read on the error or its
+ * direct `cause` (one level).
+ */
+export function deploymentRefusalErrorFields(error: unknown): Record<string, string> {
+  try {
+    const cause = error instanceof Error ? error.cause : undefined
+    const fields: Record<string, string> = {}
+    const name = errorName(error)
+    const causeName = errorName(cause)
+    const state = sqlState(error) ?? sqlState(cause)
+    if (name) fields.errorName = name
+    if (causeName) fields.causeName = causeName
+    if (state) fields.sqlState = state
+    return fields
+  } catch {
+    return {}
+  }
+}
+
+/** Logs the internal code of the refusing check; the caller only sees the fixed refusal. */
+function excelSnapshotRefused(
+  context: ExcelRefusalContext,
+  check: string,
+  extra: Record<string, string> = {}
+): PrepareDeploymentOperationResult & { success: false } {
+  logger.error(`[${context.requestId}] Excel deployment snapshot refused`, {
+    workflowId: context.workflowId,
+    check,
+    ...extra,
+  })
+  return { success: false, reason: 'invalid_request', error: 'Excel deployment snapshot refused' }
+}
+
+async function prepareExcelSnapshotDeployment(
+  input: PrepareWorkflowDeploymentParams
+): Promise<PrepareDeploymentOperationResult> {
+  // Read every caller-owned value before the first await; never re-read mutable params in a TX.
+  let capture: object
+  let identity: ReturnType<typeof readExcelProcedureSnapshotCapture>
+  let params: PrepareOperationBase & { name?: string | null; description?: string | null }
+  // Correlation reads run no caller accessor; caller values are read inside the try below.
+  const refusal: ExcelRefusalContext = {
+    requestId: readOwnDataString(input, ['requestId']),
+    workflowId: readOwnDataString(input, ['workflowId']),
+  }
+  let check = 'capture_handle'
+  try {
+    const candidate = input.excelProcedureSnapshot
+    identity = readExcelProcedureSnapshotCapture(candidate)
+    if (!candidate || typeof candidate !== 'object') return excelSnapshotRefused(refusal, check)
+    capture = candidate
+    check = 'caller_input'
+    params = {
+      workflowId: input.workflowId,
+      actorId: input.actorId,
+      requestHash: input.requestHash,
+      idempotencyKey: input.idempotencyKey,
+      tx: input.tx,
+      readinessComponents: input.readinessComponents && [...input.readinessComponents],
+      onPrepareTransaction: input.onPrepareTransaction,
+      name: input.name,
+      description: input.description,
+    }
+    const stateJson = stringifyBoundedJson(input.workflowState, 2 * 1024 * 1024, { strict: true })
+    if (stateJson === undefined) return excelSnapshotRefused(refusal, 'state_not_strict_json')
+    check = 'capture_identity_mismatch'
+    if (
+      identity.scope.workflowId !== params.workflowId ||
+      typeof params.actorId !== 'string' ||
+      typeof params.requestHash !== 'string' ||
+      (params.name != null && typeof params.name !== 'string') ||
+      (params.description != null && typeof params.description !== 'string') ||
+      `sha256:${sha256Hex(normalizedStringify(JSON.parse(stateJson)))}` !==
+        identity.expectedStateDigest
+    ) {
+      return excelSnapshotRefused(refusal, check)
+    }
+  } catch {
+    return excelSnapshotRefused(refusal, check)
+  }
+
+  const prepare = async (tx: DbOrTx): Promise<PrepareDeploymentOperationResult> => {
+    // This is the same workflow row lock acquired by all native normalized draft writers.
+    // Read raw tables after that lock: do not run opportunistic block migrations or add Date.now().
+    assertWorkflowDraftTransaction(tx)
+    let snapshot: LockedExcelSnapshot
+    try {
+      const revision = await lockWorkflowDraft(tx, params.workflowId, identity.expectedRevision)
+      const [row] = await tx
+        .select({ workspaceId: workflow.workspaceId, variables: workflow.variables })
+        .from(workflow)
+        .where(eq(workflow.id, params.workflowId))
+        .limit(1)
+      if (!row || row.workspaceId !== identity.scope.workspaceId)
+        return excelSnapshotRefused(refusal, 'workflow_row')
+      const [space] = await tx
+        .select({ organizationId: workspace.organizationId, archivedAt: workspace.archivedAt })
+        .from(workspace)
+        .where(eq(workspace.id, row.workspaceId))
+        .limit(1)
+        .for('share')
+      if (!space || space.archivedAt || space.organizationId !== identity.scope.organizationId)
+        return excelSnapshotRefused(refusal, 'workspace')
+      const raw = await loadWorkflowFromNormalizedTablesRaw(params.workflowId, tx)
+      if (!raw || raw.workspaceId !== row.workspaceId || raw.draftRevision !== revision)
+        return excelSnapshotRefused(refusal, 'raw_draft')
+      // Native normalized serialization drops only undefined optional DB-reader properties.
+      const graph: unknown = JSON.parse(
+        normalizedStringify({
+          blocks: raw.blocks,
+          edges: raw.edges,
+          loops: raw.loops,
+          parallels: raw.parallels,
+          variables: row.variables ?? {},
+        })
+      )
+      if (`sha256:${sha256Hex(normalizedStringify(graph))}` !== identity.expectedStateDigest)
+        return excelSnapshotRefused(refusal, 'state_digest')
+      snapshot = {
+        capture,
+        current: { workflowState: graph, revision, scope: identity.scope },
+        requestId: refusal.requestId,
+      }
+    } catch (error) {
+      if (error instanceof WorkflowDraftError && error.code === 'conflict')
+        return excelSnapshotRefused(refusal, 'draft_revision_conflict')
+      return excelSnapshotRefused(
+        refusal,
+        'locked_read_failed',
+        deploymentRefusalErrorFields(error)
+      )
+    }
+    return prepareOperation(
+      { ...params, tx },
+      'deploy',
+      async ({ now, actorId, workflowId }) => {
+        const [{ maxVersion }] = await tx
+          .select({
+            maxVersion: sql<number>`COALESCE(MAX(${workflowDeploymentVersion.version}), 0)`,
+          })
+          .from(workflowDeploymentVersion)
+          .where(eq(workflowDeploymentVersion.workflowId, workflowId))
+          .limit(1)
+        const version = Number(maxVersion) + 1
+        const deploymentVersionId = generateId()
+        const materialized = materializeExcelProcedureSnapshot(snapshot.capture, snapshot.current, {
+          id: deploymentVersionId,
+          version,
+        })
+        await tx.insert(workflowDeploymentVersion).values({
+          id: deploymentVersionId,
+          workflowId,
+          version,
+          name: params.name?.trim() || null,
+          description: params.description?.trim() || null,
+          state: materialized.workflowState,
+          snapshotDigest: materialized.snapshotDigest,
+          isActive: false,
+          createdAt: now,
+          createdBy: actorId,
+        })
+        return { success: true, target: { deploymentVersionId, version } }
+      },
+      snapshot
+    )
+  }
+  if (params.tx) return prepare(params.tx)
+  return db.transaction(async (tx) => {
+    await setDeploymentTxTimeouts(tx)
+    return prepare(tx)
+  })
+}
+
 /**
  * Creates a preparing attempt targeting an existing immutable snapshot.
  */
@@ -195,6 +411,7 @@ export async function prepareWorkflowVersionActivation(
         id: workflowDeploymentVersion.id,
         version: workflowDeploymentVersion.version,
         createdAt: workflowDeploymentVersion.createdAt,
+        preparationKind: workflowDeploymentVersion.preparationKind,
       })
       .from(workflowDeploymentVersion)
       .where(
@@ -210,6 +427,13 @@ export async function prepareWorkflowVersionActivation(
         success: false,
         reason: 'deployment_version_not_found',
         error: 'Deployment version not found',
+      }
+    }
+    if (versionRow.preparationKind !== null) {
+      return {
+        success: false,
+        reason: 'invalid_request',
+        error: 'Excel test snapshot cannot be activated',
       }
     }
 
@@ -590,7 +814,10 @@ export async function activateDeploymentOperation(
     }
 
     const [targetVersion] = await tx
-      .select({ id: workflowDeploymentVersion.id })
+      .select({
+        id: workflowDeploymentVersion.id,
+        preparationKind: workflowDeploymentVersion.preparationKind,
+      })
       .from(workflowDeploymentVersion)
       .where(
         and(
@@ -604,6 +831,13 @@ export async function activateDeploymentOperation(
         success: false,
         reason: 'deployment_version_not_found',
         error: 'Deployment version not found',
+      }
+    }
+    if (targetVersion.preparationKind !== null) {
+      return {
+        success: false,
+        reason: 'invalid_transition',
+        error: 'Excel test snapshot cannot be activated',
       }
     }
 
@@ -744,7 +978,8 @@ export async function supersedeInFlightDeploymentOperations(
 async function prepareOperation(
   params: PrepareOperationBase,
   action: DeploymentOperationAction,
-  resolveTarget: ResolveOperationTarget
+  resolveTarget: ResolveOperationTarget,
+  excelSnapshot?: LockedExcelSnapshot
 ): Promise<PrepareDeploymentOperationResult> {
   const actorId = params.actorId.trim()
   const requestHash = params.requestHash.trim()
@@ -812,7 +1047,61 @@ async function prepareOperation(
             error: 'Idempotency key was already used for a different deployment request',
           }
         }
+        if (action === 'activate') {
+          const [target] = await tx
+            .select({ preparationKind: workflowDeploymentVersion.preparationKind })
+            .from(workflowDeploymentVersion)
+            .where(
+              and(
+                eq(workflowDeploymentVersion.id, existing.deploymentVersionId),
+                eq(workflowDeploymentVersion.workflowId, params.workflowId)
+              )
+            )
+            .limit(1)
+            .for('share')
+          if (!target || target.preparationKind !== null) {
+            return {
+              success: false,
+              reason: 'invalid_request',
+              error: 'Excel test snapshot cannot be activated',
+            }
+          }
+        }
         if (existing.status !== 'failed' && existing.status !== 'superseded') {
+          if (excelSnapshot) {
+            const [stored] = await tx
+              .select()
+              .from(workflowDeploymentVersion)
+              .where(
+                and(
+                  eq(workflowDeploymentVersion.id, existing.deploymentVersionId),
+                  eq(workflowDeploymentVersion.workflowId, params.workflowId)
+                )
+              )
+              .limit(1)
+            if (
+              !stored ||
+              stored.id !== existing.deploymentVersionId ||
+              stored.version !== existing.version
+            )
+              return excelSnapshotRefused(
+                { requestId: excelSnapshot.requestId, workflowId: params.workflowId },
+                'reused_version_row'
+              )
+            const expected = materializeExcelProcedureSnapshot(
+              excelSnapshot.capture,
+              excelSnapshot.current,
+              { id: stored.id, version: stored.version }
+            )
+            if (
+              stored.snapshotDigest !== expected.snapshotDigest ||
+              normalizedStringify(stored.state) !== normalizedStringify(expected.workflowState)
+            )
+              return excelSnapshotRefused(
+                { requestId: excelSnapshot.requestId, workflowId: params.workflowId },
+                'reused_version_mismatch'
+              )
+          }
           return { success: true, operation: existing, reused: true }
         }
         /**

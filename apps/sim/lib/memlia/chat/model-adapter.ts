@@ -24,6 +24,12 @@ export interface ModelAdapterOptions<Event, ToolResult> {
   limits?: Partial<ModelRunLimits>
 }
 
+export interface ToolActivity {
+  readonly active: number
+  readonly lastDispatch?: Readonly<{ id: number; toolId: string }>
+  readonly lastSettlement?: Readonly<{ id: number; toolId: string; status: 'fulfilled' | 'rejected' }>
+}
+
 export class ModelAdapterStop extends Error {
   constructor(readonly code: 'model_calls' | 'tool_calls' | 'duration' | 'tool_not_allowed') {
     super(`Model adapter stopped: ${code}`)
@@ -56,6 +62,9 @@ export function runModelAdapter<Event, ToolResult>(options: ModelAdapterOptions<
   const deadline = performance.now() + limits.maxDurationMs
   let modelCalls = 0
   let toolCalls = 0
+  let activeTools = 0
+  let lastDispatch: ToolActivity['lastDispatch']
+  let lastSettlement: ToolActivity['lastSettlement']
   let settled = false
   let reader: ReadableStreamDefaultReader<Event> | undefined
   let output: ReadableStreamDefaultController<Event>
@@ -108,16 +117,27 @@ export function runModelAdapter<Event, ToolResult>(options: ModelAdapterOptions<
       if (!allowedTools.has(toolId)) fail('tool_not_allowed')
       if (toolCalls >= limits.maxToolCalls) fail('tool_calls')
       toolCalls++
+      const invocation = Object.freeze({ id: toolCalls, toolId })
+      lastDispatch = invocation
+      activeTools++
+      const finish = (status: 'fulfilled' | 'rejected') => {
+        activeTools--
+        lastSettlement = Object.freeze({ ...invocation, status })
+      }
       // Reserve before yielding: provider loops may execute several tools at once.
       return new Promise<ToolResult>((resolve, reject) => {
         const cancelled = () => reject(abort.signal.reason)
         abort.signal.addEventListener('abort', cancelled, { once: true })
         try {
           options.dispatch(toolId, params, abort.signal).then((result) => {
-            checkActive()
-            resolve(result)
-          }).catch(reject).finally(() => abort.signal.removeEventListener('abort', cancelled))
+            finish('fulfilled')
+            try { checkActive(); resolve(result) } catch (error) { reject(error) }
+          }, (error) => {
+            finish('rejected')
+            reject(error)
+          }).finally(() => abort.signal.removeEventListener('abort', cancelled))
         } catch (error) {
+          finish('rejected')
           abort.signal.removeEventListener('abort', cancelled)
           reject(error)
         }
@@ -161,5 +181,11 @@ export function runModelAdapter<Event, ToolResult>(options: ModelAdapterOptions<
     },
   }, { highWaterMark: 0 })
 
-  return { stream, usage: () => ({ modelCalls, toolCalls }) }
+  return {
+    stream,
+    usage: () => ({ modelCalls, toolCalls }),
+    // Process-local observations only: no arguments, results or authority are retained.
+    // Cancellation does not pretend that an uncooperative dispatcher has settled.
+    toolActivity: (): ToolActivity => Object.freeze({ active: activeTools, lastDispatch, lastSettlement }),
+  }
 }

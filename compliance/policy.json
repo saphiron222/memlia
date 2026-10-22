@@ -328,7 +328,7 @@
   },
   "excluded_sources": {
     "apps/sim/lib/consent/scripts.ts": {
-      "reason": "Trackers et identifiants de suivi amont exclus ; module indépendant Memlia à fournir en P01, consommateurs Apache conservés.",
+      "reason": "Trackers et identifiants de suivi amont exclus ; module ind\u00e9pendant Memlia \u00e0 fournir en P01, consommateurs Apache conserv\u00e9s.",
       "sha256": "ee3e80bed13dcfb1f2173c09e0cd580d82aa9a03ed5483c2fd301c12de6e5808"
     }
   },
@@ -337,410 +337,410 @@
       "findings": [
         {
           "line": 389,
-          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
           "rule": "secret-signature"
         },
         {
           "line": 403,
-          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
           "rule": "secret-signature"
         }
       ],
-      "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+      "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
       "sha256": "6c67db3302f33b7ea9e0b6993c84c39c38d0031b077db53f52eb4fa0b9e5eb8c"
     },
     "apps/sim/app/api/v2/credentials/[credentialId]/route.test.ts": {
       "findings": [
         {
           "line": 129,
-          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
           "rule": "secret-signature"
         },
         {
           "line": 141,
-          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
           "rule": "secret-signature"
         }
       ],
-      "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+      "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
       "sha256": "613ddc1fada4b6b7420c577a3fbd126ef789656ba090b478a0aa02a5cbc00f20"
     },
     "apps/sim/app/api/v2/credentials/route.test.ts": {
       "findings": [
         {
           "line": 228,
-          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
           "rule": "secret-signature"
         },
         {
           "line": 245,
-          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
           "rule": "secret-signature"
         }
       ],
-      "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+      "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
       "sha256": "06564537093189f541163fe83e3754eb109e10ed27cd013660d8a51f63527134"
     },
     "apps/sim/app/workspace/[workspaceId]/integrations/components/connect-service-account-modal/connect-service-account-modal.tsx": {
       "findings": [
         {
           "line": 439,
-          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
           "rule": "secret-signature"
         }
       ],
-      "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+      "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
       "sha256": "b0cc0dae64d9e983afd292689632dba475d8dcb402afcf8c5e6b22701d799835"
     },
     "apps/sim/blocks/blocks/cloudtrail.test.ts": {
       "findings": [
         {
           "line": 31,
-          "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examinés.",
+          "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examin\u00e9s.",
           "rule": "secret-signature"
         },
         {
           "line": 44,
-          "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examinés.",
+          "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examin\u00e9s.",
           "rule": "secret-signature"
         }
       ],
-      "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examinés.",
+      "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examin\u00e9s.",
       "sha256": "ad508d82f958aa3ca99063c32f23acd16f01a60ee81a7887ae116f47288ba420"
     },
     "apps/sim/blocks/blocks/iam.test.ts": {
       "findings": [
         {
           "line": 17,
-          "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examinés.",
+          "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examin\u00e9s.",
           "rule": "secret-signature"
         }
       ],
-      "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examinés.",
+      "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examin\u00e9s.",
       "sha256": "da749555c8d845b6a0f4f418cac0b829b10682de3eebb675ab9bba956a7c87f1"
     },
     "apps/sim/blocks/blocks/pi.ts": {
       "findings": [
         {
           "line": 454,
-          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
           "rule": "secret-signature"
         }
       ],
-      "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+      "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
       "sha256": "9bbc8aff5423d2b1006f4cb0204b9a1e627ee019253e9f10194ca4c123a63b46"
     },
     "apps/sim/blocks/blocks/sftp.ts": {
       "findings": [
         {
           "line": 106,
-          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
           "rule": "secret-signature"
         }
       ],
-      "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+      "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
       "sha256": "ab1c1cf1a5c47f6b85867d861d563f7eece2e7e1d09fa76885e709df3746ab79"
     },
     "apps/sim/blocks/blocks/sqs.test.ts": {
       "findings": [
         {
           "line": 11,
-          "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examinés.",
+          "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examin\u00e9s.",
           "rule": "secret-signature"
         }
       ],
-      "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examinés.",
+      "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examin\u00e9s.",
       "sha256": "b4ca08c25825f12c4f3cf8f0402d2487072427d3bb171fd5e01e9c687a399d22"
     },
     "apps/sim/blocks/blocks/ssh.ts": {
       "findings": [
         {
           "line": 157,
-          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
           "rule": "secret-signature"
         }
       ],
-      "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+      "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
       "sha256": "a3c47fe6ca66e788957d8c3298ba4d9ddbfb1496e8d2f4397c451cff61843e96"
     },
     "apps/sim/connectors/google-drive/google-drive.test.ts": {
       "findings": [
         {
           "line": 283,
-          "reason": "Chaînes synthétiques examinées dans tests de rédaction ou refus de credentials : suites alphabétiques, marqueurs descriptifs ou clés volontairement invalides.",
+          "reason": "Cha\u00eenes synth\u00e9tiques examin\u00e9es dans tests de r\u00e9daction ou refus de credentials : suites alphab\u00e9tiques, marqueurs descriptifs ou cl\u00e9s volontairement invalides.",
           "rule": "secret-signature"
         }
       ],
-      "reason": "Chaînes synthétiques examinées dans tests de rédaction ou refus de credentials : suites alphabétiques, marqueurs descriptifs ou clés volontairement invalides.",
+      "reason": "Cha\u00eenes synth\u00e9tiques examin\u00e9es dans tests de r\u00e9daction ou refus de credentials : suites alphab\u00e9tiques, marqueurs descriptifs ou cl\u00e9s volontairement invalides.",
       "sha256": "aa4efe41f148c2b1b04b53e5bcda2996626501e013e4709811675882a87abee1"
     },
     "apps/sim/connectors/s3/meta.ts": {
       "findings": [
         {
           "line": 23,
-          "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examinés.",
+          "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examin\u00e9s.",
           "rule": "secret-signature"
         }
       ],
-      "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examinés.",
+      "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examin\u00e9s.",
       "sha256": "4fda567a1de521f70b12108ca86540e482846f62a605cd6537da77126ed75901"
     },
     "apps/sim/lib/core/security/linear-regex.test.ts": {
       "findings": [
         {
           "line": 342,
-          "reason": "Chaînes synthétiques examinées dans tests de rédaction ou refus de credentials : suites alphabétiques, marqueurs descriptifs ou clés volontairement invalides.",
+          "reason": "Cha\u00eenes synth\u00e9tiques examin\u00e9es dans tests de r\u00e9daction ou refus de credentials : suites alphab\u00e9tiques, marqueurs descriptifs ou cl\u00e9s volontairement invalides.",
           "rule": "secret-signature"
         }
       ],
-      "reason": "Chaînes synthétiques examinées dans tests de rédaction ou refus de credentials : suites alphabétiques, marqueurs descriptifs ou clés volontairement invalides.",
+      "reason": "Cha\u00eenes synth\u00e9tiques examin\u00e9es dans tests de r\u00e9daction ou refus de credentials : suites alphab\u00e9tiques, marqueurs descriptifs ou cl\u00e9s volontairement invalides.",
       "sha256": "ab630d6a804fe9dc3ff78e3f2ef4d7e5dc5d04d863b10490970ddf54c47b6dcd"
     },
     "apps/sim/lib/credentials/application/provider-catalog.ts": {
       "findings": [
         {
           "line": 271,
-          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
           "rule": "secret-signature"
         }
       ],
-      "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+      "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
       "sha256": "bdc666b0fc8205c0150707db18650c73a49851a802ce6fddefaf5ff16ac6c0fb"
     },
     "apps/sim/lib/credentials/client-credential-accounts/descriptors.ts": {
       "findings": [
         {
           "line": 551,
-          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
           "rule": "secret-signature"
         },
         {
           "line": 659,
-          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
           "rule": "secret-signature"
         }
       ],
-      "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+      "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
       "sha256": "28270e07589745f32203618cb08b9a9ae02370b8600fb899bbf750c28309b45d"
     },
     "apps/sim/lib/credentials/client-credential-accounts/minters/salesforce.ts": {
       "findings": [
         {
           "line": 208,
-          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
           "rule": "secret-signature"
         },
         {
           "line": 209,
-          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
           "rule": "secret-signature"
         }
       ],
-      "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+      "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
       "sha256": "b67d4d04403da4ac71143aded486629d51e0efb00a367958c0170c184fa47640"
     },
     "apps/sim/lib/credentials/client-credential-accounts/server.test.ts": {
       "findings": [
         {
           "line": 52,
-          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
           "rule": "secret-signature"
         },
         {
           "line": 87,
-          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
           "rule": "secret-signature"
         },
         {
           "line": 99,
-          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
           "rule": "secret-signature"
         }
       ],
-      "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+      "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
       "sha256": "e40a48903a0f1dbc874beb76655214d7bcea204fafbd51fdaee0acbc409e39f4"
     },
     "apps/sim/lib/credentials/oracledb-service-account.server.test.ts": {
       "findings": [
         {
           "line": 24,
-          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
           "rule": "secret-signature"
         }
       ],
-      "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+      "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
       "sha256": "60eef4cd4cd90b15c3273435ccb60e4a8ef117eee1c3e222504c514b01797b20"
     },
     "apps/sim/lib/credentials/orchestration/index.test.ts": {
       "findings": [
         {
           "line": 376,
-          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
           "rule": "secret-signature"
         },
         {
           "line": 384,
-          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
           "rule": "secret-signature"
         }
       ],
-      "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+      "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
       "sha256": "050a814556d528f611fe8acc5828358a26977e4992a33245511df9eb4f3636db"
     },
     "apps/sim/lib/credentials/service-account-secret.test.ts": {
       "findings": [
         {
           "line": 131,
-          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
           "rule": "secret-signature"
         },
         {
           "line": 140,
-          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
           "rule": "secret-signature"
         },
         {
           "line": 285,
-          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
           "rule": "secret-signature"
         },
         {
           "line": 290,
-          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
           "rule": "secret-signature"
         }
       ],
-      "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+      "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
       "sha256": "918457359c61fe58991a19a16885880b20a7c86af8c007a04e2b2bbefc230045"
     },
     "apps/sim/lib/data-drains/destinations/bigquery.test.ts": {
       "findings": [
         {
           "line": 36,
-          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
           "rule": "secret-signature"
         }
       ],
-      "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+      "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
       "sha256": "39d38577871edc69e40299ee9a0cdfb307f0a6e129fe103118515505e7898586"
     },
     "apps/sim/lib/data-drains/destinations/gcs.test.ts": {
       "findings": [
         {
           "line": 24,
-          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
           "rule": "secret-signature"
         }
       ],
-      "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+      "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
       "sha256": "c5036d6f6544885058d5d9502d3807976ee489121f58af370585263743c56222"
     },
     "apps/sim/lib/data-drains/destinations/snowflake.ts": {
       "findings": [
         {
           "line": 168,
-          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
           "rule": "secret-signature"
         }
       ],
-      "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+      "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
       "sha256": "ff8a62995e33fdfacc2104e0a288f87016e810085eff05e404e028f9a2eedbfb"
     },
     "apps/sim/lib/internal/oracledb/oracle-worker.test.ts": {
       "findings": [
         {
           "line": 521,
-          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
           "rule": "secret-signature"
         }
       ],
-      "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+      "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
       "sha256": "8174e463a837487f939baad37e9886be9bb3aa90292a4f164c74aa619a328493"
     },
     "apps/sim/lib/knowledge/__integration__/providers-live.integration.ts": {
       "findings": [
         {
           "line": 361,
-          "reason": "Chaînes synthétiques examinées dans tests de rédaction ou refus de credentials : suites alphabétiques, marqueurs descriptifs ou clés volontairement invalides.",
+          "reason": "Cha\u00eenes synth\u00e9tiques examin\u00e9es dans tests de r\u00e9daction ou refus de credentials : suites alphab\u00e9tiques, marqueurs descriptifs ou cl\u00e9s volontairement invalides.",
           "rule": "secret-signature"
         },
         {
           "line": 484,
-          "reason": "Chaînes synthétiques examinées dans tests de rédaction ou refus de credentials : suites alphabétiques, marqueurs descriptifs ou clés volontairement invalides.",
+          "reason": "Cha\u00eenes synth\u00e9tiques examin\u00e9es dans tests de r\u00e9daction ou refus de credentials : suites alphab\u00e9tiques, marqueurs descriptifs ou cl\u00e9s volontairement invalides.",
           "rule": "secret-signature"
         },
         {
           "line": 560,
-          "reason": "Chaînes synthétiques examinées dans tests de rédaction ou refus de credentials : suites alphabétiques, marqueurs descriptifs ou clés volontairement invalides.",
+          "reason": "Cha\u00eenes synth\u00e9tiques examin\u00e9es dans tests de r\u00e9daction ou refus de credentials : suites alphab\u00e9tiques, marqueurs descriptifs ou cl\u00e9s volontairement invalides.",
           "rule": "secret-signature"
         }
       ],
-      "reason": "Chaînes synthétiques examinées dans tests de rédaction ou refus de credentials : suites alphabétiques, marqueurs descriptifs ou clés volontairement invalides.",
+      "reason": "Cha\u00eenes synth\u00e9tiques examin\u00e9es dans tests de r\u00e9daction ou refus de credentials : suites alphab\u00e9tiques, marqueurs descriptifs ou cl\u00e9s volontairement invalides.",
       "sha256": "a510a47fda2a2a9401ae4456072c16a4437c2056c046f8b028e0d3ce6f282648"
     },
     "apps/sim/lib/mcp/error-diagnostics.test.ts": {
       "findings": [
         {
           "line": 6,
-          "reason": "Chaînes synthétiques examinées dans tests de rédaction ou refus de credentials : suites alphabétiques, marqueurs descriptifs ou clés volontairement invalides.",
+          "reason": "Cha\u00eenes synth\u00e9tiques examin\u00e9es dans tests de r\u00e9daction ou refus de credentials : suites alphab\u00e9tiques, marqueurs descriptifs ou cl\u00e9s volontairement invalides.",
           "rule": "secret-signature"
         }
       ],
-      "reason": "Chaînes synthétiques examinées dans tests de rédaction ou refus de credentials : suites alphabétiques, marqueurs descriptifs ou clés volontairement invalides.",
+      "reason": "Cha\u00eenes synth\u00e9tiques examin\u00e9es dans tests de r\u00e9daction ou refus de credentials : suites alphab\u00e9tiques, marqueurs descriptifs ou cl\u00e9s volontairement invalides.",
       "sha256": "c314980e3251259e253bd4c8935bac2b25f9bfcde405ec54a0ff2cc2eefec486"
     },
     "apps/sim/lib/messaging/email/providers/gmail.test.ts": {
       "findings": [
         {
           "line": 34,
-          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
           "rule": "secret-signature"
         }
       ],
-      "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+      "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
       "sha256": "f7d024de5ddec390e66384aa6c28f90f43868ada560bc941ce86465c54b4da77"
     },
     "apps/sim/providers/bedrock/index.test.ts": {
       "findings": [
         {
           "line": 129,
-          "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examinés.",
+          "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examin\u00e9s.",
           "rule": "secret-signature"
         },
         {
           "line": 146,
-          "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examinés.",
+          "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examin\u00e9s.",
           "rule": "secret-signature"
         },
         {
           "line": 153,
-          "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examinés.",
+          "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examin\u00e9s.",
           "rule": "secret-signature"
         }
       ],
-      "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examinés.",
+      "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examin\u00e9s.",
       "sha256": "b309942d129c40e9aea29474e52032601346cf9aedc56e837f5050d22748662c"
     },
     "apps/sim/tools/kalshi/types.ts": {
       "findings": [
         {
           "line": 432,
-          "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+          "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
           "rule": "secret-signature"
         }
       ],
-      "reason": "En-têtes de format PEM sans matériau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examinés.",
+      "reason": "En-t\u00eates de format PEM sans mat\u00e9riau cryptographique : placeholders, documentation, assemblage de format ou corps fictifs de tests examin\u00e9s.",
       "sha256": "31ed9857fc0b5d41311c5b69cdb955aae8962aad892243386dfcf398e6dfe470"
     },
     "apps/sim/tools/sqs/contract-guards.test.ts": {
       "findings": [
         {
           "line": 19,
-          "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examinés.",
+          "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examin\u00e9s.",
           "rule": "secret-signature"
         }
       ],
-      "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examinés.",
+      "reason": "Identifiants AWS EXAMPLE explicitement fictifs dans placeholders/tests examin\u00e9s.",
       "sha256": "e350bde5faa18eee33521a853e750a914085a679aa6dce18bbc780c0ce74e083"
     }
   },
@@ -753,7 +753,7 @@
       "lines": [
         28
       ],
-      "reason": "runtime desktop macOS : __dirname/native/help-search.node. Admission du code source exact uniquement ; Compiler le bridge natif avec provenance des outils, SHA et dépendances système ; contrôler archive desktop finale. Binaire non présent/admis actuellement.",
+      "reason": "runtime desktop macOS : __dirname/native/help-search.node. Admission du code source exact uniquement ; Compiler le bridge natif avec provenance des outils, SHA et d\u00e9pendances syst\u00e8me ; contr\u00f4ler archive desktop finale. Binaire non pr\u00e9sent/admis actuellement.",
       "source": {
         "repository": "https://github.com/simstudioai/sim",
         "commit": "c6cef5f87b6a1d1d01df89e7140bad9e9fd4c2e2",
@@ -776,7 +776,7 @@
       "lines": [
         30
       ],
-      "reason": "runtime desktop : app.getAppPath()/dist/native/directory.node. Admission du code source exact uniquement ; Compiler/inspecter bridge directory.node et son archive réelle, vérifier relocalisation app.getAppPath, SHA/binaire et licences. Aucune preuve desktop finale P01.",
+      "reason": "runtime desktop : app.getAppPath()/dist/native/directory.node. Admission du code source exact uniquement ; Compiler/inspecter bridge directory.node et son archive r\u00e9elle, v\u00e9rifier relocalisation app.getAppPath, SHA/binaire et licences. Aucune preuve desktop finale P01.",
       "source": {
         "repository": "https://github.com/simstudioai/sim",
         "commit": "c6cef5f87b6a1d1d01df89e7140bad9e9fd4c2e2",
@@ -799,7 +799,7 @@
       "lines": [
         85
       ],
-      "reason": "test docs : require.resolve('next/dist/esm/server/lib/patch-set-header.js') converti en file URL. Admission du code source exact uniquement ; Vérifier version/lock et SHA du fichier installé ; exécuter script avec rapport local, aucun changement des merges de headers.",
+      "reason": "test docs : require.resolve('next/dist/esm/server/lib/patch-set-header.js') converti en file URL. Admission du code source exact uniquement ; V\u00e9rifier version/lock et SHA du fichier install\u00e9 ; ex\u00e9cuter script avec rapport local, aucun changement des merges de headers.",
       "source": {
         "repository": "https://github.com/simstudioai/sim",
         "commit": "c6cef5f87b6a1d1d01df89e7140bad9e9fd4c2e2",
@@ -822,7 +822,7 @@
       "lines": [
         13
       ],
-      "reason": "runtime serveur standalone : ./server.js généré par Next, adjacent au bootstrap déployé. Admission du code source exact uniquement ; Inspecter le vrai server.js et tous chunks/maps/standalone/couche image, vérifier présence/absence EE et bibliothèques non admises avant gate artefact. Aucune déclaration module fictive ajoutée.",
+      "reason": "runtime serveur standalone : ./server.js g\u00e9n\u00e9r\u00e9 par Next, adjacent au bootstrap d\u00e9ploy\u00e9. Admission du code source exact uniquement ; Inspecter le vrai server.js et tous chunks/maps/standalone/couche image, v\u00e9rifier pr\u00e9sence/absence EE et biblioth\u00e8ques non admises avant gate artefact. Aucune d\u00e9claration module fictive ajout\u00e9e.",
       "source": {
         "repository": "https://github.com/simstudioai/sim",
         "commit": "c6cef5f87b6a1d1d01df89e7140bad9e9fd4c2e2",
@@ -840,7 +840,7 @@
       "lines": [
         47
       ],
-      "reason": "test unitaire hors réseau : tmpdir créé par mkdtemp + extension.mjs écrit depuis PI_SEARCH_EXTENSION_SOURCE. Admission du code source exact uniquement ; Hash des sources de génération et des imports transitifs ; inspecter bytes générés, tests hors réseau, suppression du répertoire temporaire.",
+      "reason": "test unitaire hors r\u00e9seau : tmpdir cr\u00e9\u00e9 par mkdtemp + extension.mjs \u00e9crit depuis PI_SEARCH_EXTENSION_SOURCE. Admission du code source exact uniquement ; Hash des sources de g\u00e9n\u00e9ration et des imports transitifs ; inspecter bytes g\u00e9n\u00e9r\u00e9s, tests hors r\u00e9seau, suppression du r\u00e9pertoire temporaire.",
       "source": {
         "repository": "https://github.com/simstudioai/sim",
         "commit": "c6cef5f87b6a1d1d01df89e7140bad9e9fd4c2e2",
@@ -867,7 +867,7 @@
       "lines": [
         57
       ],
-      "reason": "test unitaire hors réseau : tmpdir créé par mkdtemp + extension.mjs écrit depuis PI_SEARCH_EXTENSION_SOURCE. Admission du code source exact uniquement ; Hash des sources/génération ; preuve des tests hors réseau ; ne jamais appeler les providers de production.",
+      "reason": "test unitaire hors r\u00e9seau : tmpdir cr\u00e9\u00e9 par mkdtemp + extension.mjs \u00e9crit depuis PI_SEARCH_EXTENSION_SOURCE. Admission du code source exact uniquement ; Hash des sources/g\u00e9n\u00e9ration ; preuve des tests hors r\u00e9seau ; ne jamais appeler les providers de production.",
       "source": {
         "repository": "https://github.com/simstudioai/sim",
         "commit": "c6cef5f87b6a1d1d01df89e7140bad9e9fd4c2e2",
@@ -912,7 +912,7 @@
       "lines": [
         77
       ],
-      "reason": "helper de tests contrats : listContractFiles() sous apps/sim/lib/api/contracts, fichiers .ts non test. Admission du code source exact uniquement ; Même manifeste borné et inspection de chaque cible que list-pagination ; vérifier aucun consumer runtime n’importe ce helper.",
+      "reason": "helper de tests contrats : listContractFiles() sous apps/sim/lib/api/contracts, fichiers .ts non test. Admission du code source exact uniquement ; M\u00eame manifeste born\u00e9 et inspection de chaque cible que list-pagination ; v\u00e9rifier aucun consumer runtime n\u2019importe ce helper.",
       "source": {
         "repository": "https://github.com/simstudioai/sim",
         "commit": "c6cef5f87b6a1d1d01df89e7140bad9e9fd4c2e2",
@@ -930,7 +930,7 @@
       "lines": [
         55
       ],
-      "reason": "test exhaustivité outbox : findHandlerMapExports() : fichiers TS/TSX sous apps/sim exportant <name>OutboxHandlers. Admission du code source exact uniquement ; Manifeste exact des candidats, gate de sources sur chaque cible, refus symlinks/EE/nouveaux modules non examinés ; exécuter test exhaustif.",
+      "reason": "test exhaustivit\u00e9 outbox : findHandlerMapExports() : fichiers TS/TSX sous apps/sim exportant <name>OutboxHandlers. Admission du code source exact uniquement ; Manifeste exact des candidats, gate de sources sur chaque cible, refus symlinks/EE/nouveaux modules non examin\u00e9s ; ex\u00e9cuter test exhaustif.",
       "source": {
         "repository": "https://github.com/simstudioai/sim",
         "commit": "c6cef5f87b6a1d1d01df89e7140bad9e9fd4c2e2",
@@ -952,7 +952,7 @@
         130,
         245
       ],
-      "reason": "Générateur CLI de développement Apache exact hors deux notices : ROOT fixé par import.meta.url, quatre cibles littérales path.join et contrats .ts immédiats isFile/non-test/non-index sous répertoire fixe. Aucun chemin utilisateur ou environnement. Admission du chargeur source exact uniquement ; cibles versionnées inspectées par la gate complète ; aucune admission de binaire ou de module futur. Revoir tout changement du loader et de ses cibles.",
+      "reason": "G\u00e9n\u00e9rateur CLI de d\u00e9veloppement Apache exact hors deux notices : ROOT fix\u00e9 par import.meta.url, quatre cibles litt\u00e9rales path.join et contrats .ts imm\u00e9diats isFile/non-test/non-index sous r\u00e9pertoire fixe. Aucun chemin utilisateur ou environnement. Admission du chargeur source exact uniquement ; cibles versionn\u00e9es inspect\u00e9es par la gate compl\u00e8te ; aucune admission de binaire ou de module futur. Revoir tout changement du loader et de ses cibles.",
       "source": {
         "repository": "https://github.com/simstudioai/sim",
         "commit": "c6cef5f87b6a1d1d01df89e7140bad9e9fd4c2e2",
@@ -1164,6 +1164,78 @@
         }
       ],
       "enumeratedTargets": null
+    },
+    {
+      "path": "scripts/ci/linux-chat-fixture.ts",
+      "sha256": "9b96045cb576a3c57653ccecd2ee94937fd5ed0288ad6edeac0acd97bf4cafab",
+      "lines": [
+        32,
+        235,
+        237
+      ],
+      "reason": "Fixture CI Memlia native, source exacte uniquement : createRequire('/work/packages/db/package.json') r\u00e9sout le litt\u00e9ral postgres ; createRequire('/work/apps/sim/package.json') r\u00e9sout le litt\u00e9ral better-auth/crypto ; le second chargeur DB r\u00e9sout encore postgres. Packages existants verrouill\u00e9s postgres3.4.9 (Unlicense) et better-auth1.6.27 (MIT), aucune cible issue d\u2019une entr\u00e9e utilisateur ni EE. Les imports des fonctions produit restent litt\u00e9raux et contr\u00f4l\u00e9s normalement. Cette revue de trois expressions exactes n\u2019admet ni code g\u00e9n\u00e9r\u00e9, artefact, nouvelle cible ou modification future du fichier ; qualification r\u00e9elle PostgreSQL/Chromium distincte."
+    },
+    {
+      "path": "apps/sim/lib/memlia/excel/execute-tool.server.test.ts",
+      "sha256": "9b11d27edbdcb74f0f44af7fef84abb36f0e2ff59207c4ed84f5949d8b8a4919",
+      "lines": [
+        182
+      ],
+      "reason": "Test Memlia natif, source exacte uniquement : createRequire(import.meta.url).resolve du litt\u00e9ral pg-boss r\u00e9sout le point d\u2019entr\u00e9e install\u00e9 dist/index.js ; dirname/join du nom fixe worker.js puis pathToFileURL construisent la cible s\u0153ur dist/worker.js. Package existant pg-boss12.38.0 verrouill\u00e9, licence MIT v\u00e9rifi\u00e9e dans le LICENSE du package ; Worker natif export\u00e9 par d\u00e9faut, son import relatif tools.js reste dans ce package. Aucune cible issue d\u2019une entr\u00e9e utilisateur, du mod\u00e8le ou d\u2019EE. Seule l\u2019expression182 de ce blob exact est admise ; ni code g\u00e9n\u00e9r\u00e9, artefact, nouvelle cible ou modification future du fichier. Test de boucle Worker avec fetch contr\u00f4l\u00e9, sans base r\u00e9elle ; aucune qualification PostgreSQL/Excel/Linux/browser d\u00e9duite."
+    },
+    {
+      "path": "scripts/ci/linux-chat-fixture.ts",
+      "sha256": "d9dcc718ec38f7777bb8085a66c47e8108bdb12a47e4564ffa9b44674178323b",
+      "lines": [
+        50,
+        253,
+        255
+      ],
+      "reason": "Fixture CI Memlia native, source exacte uniquement : createRequire('/work/packages/db/package.json') r\u00e9sout le litt\u00e9ral postgres ; createRequire('/work/apps/sim/package.json') r\u00e9sout le litt\u00e9ral better-auth/crypto ; le second chargeur DB r\u00e9sout encore postgres. Packages existants verrouill\u00e9s postgres3.4.9 (Unlicense) et better-auth1.6.27 (MIT), aucune cible issue d\u2019une entr\u00e9e utilisateur ni EE. Les imports des fonctions produit restent litt\u00e9raux et contr\u00f4l\u00e9s normalement. Cette revue de trois expressions exactes n\u2019admet ni code g\u00e9n\u00e9r\u00e9, artefact, nouvelle cible ou modification future du fichier ; qualification r\u00e9elle PostgreSQL/Chromium distincte."
+    },
+    {
+      "path": "scripts/ci/linux-chat-fixture.ts",
+      "sha256": "7a1a3edc4048240ffab1dd86c096a784e4c7560d935d3ba60dfd6c7bfd8687d7",
+      "lines": [
+        50,
+        253,
+        255
+      ],
+      "reason": "Fixture CI Memlia native, source exacte uniquement : createRequire('/work/packages/db/package.json') r\u00e9sout le litt\u00e9ral postgres ; createRequire('/work/apps/sim/package.json') r\u00e9sout le litt\u00e9ral better-auth/crypto ; le second chargeur DB r\u00e9sout encore postgres. Packages existants verrouill\u00e9s postgres3.4.9 (Unlicense) et better-auth1.6.27 (MIT), aucune cible issue d\u2019une entr\u00e9e utilisateur ni EE. Les imports des fonctions produit restent litt\u00e9raux et contr\u00f4l\u00e9s normalement. Cette revue de trois expressions exactes n\u2019admet ni code g\u00e9n\u00e9r\u00e9, artefact, nouvelle cible ou modification future du fichier ; qualification r\u00e9elle PostgreSQL/Chromium distincte."
+    },
+    {
+      "path": "scripts/ci/linux-chat-fixture.ts",
+      "sha256": "a973b6e042d855b81db83f9ce27f0613c42d4be5c6474ad425828b434ab2149a",
+      "lines": [
+        79,
+        80,
+        223,
+        227,
+        305,
+        307,
+        334,
+        336,
+        338,
+        412
+      ],
+      "reason": "Fixture CI Memlia native, source exacte uniquement. fixtureSourceRoot admet exclusivement /work par d\u00e9faut ou /app exact, toute autre valeur refuse. createRequire fixe packages/db r\u00e9sout seulement postgres3.4.9 (Unlicense) et drizzle-orm0.45.2/migrator (Apache-2.0), apps/sim r\u00e9sout better-auth1.6.27/crypto (MIT), versions verrouill\u00e9es. Six imports produit fixes : packages/db/schema.ts, packages/db/script-migrations/index.ts, packages/db/db.ts, apps/sim/lib/core/config/redis.ts, apps/sim/lib/mothership/chat-status.ts, apps/sim/lib/users/account-deletion.ts. Aucune donn\u00e9e, nonce, DSN ou cookie ne construit une cible. Admission de ce blob et de ces dix expressions seulement ; ne dispense ni scan transitif ni artefacts ni qualification native. Revue ind\u00e9pendante Fondation le21octobre2026."
+    },
+    {
+      "path": "scripts/ci/linux-chat-fixture.ts",
+      "sha256": "eda2b9bd2112ce0ecb3468257cb56fa364b8b5b8f29fdaf37a0a99540b57bd1e",
+      "lines": [
+        122,
+        123,
+        266,
+        270,
+        348,
+        350,
+        377,
+        379,
+        381,
+        465
+      ],
+      "reason": "Fixture CI Memlia native, source exacte uniquement. fixtureSourceRoot admet exclusivement /work par d\u00e9faut ou /app exact, toute autre valeur refuse. createRequire fixe packages/db r\u00e9sout seulement postgres3.4.9 (Unlicense) et drizzle-orm0.45.2/migrator (Apache-2.0), apps/sim r\u00e9sout better-auth1.6.27/crypto (MIT), versions verrouill\u00e9es. Six imports produit fixes : packages/db/schema.ts, packages/db/script-migrations/index.ts, packages/db/db.ts, apps/sim/lib/core/config/redis.ts, apps/sim/lib/mothership/chat-status.ts, apps/sim/lib/users/account-deletion.ts. Aucune donn\u00e9e, nonce, DSN ou cookie ne construit une cible. Admission de ce blob et de ces dix expressions seulement ; ne dispense ni scan transitif ni artefacts ni qualification native. Revue ind\u00e9pendante Fondation le21octobre2026."
     }
   ]
 }

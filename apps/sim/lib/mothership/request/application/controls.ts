@@ -1,3 +1,4 @@
+// Modified by Memlia: preserve local Stop and refuse unsupported local steering.
 import type { SessionPrincipal } from '@sim/auth/principal'
 import { createLogger } from '@sim/logger'
 import { getErrorMessage } from '@sim/utils/errors'
@@ -20,6 +21,7 @@ import {
 } from '@/lib/mothership/chat/application/context'
 import { appendCopilotChatMessages } from '@/lib/mothership/chat/messages-store'
 import { deliverRunStop } from '@/lib/mothership/request/application/stop-delivery'
+import { classifyRunExecution } from '@/lib/mothership/request/lifecycle/recovery-config'
 import { requestStreamSteering } from '@/lib/mothership/request/session/steer'
 import { resolveActiveWorkspaceApplicationContext } from '@/lib/workspaces/application/context'
 
@@ -58,7 +60,8 @@ async function resolveRunContext({
 }) {
   const run = await getLatestRunForStream(input.streamId, principal.userId)
   if (!run?.chatId) throw new OrchestrationError('not_found', 'Stream not found')
-  return resolveAdmittedRunContext(principal, input, run)
+  const executionKind = classifyRunExecution(run.requestContext)
+  return { ...(await resolveAdmittedRunContext(principal, input, run)), executionKind }
 }
 
 async function resolveAdmittedRunContext(
@@ -179,8 +182,9 @@ export const abortRun = defineAuthorizedChatUseCase({
       clientWorkflowExecutionIds,
       sandboxProcesses,
     }))
-    const { settled, workerSettled } = await deliverRunStop(
-      { id: run.id, streamId, userId, chatId, desktopDeviceId: run.desktopDeviceId },
+    const executionKind = classifyRunExecution(run.requestContext)
+    const { settled, workerSettled, localControllerStopped } = await deliverRunStop(
+      { id: run.id, streamId, userId, chatId, desktopDeviceId: run.desktopDeviceId, executionKind },
       work
     )
     if (!settled) return { aborted: true, settled: false, forceReleased: true }
@@ -191,7 +195,12 @@ export const abortRun = defineAuthorizedChatUseCase({
       })
       return false
     })
-    return { aborted: true, settled: workerSettled && toolsSettled }
+    return {
+      aborted: true,
+      settled:
+        (executionKind === 'worker' ? workerSettled : localControllerStopped === true) &&
+        toolsSettled,
+    }
   },
 })
 
@@ -213,6 +222,8 @@ export const steerRun = defineAuthorizedChatUseCase({
     resolveRunContext(args),
   authorizationOptions: {},
   async execute({ input, context }) {
+    if (context.executionKind !== 'worker')
+      throw new OrchestrationError('validation', 'Local Chat steering is unavailable.')
     const { streamId, steeringId, content } = input
     const { userId, chatId } = context
     let queued = false

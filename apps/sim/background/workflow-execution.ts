@@ -1,4 +1,6 @@
+// Modified by Memlia in 2026. Upstream Apache-2.0 license and notices retained.
 import { trace } from '@opentelemetry/api'
+import type { ExcelTestExecutionBinding } from '@/lib/api/contracts/excel-test-preparations'
 import {
   parsePrincipal,
   type SerializedPrincipalV1,
@@ -42,7 +44,9 @@ import { LoggingSession } from '@/lib/logs/execution/logging-session'
 import { buildTraceSpans } from '@/lib/logs/execution/trace-spans/trace-spans'
 import { cleanupExecutionBase64Cache } from '@/lib/uploads/utils/user-file-base64.server'
 import { executeWorkflowCore } from '@/lib/workflows/executor/execution-core'
+import { authorizeExcelTestExecution, readExcelTestExecutionPermit } from '@/lib/workflows/executor/excel-test-admission'
 import { handlePostExecutionPauseState } from '@/lib/workflows/executor/pause-persistence'
+import { loadWorkflowDeploymentVersionState } from '@/lib/workflows/persistence/utils'
 import {
   isRecordedWorkflowFailure,
   resolveDeletedExecutionScope,
@@ -106,6 +110,7 @@ export type WorkflowExecutionPayload = {
    */
   enforceCredentialAccess?: boolean
   isPublicApiAccess?: boolean
+  excelTestExecution?: ExcelTestExecutionBinding
 }
 
 type LegacyWorkflowExecutionPayload = Omit<WorkflowExecutionPayload, 'principal'> & {
@@ -235,6 +240,21 @@ export async function executeWorkflowJob(
       let preprocessingRejection: PreprocessExecutionError | undefined
 
       try {
+        let testVersionId: string | undefined
+        let testWorkspaceId: string | undefined
+        if (payload.excelTestExecution !== undefined) {
+          if (principal.kind !== 'session' || payload.enforceCredentialAccess !== true ||
+            payload.isPublicApiAccess !== false || payload.admissionCompleted !== true ||
+            payload.executionMode !== 'async') throw new Error('Excel test execution refused')
+          const permit = await authorizeExcelTestExecution({ principal, input: {
+            workflowId, assertedWorkspaceId: payload.workspaceId, binding: payload.excelTestExecution,
+          } })
+          const binding = readExcelTestExecutionPermit(permit, {
+            principal, workflowId, userId: payload.userId, workspaceId: payload.workspaceId,
+          })
+          testVersionId = binding.prepared.deploymentVersionId
+          testWorkspaceId = binding.workspaceId
+        }
         const preprocessResult = await preprocessExecution({
           workflowId: payload.workflowId,
           userId: payload.userId,
@@ -242,7 +262,8 @@ export async function executeWorkflowJob(
           executionId: executionId,
           requestId: requestId,
           checkRateLimit: !admissionCompleted,
-          checkDeployment: true,
+          checkDeployment: testVersionId === undefined,
+          ...(testVersionId !== undefined ? { useAuthenticatedUserAsActor: true } : {}),
           skipUsageLimits: admissionCompleted,
           loggingSession: loggingSession,
           triggerData: { correlation },
@@ -266,10 +287,18 @@ export async function executeWorkflowJob(
         if (!workspaceId) {
           throw new Error(`Workflow ${workflowId} has no associated workspace`)
         }
+        if (testVersionId !== undefined &&
+          (actorUserId !== payload.userId || workspaceId !== testWorkspaceId))
+          throw new Error('Excel test execution refused')
 
         logger.info(`[${requestId}] Preprocessing passed. Using actor: ${actorUserId}`)
 
         const workflow = preprocessResult.workflowRecord!
+        const testState = testVersionId
+          ? await loadWorkflowDeploymentVersionState(workflowId, testVersionId, workspaceId)
+          : undefined
+        if (testState && testState.deploymentVersionId !== testVersionId)
+          throw new Error('Excel test execution refused')
 
         const metadata: ExecutionMetadata = {
           requestId,
@@ -284,6 +313,7 @@ export async function executeWorkflowJob(
           triggerType: payload.triggerType || 'api',
           triggerBlockId: payload.triggerBlockId,
           useDraftState: false,
+          ...(testState ? { workflowStateOverride: testState } : {}),
           startTime: new Date().toISOString(),
           isClientSession: false,
           enforceCredentialAccess: payload.enforceCredentialAccess ?? false,
@@ -297,7 +327,7 @@ export async function executeWorkflowJob(
           metadata,
           workflow,
           payload.input,
-          workflow.variables || {},
+          testState ? testState.variables ?? {} : workflow.variables || {},
           []
         )
 

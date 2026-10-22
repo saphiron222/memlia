@@ -1,3 +1,4 @@
+// Modified by Memlia: opt-in restricted local ZIP metadata for Office value previews.
 import { inflateRawSync } from 'zlib'
 import { createLogger } from '@sim/logger'
 import {
@@ -47,6 +48,8 @@ const COMPRESSION_METHOD_DEFLATE = 8
 const DATA_DESCRIPTOR_FLAG = 0x0008
 
 export interface OoxmlSizeLimits {
+  /** Opt-in for a restricted SheetJS profile: no local extras may override central sizes. */
+  rejectLocalExtraFields?: boolean
   /** Hard ceiling on the summed declared uncompressed size of all entries. */
   maxTotalUncompressedBytes: number
   /** Hard ceiling on any single entry's declared uncompressed size — the parser materializes an individual part (e.g. `document.xml`) into a DOM, or base64-embeds media, at a footprint many times the part size. */
@@ -335,7 +338,11 @@ function sumDeclaredUncompressedSize(
  * Returns an error message when the archive is lying or is shaped in a way that
  * cannot be verified, and `null` when every entry checks out.
  */
-function findInflationMismatch(buffer: Buffer, location: CentralDirectoryLocation): string | null {
+function findInflationMismatch(
+  buffer: Buffer,
+  location: CentralDirectoryLocation,
+  rejectLocalExtraFields = false
+): string | null {
   let cursor = location.offset
   let verified = 0
 
@@ -357,6 +364,12 @@ function findInflationMismatch(buffer: Buffer, location: CentralDirectoryLocatio
     }
     if (buffer.readUInt32LE(localHeaderOffset) !== LOCAL_FILE_HEADER_SIGNATURE) {
       return 'entry has an invalid local file header'
+    }
+
+    // CFB/SheetJS interprets ZIP64 local extras even without 32-bit sentinels.
+    // A restricted consumer can exclude these before its parser allocates output.
+    if (rejectLocalExtraFields && buffer.readUInt16LE(localHeaderOffset + 28) !== 0) {
+      return 'local extra fields are outside the restricted archive profile'
     }
 
     const dataStart =
@@ -592,7 +605,7 @@ export function assertOoxmlArchiveWithinLimits(
     )
   }
 
-  const mismatch = findInflationMismatch(buffer, location)
+  const mismatch = findInflationMismatch(buffer, location, limits.rejectLocalExtraFields === true)
   if (mismatch) {
     logger.warn('Rejected OOXML archive: declared sizes do not match actual contents', {
       reason: mismatch,

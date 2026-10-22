@@ -1,3 +1,4 @@
+// Modified by Memlia: local or unknown engine markers are never worker takeover candidates.
 import { db } from '@sim/db'
 import {
   type CopilotRunStatus,
@@ -520,6 +521,7 @@ export async function findAbandonedRecoverableRuns(
           inArray(copilotRuns.status, UNFINISHED_RUN_STATUSES),
           isNotNull(controllerToken),
           sql`${copilotRuns.requestContext}->'recovery'->>'kind' = 'interactive_stream'`,
+          not(sql`${copilotRuns.requestContext} ? 'localExecution'`),
           idleFor(ABANDONED_RUN_IDLE_MS),
           not(idleFor(ORPHANED_RUN_GRACE_MS)),
           not(stopRequested),

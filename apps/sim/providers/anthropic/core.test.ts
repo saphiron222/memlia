@@ -1,4 +1,4 @@
-import type Anthropic from '@anthropic-ai/sdk'
+import Anthropic from '@anthropic-ai/sdk'
 import { toolsMock, toolsMockFns } from '@sim/testing/mocks/tools.mock'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { StreamingExecution } from '@/executor/types'
@@ -672,7 +672,7 @@ describe('streaming', () => {
           text: 'settled answer',
           turn: 'pending',
         })
-        expect(events).toContainEqual({ type: 'turn_end', turn: 'final' })
+        expect(events).toContainEqual({ type: 'turn_end', turn: 'final', finishReason: 'end_turn' })
         expect(result.execution.output.content).toBe('settled answer')
         expect(result.execution.output.model).toBe(model)
         expect(
@@ -981,3 +981,85 @@ describe('unsupported thinking level logging', () => {
     expect(describeModelLevel('high')).toBe('high')
   })
 })
+
+// Real SDK and native loop; only its HTTP response is doubled, with no network.
+it.each(['end_turn', 'stop_sequence', 'max_tokens'] as const)(
+  'finish reason — native SDK preserves empty final %s and settled usage',
+  async (reason) => {
+    const events = [
+      {
+        type: 'message_start',
+        message: {
+          id: 'msg_fixture',
+          type: 'message',
+          role: 'assistant',
+          model: 'claude-haiku-5-5',
+          content: [],
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 10, output_tokens: 0 },
+        },
+      },
+      {
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'thinking', thinking: '', signature: '' },
+      },
+      { type: 'content_block_stop', index: 0 },
+      {
+        type: 'message_delta',
+        delta: { stop_reason: reason, stop_sequence: null },
+        usage: { output_tokens: 1024 },
+      },
+      { type: 'message_stop' },
+    ]
+    const fetch = vi.fn(
+      async () =>
+        new Response(
+          events.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join(''),
+          { headers: { 'content-type': 'text/event-stream' } }
+        )
+    )
+    const client = new Anthropic({ apiKey: 'fixture-key', maxRetries: 0, timeout: 1000, fetch })
+    const result = (await executeAnthropicProviderRequest(
+      {
+        model: 'claude-haiku-5-5',
+        apiKey: 'fixture-key',
+        maxTokens: 1024,
+        messages: [{ role: 'user', content: 'Fixture' }],
+        stream: true,
+        agentEvents: true,
+        tools: [
+          {
+            id: 'read_fixture',
+            name: 'Read fixture',
+            params: {},
+            parameters: { type: 'object', properties: {} },
+          },
+        ],
+      },
+      {
+        providerId: 'anthropic',
+        createClient: () => client,
+        logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+      }
+    )) as StreamingExecution
+    const reader = result.stream.getReader()
+    const observed = []
+    try {
+      for (;;) {
+        const next = await reader.read()
+        if (next.done) break
+        observed.push(next.value)
+      }
+    } finally {
+      reader.releaseLock()
+    }
+    expect(fetch).toHaveBeenCalledOnce()
+    expect(observed).toEqual([{ type: 'turn_end', turn: 'final', finishReason: reason }])
+    expect(result.execution.output.content).toBe('')
+    expect(result.execution.success).toBe(true)
+    expect(result.execution.output.tokens?.output).toBe(1024)
+    expect(result.execution.output.providerTiming?.timeSegments[0]?.finishReason).toBe(reason)
+  }
+)

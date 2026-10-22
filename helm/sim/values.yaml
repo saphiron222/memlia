@@ -1,4 +1,3 @@
-# Modified by Memlia in 2026. Upstream Apache-2.0 license and notices retained.
 # Global configuration
 global:
   # Image registry and pull policy

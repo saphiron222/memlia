@@ -338,6 +338,11 @@ export const env = createEnv({
     DOCKER_BUILD:                          z.boolean().optional(),                 // Flag indicating Docker build environment
     NEXT_BUILD_SKIP_TYPE_CHECK:            z.boolean().optional(),                 // Skips `next build`'s TypeScript pass where another CI job type-checks
 
+    // Modified by Memlia: server-only durable workflow selection; validation occurs at selection.
+    MEMLIA_DURABLE_WORKFLOWS_ENABLED:       z.string().optional(),                  // Exact "1" opts in; any other present value refuses
+    MEMLIA_PG_BOSS_ENABLED:                z.string().optional(),                  // Existing transport opt-in, exact "1"
+    MEMLIA_PG_BOSS_DATABASE_URL:            z.string().optional(),                  // Dedicated transport role; no web DSN fallback
+
     // Background Jobs & Scheduling
     TRIGGER_PROJECT_ID:                    z.string().optional(),                  // Trigger.dev project ID
     TRIGGER_SECRET_KEY:                    z.string().min(1).optional(),           // Trigger.dev secret key for background jobs

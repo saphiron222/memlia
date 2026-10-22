@@ -19,6 +19,7 @@ def fixture_environment():
         'MEMLIA_IMAGE_PREFIX': 'memlia-test.invalid/memlia',
         **{f'MEMLIA_{name}_SHA256': 'a' * 64 for name in ['WEB', 'REALTIME', 'MIGRATIONS', 'CRON']},
         'NEXT_PUBLIC_APP_URL': 'https://memlia.example.invalid',
+        'MEMLIA_CHAT_POLICY_SOURCE': '/etc/memlia/chat-policy.json',
         'POSTGRES_PASSWORD': 'synthetic-db-only',
         'DATABASE_URL': 'postgresql://memlia_web:synthetic@db:5432/memlia',
         'DATABASE_URL_REALTIME': 'postgresql://memlia_realtime:synthetic@db:5432/memlia',
@@ -55,6 +56,49 @@ class ComposeContract(unittest.TestCase):
                 result = resolve(values)
                 self.assertNotEqual(result.returncode, 0, key)
                 self.assertIn(key, result.stderr)
+
+    def test_local_chat_is_selected_without_worker_credentials(self):
+        env = self.services['web']['environment']
+        self.assertEqual(env.get('MEMLIA_CHAT_POLICY_FILE'), '/etc/memlia/chat-policy.json')
+        self.assertEqual(env.get('COPILOT_TOOL_PERMISSIONS_ENABLED'), 'true')
+        self.assertNotIn('COPILOT_API_KEY', env)
+        self.assertNotIn('COPILOT_API_KEY', fixture_environment())
+
+    def test_local_policy_bind_is_read_only_without_host_path_creation(self):
+        mounts = [m for m in self.services['web']['volumes']
+                  if m['target'] == '/etc/memlia/chat-policy.json']
+        self.assertEqual(len(mounts), 1)
+        mount = mounts[0]
+        self.assertEqual(mount['type'], 'bind')
+        self.assertEqual(mount['source'], fixture_environment()['MEMLIA_CHAT_POLICY_SOURCE'])
+        self.assertTrue(mount['read_only'])
+        self.assertFalse(mount['bind'].get('create_host_path', True))
+        self.assertEqual(self.services['web']['user'], '1001:1001')
+
+    def test_local_policy_is_only_visible_to_web(self):
+        for name in ['db', 'redis', 'cron', 'realtime', 'migrations']:
+            self.assertNotIn('MEMLIA_CHAT_POLICY_FILE', self.services[name].get('environment', {}))
+            self.assertNotIn('MEMLIA_CHAT_POLICY_SOURCE', self.services[name].get('environment', {}))
+            for mount in self.services[name].get('volumes', []):
+                self.assertNotEqual(mount['target'], '/etc/memlia/chat-policy.json')
+
+    def test_host_policy_source_can_change_without_changing_container_target(self):
+        values = fixture_environment()
+        values['MEMLIA_CHAT_POLICY_SOURCE'] = '/srv/cabinet/memlia/chat-policy.json'
+        # Inherited environment cannot override the deliberate server values.
+        values['MEMLIA_CHAT_POLICY_FILE'] = '/attacker-policy.json'
+        values['COPILOT_TOOL_PERMISSIONS_ENABLED'] = 'false'
+        values['COPILOT_API_KEY'] = 'synthetic-should-not-be-forwarded'
+        result = resolve(values)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        web = json.loads(result.stdout)['services']['web']
+        self.assertEqual(web['environment']['MEMLIA_CHAT_POLICY_FILE'], '/etc/memlia/chat-policy.json')
+        self.assertEqual(web['environment']['COPILOT_TOOL_PERMISSIONS_ENABLED'], 'true')
+        self.assertNotIn('COPILOT_API_KEY', web['environment'])
+        mounts = [m for m in web['volumes'] if m['target'] == '/etc/memlia/chat-policy.json']
+        self.assertEqual(mounts[0]['source'], values['MEMLIA_CHAT_POLICY_SOURCE'])
+        self.assertTrue(mounts[0]['read_only'])
+        self.assertFalse(mounts[0]['bind'].get('create_host_path', True))
 
     def test_secrets_are_scoped_to_their_consumers(self):
         values = fixture_environment()

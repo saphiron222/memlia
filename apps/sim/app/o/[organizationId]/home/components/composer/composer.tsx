@@ -1,5 +1,7 @@
 'use client'
 
+// Modified by Memlia: use the fixed product identity in native Chat labels.
+
 import { useEffect, useRef } from 'react'
 import { Chip, ComposerActionButton, cn, Tooltip, toast } from '@sim/emcn'
 import { ArrowUp, Paperclip, Plus, Search, Slash, StopFilled } from '@sim/emcn/icons'
@@ -169,7 +171,7 @@ export function Composer({
     isInitialView && !value,
     imagesOnly ? 'search' : 'build'
   )
-  const placeholder = isInitialView ? animatedPlaceholder : 'Send message to Sim'
+  const placeholder = isInitialView ? animatedPlaceholder : 'Send message to Memlia'
 
   const submit = () => {
     if (attachedFilesRef.current.some((file) => file.uploading)) return
@@ -211,7 +213,7 @@ export function Composer({
     <PromptEditor
       editor={editor}
       placeholder={placeholder}
-      aria-label='Ask Sim'
+      aria-label='Ask Memlia'
       onSubmit={submit}
       className={cn(
         'max-h-[200px] max-md:max-h-[min(200px,calc(var(--mobile-viewport-height,100dvh)*0.25))]',
@@ -309,7 +311,7 @@ export function Composer({
           onSubmit={submit}
           onPaste={editor.handlePaste}
           placeholder={placeholder}
-          aria-label='Ask Sim'
+          aria-label='Ask Memlia'
           leadingControls={leadingControls}
           voiceControl={voiceControl}
           submitControl={submitControl}

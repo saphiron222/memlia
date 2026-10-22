@@ -1,0 +1,146 @@
+# Copyright 2026 Memlia. All rights reserved.
+name: Tests rapides — contrats et Chat sans fournisseur réel
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/memlia-fast-tests.yml
+      - scripts/ci/**
+      - apps/sim/**
+      - packages/**
+      - package.json
+      - bun.lock
+      - bunfig.toml
+      - vitest.shared.ts
+  push:
+    branches: [main, memlia/integration]
+    paths:
+      - .github/workflows/memlia-fast-tests.yml
+      - scripts/ci/**
+      - apps/sim/**
+      - packages/**
+      - package.json
+      - bun.lock
+      - bunfig.toml
+      - vitest.shared.ts
+permissions:
+  contents: read
+concurrency:
+  group: memlia-fast-tests-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  fast-tests:
+    # No metered private/larger/self-hosted runner or protected credential.
+    if: github.event.repository.private == false && github.repository == 'saphiron222/memlia'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Vérifier le sélecteur sans build
+        run: python3 -B scripts/ci/test-fast-tests.py -v
+      - name: Installer le verrou puis tester sans réseau ni Next
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          private="$RUNNER_TEMP/memlia-fast-tests"
+          mkdir "$private" "$private/tools" "$private/scratch"
+          prefix="memlia-fast-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          image='node:24.22.0-bookworm@sha256:14078204b6bb268c107ceff6d3c43f45a888105e5c2b18b14c32b3409d93a1b0'
+          cleanup() {
+            local phase id present observed
+            for phase in install test; do
+              [[ -f "$private/$phase.cid" ]] || continue
+              id="$(cat "$private/$phase.cid")"
+              [[ "$id" =~ ^[a-f0-9]{64}$ ]] || return 1
+              present="$(timeout 10 docker container ls --all --no-trunc --format '{{.ID}}' --filter "id=$id")" || return 1
+              if [[ -n "$present" ]]; then
+                [[ "$present" == "$id" ]] || return 1
+                observed="$(timeout 10 docker inspect --format '{{.Id}} {{index .Config.Labels "org.memlia.fast-ci"}}' "$id")" || return 1
+                [[ "$observed" == "$id $prefix" ]] || return 1
+                timeout 10 docker rm --force "$id" > /dev/null || return 1
+                present="$(timeout 10 docker container ls --all --no-trunc --format '{{.ID}}' --filter "id=$id")" || return 1
+                [[ -z "$present" ]] || return 1
+              fi
+            done
+          }
+          trap 'code=$?; cleanup || code=1; exit "$code"' EXIT
+          timeout --kill-after=10s 180s docker pull --platform linux/amd64 "$image" > "$private/pull.log" 2>&1
+          curl --fail --location --silent --show-error --max-time 120 \
+            https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64.zip \
+            --output "$private/bun.zip"
+          printf '%s  %s\n' '36368faef7527875d5ffa52e53cd48021741f2a83eb6208a8dd64068d422a913' "$private/bun.zip" | sha256sum --check
+          unzip -q "$private/bun.zip" -d "$private/tools"
+          limits=(--platform linux/amd64 --user "$(id -u):$(id -g)" --read-only --cap-drop ALL \
+            --security-opt no-new-privileges:true --cpus 2 --memory 4g --memory-swap 4g --pids-limit 256 \
+            --tmpfs /tmp:rw,nosuid,nodev,size=512m --workdir /work \
+            --label "org.memlia.fast-ci=$prefix" \
+            --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/work" \
+            --mount "type=bind,src=$private/tools,dst=/tools,readonly" \
+            --mount "type=bind,src=$private/scratch,dst=/scratch" \
+            --env PATH=/tools/bun-linux-x64:/usr/local/bin:/usr/bin:/bin \
+            --env HOME=/scratch --env TMPDIR=/tmp --env CI=true --env PYTHONDONTWRITEBYTECODE=1 \
+            --env MEMLIA_FAST_CONTAINER=1)
+          # The existing PID1 supervisor owns this finite cgroup, its deadlines and cleanup.
+          timeout --signal=TERM --kill-after=10s 660s docker run --rm \
+            --name "$prefix-install" --cidfile "$private/install.cid" "${limits[@]}" "$image" \
+            python3 -B scripts/ci/linux-build-metrics.py --phase install --timeout 600 --report /scratch/install.json -- \
+            sh -ec 'test "$(node --version)" = v24.22.0; test "$(bun --version)" = 1.4.2; sha256sum bun.lock > /scratch/lock.sha256; bun install --frozen-lockfile --ignore-scripts; sha256sum --check /scratch/lock.sha256'
+          timeout --signal=TERM --kill-after=10s 660s docker run --rm --network none \
+            --name "$prefix-test" --cidfile "$private/test.cid" "${limits[@]}" "$image" \
+            python3 -B scripts/ci/linux-build-metrics.py --phase test --timeout 600 --report /scratch/test.json -- \
+            python3 -B scripts/ci/fast-tests.py --report /scratch/groups.json
+          # The dependency install and selected tests must not rewrite tracked sources.
+          git diff --exit-code
+      - name: Lire seulement les résultats fermés
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json,math,os,stat
+          from pathlib import Path
+          root=Path(os.environ['RUNNER_TEMP'])/'memlia-fast-tests/scratch'
+          if root.is_symlink() or root.parent.is_symlink(): raise SystemExit('Invalid receipt directory')
+          for name in ('install','test'):
+              path=root/(name+'.json')
+              if not path.exists(): continue
+              fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+              with os.fdopen(fd,'rb') as stream:
+                  if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode): raise SystemExit('Invalid receipt')
+                  data=stream.read(65537)
+              if len(data)>65536: raise SystemExit('Receipt exceeds bound')
+              value=json.loads(data)
+              if value['phase']!=name or value['status'] not in ('passed','failed'): raise SystemExit('Invalid phase')
+              code,seconds,peak=value['childExitCode'],value['seconds'],value['peakProcessRssBytes']
+              if code is not None and (type(code) is not int or not -255<=code<=255): raise SystemExit('Invalid exit code')
+              if type(seconds) not in (int,float) or not math.isfinite(seconds) or not 0<=seconds<=700: raise SystemExit('Invalid duration')
+              if type(peak) is not int or peak<0: raise SystemExit('Invalid memory')
+              if value['status']=='passed' and (code!=0 or value.get('descendantsAfterCleanup')!=0): raise SystemExit('Invalid success')
+              print(json.dumps({'phase':name,'status':value['status'],'childExitCode':value['childExitCode'],
+                                'seconds':value['seconds'],'peakProcessRssBytes':value['peakProcessRssBytes'],
+                                'cleanupEmpty':value.get('descendantsAfterCleanup')==0}))
+          path=root/'groups.json'
+          if path.exists():
+              fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+              with os.fdopen(fd,'rb') as stream:
+                  if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode): raise SystemExit('Invalid group receipt')
+                  data=stream.read(16385)
+              if len(data)>16384: raise SystemExit('Group receipt exceeds bound')
+              value=json.loads(data)
+              if set(value)!={'status','groups','nextBuildExecuted','liveProviderQualified','databaseQualified','cacheQualified'} or value['status'] not in ('passed','failed'): raise SystemExit('Invalid groups')
+              if any(value[k] is not False for k in ('nextBuildExecuted','liveProviderQualified','databaseQualified','cacheQualified')): raise SystemExit('Invalid scope')
+              if type(value['groups']) is not list or len(value['groups'])!=6: raise SystemExit('Invalid groups')
+              if value['status']=='passed' and any(item.get('status')!='passed' for item in value['groups']): raise SystemExit('Invalid aggregate success')
+              for item,expected in zip(value['groups'],('contracts','limiter','catalogue','chat','chat_ui','authority')):
+                  if set(item)!={'group','files','status','exitCode','reason','seconds'} or item['group']!=expected: raise SystemExit('Invalid group')
+                  if type(item['files']) is not int or not 1<=item['files']<=30: raise SystemExit('Invalid file count')
+                  if item['status'] not in ('passed','failed','not_run') or item['reason'] not in (None,'test_failed','timeout','tool_unavailable','interrupted'): raise SystemExit('Invalid group status')
+                  if item['exitCode'] is not None and (type(item['exitCode']) is not int or not -255<=item['exitCode']<=255): raise SystemExit('Invalid group exit')
+                  if type(item['seconds']) not in (int,float) or not math.isfinite(item['seconds']) or not 0<=item['seconds']<=190: raise SystemExit('Invalid group duration')
+                  if item['status']=='passed' and (item['exitCode']!=0 or item['reason'] is not None): raise SystemExit('Invalid group success')
+                  print(json.dumps(item))
+          PY
+      # No artifacts: logs/dependencies and synthetic fixtures remain on this ephemeral runner.

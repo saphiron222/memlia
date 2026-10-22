@@ -1,5 +1,7 @@
+// Modified by Memlia: display and preserve limited Chat response notices.
+import { buildCompletionNotice } from '@/lib/mothership/chat/completion-notice'
 import type { StreamHandler } from './types'
-import { flushSubagentThinkingBlock, flushThinkingBlock } from './types'
+import { addContentBlock, flushSubagentThinkingBlock, flushThinkingBlock } from './types'
 
 export const handleCompleteEvent: StreamHandler = (event, context) => {
   flushSubagentThinkingBlock(context)
@@ -22,6 +24,12 @@ export const handleCompleteEvent: StreamHandler = (event, context) => {
       output: (context.cost?.output || 0) + (event.payload.cost.output || 0),
       total: (context.cost?.total || 0) + (event.payload.cost.total || 0),
     }
+  }
+
+  const notice = !context.streamComplete ? buildCompletionNotice(event.payload) : undefined
+  if (notice) {
+    // Persist the same local display text as the live reducer; raw metadata stays out.
+    addContentBlock(context, { type: 'text', content: notice })
   }
 
   context.completionStatus = event.payload.status

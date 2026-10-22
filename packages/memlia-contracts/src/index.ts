@@ -3,6 +3,7 @@ import { PrincipalSchema, BindingSchema, DelegationSchema } from './identity.ts'
 import { WorkflowProposalSchema, ApprovalSchema } from './workflow.ts'
 import { JobEnvelopeSchema, RunReceiptSchema } from './jobs.ts'
 import { AgentCommandSchema, SessionCapabilitySchema } from './desktop.ts'
+import { AgentControlRequestSchema, AgentControlResponseSchema } from './agent-control.ts'
 import {
   ExcelProcedureSchema,
   SnapshotSchema,
@@ -13,6 +14,8 @@ export * from './identity.ts'
 export * from './workflow.ts'
 export * from './jobs.ts'
 export * from './desktop.ts'
+export * from './desktop-digest.ts'
+export * from './agent-control.ts'
 export * from './excel.ts'
 export const schemas = {
   Principal: PrincipalSchema,
@@ -24,6 +27,8 @@ export const schemas = {
   RunReceipt: RunReceiptSchema,
   AgentCommand: AgentCommandSchema,
   SessionCapability: SessionCapabilitySchema,
+  AgentControlRequest: AgentControlRequestSchema,
+  AgentControlResponse: AgentControlResponseSchema,
   ExcelProcedure: ExcelProcedureSchema,
   Snapshot: SnapshotSchema,
   PatchSet: PatchSetSchema,

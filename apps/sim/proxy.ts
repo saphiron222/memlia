@@ -1,3 +1,4 @@
+// Modified by Memlia: isolate Office desktop SDK headers on the exact taskpane path.
 import {
   LANDING_INTEGRATION_SLUGS,
   LANDING_SLUG_BY_DOCS_SLUG,
@@ -11,7 +12,7 @@ import { APP_ENTRY_PATH, isAppSurfacePath, isNoindexPath } from '@/lib/navigatio
 import { isOAuthAuthorizationCallback, resolveAuthRedirect } from '@/app/(auth)/auth-redirect'
 import { getEnv } from './lib/core/config/env'
 import { isAuthDisabled, isDev, isHosted } from './lib/core/config/env-flags'
-import { generateRuntimeCSP } from './lib/core/security/csp'
+import { generateRuntimeCSP, getOfficeTaskpaneCSPPolicy } from './lib/core/security/csp'
 import { getClientIp } from './lib/core/utils/request'
 import { isNonCanonicalSimHost } from './lib/core/utils/urls'
 
@@ -425,9 +426,18 @@ export function proxy(request: NextRequest) {
   if (securityBlock) return applyIndexingPolicy(request, securityBlock)
 
   const response = NextResponse.next()
-  response.headers.set('Content-Security-Policy', generateRuntimeCSP())
+  const officeTaskpane = url.pathname === '/excel-addin'
+  response.headers.set(
+    'Content-Security-Policy',
+    officeTaskpane ? getOfficeTaskpaneCSPPolicy() : generateRuntimeCSP()
+  )
   response.headers.set('X-Content-Type-Options', 'nosniff')
   response.headers.set('X-Frame-Options', 'SAMEORIGIN')
+  if (officeTaskpane) {
+    response.headers.set('Cross-Origin-Embedder-Policy', 'unsafe-none')
+    response.headers.set('X-Robots-Tag', 'noindex, nofollow')
+    response.headers.set('Cache-Control', 'no-store')
+  }
 
   return applyIndexingPolicy(request, response)
 }

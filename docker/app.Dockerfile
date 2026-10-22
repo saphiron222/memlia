@@ -1,7 +1,21 @@
+# Modified by Memlia, 2026: mandatory admitted source/lock build provenance.
 # ========================================
 # Base Stage: runtime-only dependencies (inherited by the final image)
 # ========================================
 FROM oven/bun:1.4.2-slim AS base
+ARG MEMLIA_SOURCE_COMMIT
+ARG MEMLIA_LOCK_SHA256
+COPY build-provenance /tmp/memlia-build
+COPY bun.lock /tmp/memlia-build/context-bun.lock
+# Verify admitted build provenance before installation.
+RUN set -eu; \
+    test "${#MEMLIA_SOURCE_COMMIT}" -eq 40; test "${#MEMLIA_LOCK_SHA256}" -eq 64; \
+    case "$MEMLIA_SOURCE_COMMIT$MEMLIA_LOCK_SHA256" in *[!0-9a-f]*) exit 1;; esac; \
+    test "$(cat /tmp/memlia-build/source)" = "$MEMLIA_SOURCE_COMMIT"; \
+    test "$(cat /tmp/memlia-build/lock)" = "$MEMLIA_LOCK_SHA256"; \
+    printf '%s  /tmp/memlia-build/bun.lock\n' "$MEMLIA_LOCK_SHA256" | sha256sum -c -; \
+    printf '%s  /tmp/memlia-build/context-bun.lock\n' "$MEMLIA_LOCK_SHA256" | sha256sum -c -
+# End build provenance.
 
 # Install Node.js 24 (Active LTS) and the runtime dependencies once in base.
 # Node runs the isolated-vm sandbox worker and the Oracle Database worker (the
@@ -45,9 +59,13 @@ COPY . .
 # Read the package name from the app manifest. The published CLI also owns the
 # `sim` package name, so a hard-coded historical name can silently prune the CLI
 # instead of the application after either package is renamed.
-RUN APP_PACKAGE_NAME="$(bun -e "console.log(require('./apps/sim/package.json').name)")" && \
+# Turbo cannot parse the leading attribution comment accepted by Bun. Derive
+# only its prune input; preserve the admitted lock and restore it for deps/build.
+RUN bun -e 'const fs=require("node:fs"),p="bun.lock",b=fs.readFileSync(p),o=fs.readFileSync("/tmp/memlia-build/bun.lock"),h=Buffer.from("// Modified by Memlia in 2026. Upstream Apache-2.0 license and notices retained.\n");if(!b.equals(o)||!b.subarray(0,h.length).equals(h)||b[h.length]!==123)throw new Error("prune_lock_refused");fs.writeFileSync(p,b.subarray(h.length));' && \
+    APP_PACKAGE_NAME="$(bun -e "console.log(require('./apps/sim/package.json').name)")" && \
     TURBO_VERSION="$(bun -e "console.log(require('./package.json').devDependencies.turbo)")" && \
-    bunx --bun "turbo@${TURBO_VERSION}" prune "$APP_PACKAGE_NAME" --docker
+    bunx --bun "turbo@${TURBO_VERSION}" prune "$APP_PACKAGE_NAME" --docker && \
+    cp /tmp/memlia-build/bun.lock ./bun.lock
 
 # ========================================
 # Dependencies Stage: Install Dependencies
@@ -138,6 +156,10 @@ RUN bun build apps/sim/bootstrap.ts --target=bun --outfile=apps/sim/bootstrap.js
 # ========================================
 
 FROM base AS runner
+ARG MEMLIA_SOURCE_COMMIT
+ARG MEMLIA_LOCK_SHA256
+LABEL org.memlia.source=$MEMLIA_SOURCE_COMMIT \
+      org.memlia.lock=$MEMLIA_LOCK_SHA256
 WORKDIR /app
 
 # Runtime flags override these image defaults; dev images opt into Plan.

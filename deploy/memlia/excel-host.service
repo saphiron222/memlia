@@ -1,0 +1,55 @@
+# Copyright (c) 2026 Memlia. All rights reserved.
+# Optional preparation, NOT qualified or enabled. Install only after the Linux
+# image/host/peer/worker recipe and review, from the same admitted release.
+# Operator installs root-owned host.py + supervisor.py + admission.py under
+# /opt/memlia/excel-host (directories0755/files0444, no symlink or writable parent).
+# /etc/memlia/excel/{host.env,admission.json,proof.json} are root-owned regular
+# files0400 with one link and protected parents. host.env contains ONLY the
+# MEMLIA_EXCEL_IMAGE_ID of the locally held image proven by these exact records.
+# Never install a synthetic proof or enable the service from a mere image hash.
+# This privileged host alone accesses /var/run/docker.sock; Next and the worker
+# never get that daemon socket. UID/GID1001 requires real Linux mapping checks.
+
+[Unit]
+Description=Memlia operator-owned Excel isolation host (qualification required)
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=exec
+User=root
+Group=1001
+UMask=0077
+EnvironmentFile=/etc/memlia/excel/host.env
+Environment=PATH=/usr/bin:/bin LANG=C.UTF-8
+WorkingDirectory=/opt/memlia/excel-host
+ExecStart=/usr/bin/python3 -I -B /opt/memlia/excel-host/host.py /run/memlia-excel/host.sock ${MEMLIA_EXCEL_IMAGE_ID} 1001 1001 --admission-file /etc/memlia/excel/admission.json
+# Keep the directory and any stale socket after stop/failure. host.py removes
+# only its verified socket on its own path; an unknown result needs operator
+# reconciliation. There is no ExecStartPre/ExecStopPost cleanup or blind restart.
+RuntimeDirectory=memlia-excel
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+Restart=no
+# SIGTERM only the host first, so its native supervisor can stop/reap its CLI
+# and owned container. Native host joins up to140s;160s allows this plus margin.
+# Final SIGKILL is containment, NEVER evidence of container cleanup/no effect.
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=160
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=CAP_CHOWN
+CPUQuota=100%
+MemoryMax=256M
+TasksMax=32
+LimitNOFILE=256
+LimitCORE=0
+StandardOutput=journal
+StandardError=journal
+# No [Install]: manual start is deliberate; exec success is not socket readiness,
+# clean job completion or an attestation that this runtime is safe to enable.

@@ -1,3 +1,4 @@
+// Modified by Memlia: validate and canonicalize native container counters before edits.
 import { createLogger } from '@sim/logger'
 import { toError } from '@sim/utils/errors'
 import { generateShortId } from '@sim/utils/id'
@@ -19,6 +20,7 @@ import {
   normalizeTuningValues,
 } from '@/lib/workflows/blocks/fallback-models'
 import { getCustomToolById } from '@/lib/workflows/custom-tools/operations'
+import { parseContainerCounter } from '@/lib/workflows/editing/container-types'
 import {
   type ReferenceValidationOptions,
   type SelectorReference,
@@ -145,7 +147,25 @@ export function validateInputsForBlock(
     const containerInputs: Record<string, any> = {}
     for (const [key, value] of Object.entries(inputs)) {
       if (containerFields.has(key)) {
-        containerInputs[key] = value
+        if (
+          (blockType === 'loop' && key === 'iterations') ||
+          (blockType === 'parallel' && key === 'count')
+        ) {
+          const count = parseContainerCounter(value)
+          if (count === undefined) {
+            errors.push({
+              blockId,
+              blockType,
+              field: key,
+              value,
+              error: `"${key}" must be a positive safe integer or a decimal string representing one`,
+            })
+            continue
+          }
+          containerInputs[key] = count
+        } else {
+          containerInputs[key] = value
+        }
         continue
       }
       errors.push({

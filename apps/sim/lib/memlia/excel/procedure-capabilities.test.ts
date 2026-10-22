@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs'
 import { type ExcelProcedure, ExcelProcedureSchema } from '@memlia/contracts'
 import { describe, expect, it, vi } from 'vitest'
 import { fixtures } from '../../../../../packages/memlia-contracts/tests/fixtures'
-import { inspectExcelProcedureCapabilities } from './procedure-capabilities'
+import { inspectExcelProcedureCapabilities, inspectExcelProcedureDraftCapabilities } from './procedure-capabilities'
 
 function recipe(): ExcelProcedure {
   const value = ExcelProcedureSchema.parse(structuredClone(fixtures.ExcelProcedure))
@@ -375,5 +375,79 @@ describe('Excel procedure primitive capability observation', () => {
     expect(JSON.stringify(result)).toBe(encoded)
     result.profile.sources[0].sha256 = 'caller-mutated'
     expect(inspect(recipe()).profile.sources[0].sha256).not.toBe('caller-mutated')
+  })
+})
+
+
+describe('P11 draft analysis shares the canonical business fields without invented identity', () => {
+  function draft() {
+    const full = recipe()
+    const {
+      schemaVersion,
+      organizationId,
+      workspaceId,
+      procedureId,
+      version,
+      parentVersion,
+      workflowId,
+      deployedVersionId,
+      ownerUserId,
+      digest,
+      policyVersion,
+      ...value
+    } = full
+    return value
+  }
+  it('accepts the known ordered select without publication identity', () => {
+    const result = inspectExcelProcedureDraftCapabilities(draft())
+    expect(result).toMatchObject({
+      schemaValid: true,
+      executionAvailable: false,
+      primitiveOptionsCompatible: true,
+      diagnostics: [],
+    })
+    expect(result).toEqual(inspectExcelProcedureCapabilities(recipe()))
+  })
+  it.each([
+    'schemaVersion',
+    'organizationId',
+    'workspaceId',
+    'procedureId',
+    'version',
+    'parentVersion',
+    'workflowId',
+    'deployedVersionId',
+    'ownerUserId',
+    'digest',
+    'policyVersion',
+    'principal',
+  ])('refuses model authority field %s rather than discarding it', (key) => {
+    expect(
+      inspectExcelProcedureDraftCapabilities({ ...draft(), [key]: 'MODEL_AUTHORITY' }).schemaValid
+    ).toBe(false)
+  })
+  it('preserves the primitive refusal instead of treating a draft as a complete runtime profile', () => {
+    const value = draft()
+    value.decimalPolicy.precision = 28
+    expect(inspectExcelProcedureDraftCapabilities(value)).toMatchObject({
+      schemaValid: true,
+      primitiveOptionsCompatible: false,
+      executionAvailable: false,
+    })
+  })
+  it('captures strict JSON without invoking a getter or accepting oversize text', () => {
+    let calls = 0
+    const getter = Object.defineProperty(draft(), 'operations', {
+      enumerable: true,
+      get() {
+        calls++
+        return []
+      },
+    })
+    expect(inspectExcelProcedureDraftCapabilities(getter).schemaValid).toBe(false)
+    expect(calls).toBe(0)
+    const value = draft()
+    value.inputs[0].columns[0].name = 'x'.repeat(512 * 1024)
+    expect(inspectExcelProcedureDraftCapabilities(value).schemaValid).toBe(false)
   })
 })
