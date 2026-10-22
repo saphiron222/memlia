@@ -23,6 +23,9 @@ for (const name of Object.keys(fixtures) as ContractName[]) {
 }
 // Exercise the shared scope through every wire contract, including nested job authority.
 for (const name of Object.keys(fixtures) as ContractName[]) {
+  // Agent control derives scope from the live certificate and command, never
+  // from freely supplied top-level organization/workspace fields.
+  if (name === 'AgentControlRequest' || name === 'AgentControlResponse') continue
   const value: any = structuredClone(fixtures[name])
   const scope = name === 'JobEnvelope' ? value.authority : value
   scope.organizationId = null

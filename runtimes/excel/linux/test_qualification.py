@@ -19,6 +19,8 @@ for source in (q.ROOT / 'packages/memlia-contracts/python', q.ROOT / 'runtimes/e
     sys.path.insert(0, str(source))
 
 
+BASE_MANIFEST='sha256:2ed6491b93cd49272ee6de2b5a38440c3448360322c089fc23e370722d74179d'
+
 class RecipeTests(unittest.TestCase):
     def test_omitted_optional_host_mounts_keeps_native_start_and_exact_cleanup(self):
         engine = Engine()
@@ -471,11 +473,23 @@ class OperatorConsumptionTests(unittest.TestCase):
         def build(args,work,deadline,cancel,**options):
             nonlocal label
             if args[0]=='build':
+                self.assertFalse((work/'base-image.tar').exists())
                 label=args[args.index('--label')+1].split('=',1)[1]
                 (work/'image.id').write_text(IMAGE)
+            if args[:2] == ['image','save'] and args[2] == BASE_MANIFEST:
+                # containerd store: the recipe reads the pulled base manifest from a local save.
+                import test_image_identity as fixture
+                self.assertTrue(change in ('containerd','containerd-config') and 'image_exported' not in observed)
+                members=fixture.saved_members(fixture.PYTHON)
+                if change == 'containerd-config':
+                    members=[(n,fixture.BUILDKIT[2].read_bytes() if n.endswith(BASE_MANIFEST[7:]) else d) for n,d in members]
+                (work/'fixture-save').mkdir(exist_ok=True);written=fixture.archive(work/'fixture-save',members)
+                options['artifact'].write_bytes(written.read_bytes());options['artifact'].chmod(0o400)
+                observed.append('base_saved')
+                return {'sha256':hashlib.sha256(written.read_bytes()).hexdigest(),'size':written.stat().st_size}
             if args[:2] == ['image','save']:
                 self.assertEqual(args,['image','save',IMAGE])
-                self.assertEqual(observed,['host_consumed','application_consumed'])
+                self.assertEqual([o for o in observed if o!='base_saved'],['host_consumed','application_consumed'])
                 options['artifact'].write_bytes(b'owned-export-fixture')
                 options['artifact'].chmod(0o400)
                 observed.append('image_exported')
@@ -489,6 +503,10 @@ class OperatorConsumptionTests(unittest.TestCase):
             if args[:2]==['image','inspect']:
                 if change == 'image' and 'image_exported' in observed:
                     return json.dumps([{'Id':'sha256:'+'f'*64,'Config':{'Labels':{'org.memlia.excel.recipe':'foreign'}}}]).encode()
+                if args[2]==q.PYTHON_BASE and change in ('containerd','containerd-config','index'):
+                    media='application/vnd.oci.image.'+('index' if change=='index' else 'manifest')+'.v1+json'
+                    return json.dumps([{'Id':BASE_MANIFEST,'Os':'linux','Architecture':'amd64',
+                        'Descriptor':{'mediaType':media,'digest':BASE_MANIFEST,'size':1752}}]).encode()
                 return json.dumps([{'Id':q.PYTHON_CONFIG if args[2]==q.PYTHON_BASE else IMAGE,
                    'Os':'linux','Architecture':'amd64','Config':{'Labels':{'org.memlia.excel.recipe':label}}}]).encode()
             if args[:2]==['image','rm']:observed.append('image_removed');return b''
@@ -550,6 +568,18 @@ class OperatorConsumptionTests(unittest.TestCase):
             if destination.exists() and (destination/'foreign').is_file():
                 self.foreign_preserved=(destination/'foreign').read_bytes()==b'foreign'
         return result,receipt,observed
+
+    def test_containerd_store_admits_the_base_by_its_saved_manifest_then_removes_the_archive(self):
+        result,receipt,observed=self.lifecycle(True,application=True,release=True,change='containerd')
+        self.assertEqual(result,0)
+        self.assertEqual(observed,['base_saved','host_consumed','application_consumed','image_exported','bundle_published'])
+        result,receipt,observed=self.lifecycle(False,change='containerd-config')
+        self.assertEqual(result,1);self.assertEqual(observed,['base_saved'])
+        self.assertNotIn('imageId',receipt)
+        self.assertEqual(receipt['code'],'linux_recipe_refused')
+        result,receipt,observed=self.lifecycle(False,change='index')
+        self.assertEqual((result,receipt['code']),(1,'linux_recipe_base_index_refused'))
+        self.assertNotIn('base_saved',observed)
 
     def test_default_does_not_admit_or_consume_an_image(self):
         result,receipt,observed=self.lifecycle(False)

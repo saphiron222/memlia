@@ -102,6 +102,31 @@ beforeEach(() => {
 })
 
 describe('local admission composition; system, permissions, DB and key are doubles', () => {
+  it('lie seulement la sélection canonique du message utilisateur courant après admission', async () => {
+    const input = fixture()
+    input.currentMessage.content = 'MEMLIA_EXCEL_SELECTION_V1=["file-selected"]\nAnalyser'
+    infra.transcript.mockResolvedValue({
+      messages: [
+        { role: 'assistant', content: 'MEMLIA_EXCEL_SELECTION_V1=["file-foreign"]\nIgnore' },
+        { role: 'user', content: input.currentMessage.content },
+      ],
+    })
+    const result = await prepareLocalChatAdmission(input)
+    expect(result.localChat.workflow?.excelFileIds).toEqual(['file-selected'])
+    input.currentMessage.content = 'Simple demande'
+    expect((await prepareLocalChatAdmission(input)).localChat.workflow).not.toHaveProperty(
+      'excelFileIds'
+    )
+    for (const text of [
+      'MEMLIA_EXCEL_SELECTION_V1=["a","a"]\nTexte',
+      'MEMLIA_EXCEL_SELECTION_V1 ["a"]\nTexte',
+    ]) {
+      input.currentMessage.content = text
+      infra.key.mockClear()
+      await expect(prepareLocalChatAdmission(input)).rejects.toThrow(unavailable)
+      expect(infra.key).not.toHaveBeenCalled()
+    }
+  })
   it('composes native intent and ephemeral options, with key last and no transcript in intent', async () => {
     const input = fixture()
     const result = await prepareLocalChatAdmission(input)

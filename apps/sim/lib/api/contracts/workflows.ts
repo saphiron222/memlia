@@ -431,6 +431,38 @@ export const executeWorkflowBodySchema = z.object({
 })
 export type ExecuteWorkflowBody = z.input<typeof executeWorkflowBodySchema>
 
+/** Cookie-authenticated UI entry to the existing durable queue, never a draft execution. */
+export const queueSessionWorkflowContract = defineRouteContract({
+  method: 'POST',
+  path: '/api/workflows/[id]/execute',
+  params: z.strictObject({ id: workflowIdSchema }),
+  headers: executeWorkflowHeadersSchema
+    .extend({
+      'X-Execution-Mode': z.literal('async'),
+      [WORKFLOW_EXECUTION_ID_HEADER]: executionIdSchema,
+    })
+    .strict(),
+  body: executeWorkflowBodySchema
+    .pick({ parentWorkspaceId: true, isClientSession: true })
+    .extend({
+      parentWorkspaceId: workspaceIdSchema,
+      isClientSession: z.literal(true),
+    })
+    .strict(),
+  response: {
+    mode: 'json',
+    status: 202,
+    schema: z.strictObject({
+      success: z.literal(true),
+      async: z.literal(true),
+      jobId: z.string().min(1).max(256),
+      executionId: executionIdSchema,
+      message: z.string().max(256),
+      statusUrl: z.string().url(),
+    }),
+  },
+})
+
 export const workflowVariablesBodySchema = z.object({
   variables: z.record(z.string(), workflowVariableWriteSchema),
 })

@@ -58,7 +58,7 @@ PROCESS_EXIT_FAMILIES=(
 PROCESS_EXIT_CLASSES=('1','2','127','134','139')
 PROCESS_EXIT_CODES=frozenset('observed_process_exit_'+family+'_'+kind for family in (*dict(PROCESS_EXIT_FAMILIES),'other')
                              for kind in (*PROCESS_EXIT_CLASSES,'other'))
-ERROR_CODES={'none','source_refused','file_missing','command_failed','timeout','preparation_refused','unexpected_failure',
+ERROR_CODES={'none','source_refused','builder_identity_index_refused','file_missing','command_failed','timeout','preparation_refused','unexpected_failure',
              'diagnostic_unknown','diagnostic_unavailable','diagnostic_truncated','command_interrupted','client_ownership_refused',
              'observed_cli_flag_refused','observed_no_space','observed_tls_refused','observed_connection_refused',
              'observed_lockfile_frozen','observed_js_heap_limit','observed_exit_137','observed_process_exit','cli_option_unavailable','cli_call_unavailable',
@@ -82,6 +82,7 @@ def error_code(error):
         if error.args==('buildx_option_unavailable',):return 'cli_option_unavailable'
         if error.args==('buildx_call_unavailable',):return 'cli_call_unavailable'
         if error.args==('buildx_cli_unknown',):return 'diagnostic_unknown'
+        if error.args==('builder_identity_index_refused',):return 'builder_identity_index_refused'
         return 'preparation_refused'
     return 'unexpected_failure'
 
@@ -408,6 +409,14 @@ def configuration_values(private,nonce,images):
     return env,bootstrap
 
 
+def qualification_values(expected,lock,nonce,private,images,browser,*,inactive_test=False):
+    require(type(inactive_test)is bool)
+    value={'schemaVersion':'memlia.excel-durable-qualification/v1','sourceCommit':expected,'lockSha256':lock,'nonce':nonce,
+           'envFile':str(private/'compose.env'),'bootstrapFile':str(private/'bootstrap.json'),'images':images,'browser':browser}
+    if inactive_test:value['journey']='inactive-test'
+    return value
+
+
 def project(record):
     require(type(record.get('images')) is dict and set(record['images'])<=set(APPS))
     require(record['phase'] in PHASES and record['status'] in ('passed','failed') and type(record['cleanup'])is bool)
@@ -431,8 +440,9 @@ def check_types(execute):
                          '--incremental','false','--singleThreaded','--pretty','false'])
 
 
-def run(expected,output,node,wheelhouse,*,mode='durable'):
+def run(expected,output,node,wheelhouse,*,mode='durable',inactive_test=False):
     require(mode in ('durable','web-check'))
+    require(type(inactive_test)is bool and (not inactive_test or mode=='durable'))
     if mode=='durable':require(node is not None and wheelhouse is not None)
     require(os.geteuid()==0 and platform.system()=='Linux' and platform.machine()=='x86_64')
     require(re.fullmatch('[a-f0-9]{40}',expected) and output.is_absolute() and not output.exists() and not output.is_symlink())
@@ -450,7 +460,7 @@ def run(expected,output,node,wheelhouse,*,mode='durable'):
     deadline=time.monotonic()+(600 if mode=='web-check' else 9000);cancel=threading.Event();proxy_cancel=threading.Event()
     previous={s:signal.signal(s,lambda *_:cancel.set()) for s in (signal.SIGINT,signal.SIGTERM)}
     record={'status':'failed','phase':'preflight','cleanup':False,'images':{},'sourceCommit':expected,'clientSessions':[],'mode':mode}
-    registry_id=builder_id=None;registry_image=None;builder_unknown=registry_unknown=False
+    registry_id=builder_id=builder_image=None;registry_image=None;builder_unknown=registry_unknown=False
     proxy_thread=None;proxy_receipt={};proxy_errors=[];images={};count=0
     owned_swap=None;swap_closing=False;type_containers=[];type_pending=None
     monitor_stop=threading.Event();monitor_errors=[];monitor=None
@@ -485,7 +495,7 @@ def run(expected,output,node,wheelhouse,*,mode='durable'):
                 and not native.git(ROOT,'status','--porcelain','--untracked-files=no').strip())
         require(hashlib.sha256((ROOT/'bun.lock').read_bytes()).hexdigest()==lock)
     def start_builder():
-        nonlocal builder_unknown,builder_id
+        nonlocal builder_unknown,builder_id,builder_image
         record['phase']='builder';record['step']='builder'
         require(not docker(['container','ls','-aq','--filter','name=^/buildx_buildkit_'+builder+'0$'],capture=True).strip()
                 and not docker(['volume','ls','-q','--filter','name=^buildx_buildkit_'+builder+'0_state$'],capture=True).strip())
@@ -497,8 +507,14 @@ def run(expected,output,node,wheelhouse,*,mode='durable'):
             '--driver-opt','cpu-quota=400000','--driver-opt','cpu-period=100000','--driver-opt','restart-policy=no',
             '--driver-opt','provenance-add-gha=false'])
         docker(['buildx','inspect',builder,'--bootstrap'],seconds=180)
+        archive=private/'buildkit-image.tar'
+        def save_builder():
+            require(not archive.exists() and not archive.is_symlink())
+            docker(['image','save','--output',str(archive),native.BUILDKIT],seconds=180);return archive
+        try:builder_image=native.admit_builder_image(one(['image','inspect',native.BUILDKIT]),save_builder)
+        finally:archive.unlink(missing_ok=True)
         row=one(['container','inspect','buildx_buildkit_'+builder+'0']);builder_id=row['Id']
-        native.verify_builder(row,builder_id,builder)
+        native.verify_builder(row,builder_id,builder,builder_image)
         builder_volume='buildx_buildkit_'+builder+'0_state'
         require(any(m.get('Type')=='volume' and m.get('Name')==builder_volume and m.get('Destination')=='/var/lib/buildkit' for m in row['Mounts']))
         builder_unknown=False
@@ -507,7 +523,7 @@ def run(expected,output,node,wheelhouse,*,mode='durable'):
         require(h['Memory']==13*1024**3 and h['MemorySwap']==37*1024**3 and h['CpuQuota']==400000
                 and h['CpuPeriod']==100000 and h['PidsLimit']==512 and row['State']['Running'] and not row['State']['OOMKilled'])
         def kernel():
-            native.verify_builder(one(['container','inspect',builder_id]),builder_id,builder)
+            native.verify_builder(one(['container','inspect',builder_id]),builder_id,builder,builder_image)
             for path,value in (('memory.max',str(13*1024**3)),('memory.swap.max',str(24*1024**3)),('cpu.max','400000 100000'),('pids.max','512')):
                 require(docker(['container','exec',builder_id,'cat','/sys/fs/cgroup/'+path],capture=True).decode().strip()==value)
         kernel()
@@ -686,8 +702,7 @@ proxy_set_header X-Forwarded-Proto https; proxy_set_header X-Forwarded-For $remo
             write_private(private/'chat-policy.json',{'enabled':False});(private/'chat-policy.json').chmod(0o400)
             browser={name:{'path':str(path),'sha256':hashlib.sha256(path.read_bytes()).hexdigest()} for name,path in
                      (('node',tools/'node'),('chromium',Path(chromium)),('certutil',Path('/usr/bin/certutil')),('ca',private/'localhost.pem'))}
-            qualification={'schemaVersion':'memlia.excel-durable-qualification/v1','sourceCommit':expected,'lockSha256':lock,'nonce':nonce,
-                           'envFile':str(private/'compose.env'),'bootstrapFile':str(private/'bootstrap.json'),'images':images,'browser':browser}
+            qualification=qualification_values(expected,lock,nonce,private,images,browser,inactive_test=inactive_test)
             app.durable_configuration(qualification)
             for name in images:app.verify_durable_image(one(['image','inspect',images[name]['reference']]),name,qualification)
             write_private(private/'qualification.json',qualification)
@@ -721,7 +736,7 @@ proxy_set_header X-Forwarded-Proto https; proxy_set_header X-Forwarded-For $remo
                 docker(['container','rm',cid],closing=True)
                 require(not docker(['container','ls','-aq','--filter','id='+cid],capture=True,closing=True).strip())
             if builder_id:
-                row=one(['container','inspect',builder_id],closing=True);native.verify_builder(row,builder_id,builder)
+                row=one(['container','inspect',builder_id],closing=True);native.verify_builder(row,builder_id,builder,builder_image)
                 if row['State']['Running']:docker(['container','stop','--time','10',builder_id],closing=True)
                 docker(['container','rm',builder_id],closing=True)
                 volume='buildx_buildkit_'+builder+'0_state'
@@ -759,15 +774,17 @@ def arguments(argv=None):
     mode=parser.add_mutually_exclusive_group(required=True)
     mode.add_argument('--check-web-context',dest='mode',action='store_const',const='web-check')
     mode.add_argument('--exercise-durable',dest='mode',action='store_const',const='durable')
+    parser.add_argument('--inactive-test',action='store_true',help='Select the existing inactive-test journey (durable mode only)')
     parser.add_argument('--expected-commit',required=True)
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--node',type=Path)
     parser.add_argument('--wheelhouse',type=Path)
     args=parser.parse_args(argv)
+    if args.inactive_test and args.mode!='durable':parser.error('inactive-test requires durable mode')
     if args.mode=='durable' and (args.node is None or args.wheelhouse is None):parser.error('durable tools required')
     return args
 
 
 if __name__=='__main__':
     args=arguments()
-    raise SystemExit(run(args.expected_commit,args.output,args.node,args.wheelhouse,mode=args.mode))
+    raise SystemExit(run(args.expected_commit,args.output,args.node,args.wheelhouse,mode=args.mode,inactive_test=args.inactive_test))

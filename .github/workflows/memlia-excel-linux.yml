@@ -8,6 +8,11 @@ on:
         required: false
         default: false
         type: boolean
+      inactive_test:
+        description: Sélectionner le test inactif existant (nécessite exercise_durable, incompatible avec check_web_context)
+        required: false
+        default: false
+        type: boolean
       check_web_context:
         description: Contrôler seulement le frontend du Dockerfile web exact, sans build ni qualification (exclusif du parcours durable)
         required: false
@@ -42,7 +47,7 @@ concurrency:
 jobs:
   packaging:
     # Private-runner quotas must be approved before enabling metered minutes.
-    if: github.event.repository.private == false && github.repository == 'saphiron222/memlia' && !inputs.exercise_durable && !inputs.check_web_context
+    if: github.event.repository.private == false && github.repository == 'saphiron222/memlia' && !inputs.exercise_durable && !inputs.check_web_context && !inputs.inactive_test
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     env:
@@ -186,7 +191,7 @@ jobs:
   durable:
     # Same public, standard runner. No external registry credentials or publication.
     name: ${{ inputs.check_web_context && 'Contexte web — frontend seulement' || 'Compose durable — cinq images et parcours' }}
-    if: github.event_name == 'workflow_dispatch' && (inputs.exercise_durable || inputs.check_web_context) && github.event.repository.private == false && github.repository == 'saphiron222/memlia'
+    if: github.event_name == 'workflow_dispatch' && (inputs.exercise_durable || inputs.check_web_context || inputs.inactive_test) && github.event.repository.private == false && github.repository == 'saphiron222/memlia'
     runs-on: ubuntu-24.04
     timeout-minutes: 170
     env:
@@ -196,12 +201,13 @@ jobs:
       PIP_DISABLE_PIP_VERSION_CHECK: '1'
       PIP_NO_CACHE_DIR: '1'
     steps:
-      - name: Refuser deux parcours simultanés
+      - name: Refuser les sélections de parcours incompatibles
         shell: bash
         env:
           MEMLIA_EXERCISE_DURABLE: ${{ inputs.exercise_durable && '1' || '0' }}
           MEMLIA_CHECK_WEB_CONTEXT: ${{ inputs.check_web_context && '1' || '0' }}
-        run: test "$MEMLIA_EXERCISE_DURABLE$MEMLIA_CHECK_WEB_CONTEXT" != 11
+          MEMLIA_INACTIVE_TEST: ${{ inputs.inactive_test && '1' || '0' }}
+        run: test "$MEMLIA_EXERCISE_DURABLE$MEMLIA_CHECK_WEB_CONTEXT" != 11 && { test "$MEMLIA_INACTIVE_TEST" != 1 || test "$MEMLIA_EXERCISE_DURABLE$MEMLIA_CHECK_WEB_CONTEXT" = 10; }
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.sha }}
@@ -235,6 +241,7 @@ jobs:
         shell: bash
         env:
           MEMLIA_CHECK_WEB_CONTEXT: ${{ inputs.check_web_context && '1' || '0' }}
+          MEMLIA_INACTIVE_TEST: ${{ inputs.inactive_test && '1' || '0' }}
         run: |
           set -euo pipefail
           umask 077
@@ -247,6 +254,7 @@ jobs:
           else
             runner=("$RUNNER_TEMP/excel-durable-python/bin/python")
             extra=(--exercise-durable --node "$(command -v node)" --wheelhouse "$RUNNER_TEMP/excel-durable-wheels")
+            if [[ "$MEMLIA_INACTIVE_TEST" == 1 ]]; then extra+=(--inactive-test); fi
             duration=155m
           fi
           timeout --signal=TERM --kill-after=240s "$duration" sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_OS,MEMLIA_PUBLIC_RUN -- \

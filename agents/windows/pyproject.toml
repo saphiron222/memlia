@@ -5,11 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "memlia-windows-agent"
 version = "0.0.0"
-description = "Primitives locales de session de Memlia Agent"
+description = "Agent local supervisé Memlia pour Windows"
 requires-python = ">=3.12"
-dependencies = ["httpx==0.28.1", "cryptography==50.0.2"]
+dependencies = ["httpx==0.28.1", "cryptography==50.0.2", "memlia-contracts==0.1.0"]
 license = "LicenseRef-Memlia-All-Rights-Reserved"
 license-files = ["LICENSE"]
+
+[project.scripts]
+memlia-agent = "memlia_agent.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

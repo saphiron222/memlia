@@ -11,7 +11,7 @@ import { and, eq } from 'drizzle-orm'
 import type { NextRequest } from 'next/server'
 import { env } from '@/lib/core/config/env'
 import { OrchestrationError, type OrchestrationErrorCode } from '@/lib/core/orchestration/types'
-import { stringifyBoundedJson } from '@/lib/core/utils/bounded-json'
+import { readOwnDataString, stringifyBoundedJson } from '@/lib/core/utils/bounded-json'
 import { generateRequestId } from '@/lib/core/utils/request'
 import { getSocketServerUrl } from '@/lib/core/utils/urls'
 import type { DbOrTx } from '@/lib/db/types'
@@ -203,9 +203,15 @@ export async function prepareWorkflowSnapshotDeployment(params: {
 }) {
   let excelIdentity: ReturnType<typeof readExcelProcedureSnapshotCapture> | undefined
   if (Object.hasOwn(params, 'excelProcedureSnapshot')) {
+    // Internal code of the refusing check; the client only ever sees the fixed refusal.
+    // Correlation reads run no caller accessor before the strict capture below.
+    const requestId = readOwnDataString(params, ['requestId'])
+    const workflowId = readOwnDataString(params, ['params', 'workflowId'])
+    let check = 'capture_handle'
     try {
       const capture = params.excelProcedureSnapshot
       excelIdentity = readExcelProcedureSnapshotCapture(capture)
+      check = 'caller_input_not_strict_json'
       // Capture all JSON caller inputs before validation can await. Keep only the native TX and
       // nontransferable handle by reference; neither can be reconstructed from JSON.
       const json = stringifyBoundedJson(
@@ -224,6 +230,7 @@ export async function prepareWorkflowSnapshotDeployment(params: {
       )
       if (json === undefined) throw new Error('refused')
       params = { ...JSON.parse(json), tx: params.tx, excelProcedureSnapshot: capture }
+      check = 'capture_identity_mismatch'
       if (
         params.params.workflowId !== excelIdentity.scope.workflowId ||
         `sha256:${sha256Hex(normalizedStringify(params.workflowState))}` !==
@@ -231,6 +238,7 @@ export async function prepareWorkflowSnapshotDeployment(params: {
       )
         throw new Error('refused')
     } catch {
+      logger.error(`[${requestId}] Excel deployment snapshot refused`, { workflowId, check })
       return {
         success: false as const,
         error: 'Excel deployment snapshot refused',
@@ -257,7 +265,9 @@ export async function prepareWorkflowSnapshotDeployment(params: {
     requestHash,
     idempotencyKey: bindIdempotencyKeyToRequest(params.idempotencyKey, requestHash),
     workflowState,
-    ...(excelIdentity ? { excelProcedureSnapshot: params.excelProcedureSnapshot } : {}),
+    ...(excelIdentity
+      ? { excelProcedureSnapshot: params.excelProcedureSnapshot, requestId: params.requestId }
+      : {}),
     name: params.params.versionName,
     description: params.params.versionDescription,
     readinessComponents: DEPLOYMENT_READINESS_COMPONENTS,
@@ -304,6 +314,7 @@ async function performStableFullDeploy(params: {
     assertedWorkspaceId: params.params.assertedWorkspaceId,
     actor: params.params.actor,
     idempotencyKey: params.idempotencyKey,
+    requestId: params.requestId,
   })
   const workflowState =
     excel?.workflowState ?? (await loadWorkflowDeploymentSnapshot(params.params.workflowId))
@@ -320,6 +331,10 @@ async function performStableFullDeploy(params: {
     !excel &&
     Object.values(workflowState.blocks).some((block) => block.type === 'memlia_excel')
   ) {
+    logger.error(`[${params.requestId}] Excel deployment snapshot refused`, {
+      workflowId: params.params.workflowId,
+      check: 'legacy_loader_excel_block',
+    })
     return {
       success: false,
       error: 'Excel deployment snapshot refused',

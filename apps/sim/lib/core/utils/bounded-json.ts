@@ -117,6 +117,29 @@ export function isJsonWithinByteLimit(value: unknown, maxBytes: number): boolean
   }
 }
 
+const MAX_OWN_DATA_STRING_LENGTH = 256
+
+/**
+ * Reads a short own data-property string along `path` without running any accessor, for log
+ * correlation only. An absent, accessor-backed, non-string or oversized value reads as undefined.
+ */
+export function readOwnDataString(value: unknown, path: readonly string[]): string | undefined {
+  try {
+    let current = value
+    for (const key of path) {
+      if (current === null || typeof current !== 'object') return undefined
+      const field = Object.getOwnPropertyDescriptor(current, key)
+      if (!field || !('value' in field)) return undefined
+      current = field.value
+    }
+    return typeof current === 'string' && current.length <= MAX_OWN_DATA_STRING_LENGTH
+      ? current
+      : undefined
+  } catch {
+    return undefined
+  }
+}
+
 /** Captures bounded plain JSON once, without executing accessors or serializing the source graph. */
 export function stringifyBoundedJson(
   value: unknown,

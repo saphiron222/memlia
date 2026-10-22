@@ -1,3 +1,4 @@
+// Modified by Memlia: Excel snapshot refusal codes and driver error fields in server logs.
 import { sha256Hex } from '@sim/security/hash'
 import {
   dbChainMock,
@@ -7,6 +8,9 @@ import {
   schemaMock,
 } from '@sim/testing'
 import { idMock, idMockFns } from '@sim/testing/mocks/id.mock'
+import { getMockLogger } from '@sim/testing/mocks/logger.mock'
+import { DrizzleQueryError } from 'drizzle-orm/errors'
+import postgres from 'postgres'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   captureExcelProcedureSnapshot,
@@ -20,6 +24,7 @@ vi.mock('@sim/utils/id', () => idMock)
 
 import {
   activateDeploymentOperation,
+  deploymentRefusalErrorFields,
   getProtectedDeploymentVersionId,
   markDeploymentComponentReadiness,
   markDeploymentOperationFailed,
@@ -28,6 +33,13 @@ import {
 } from '@/lib/workflows/persistence/deployment-operations'
 
 const mockGenerateId = idMockFns.mockGenerateId
+function expectExcelRefusalCheck(check: string, extra: Record<string, unknown> = {}) {
+  expect(getMockLogger('DeploymentOperations').error).toHaveBeenCalledTimes(1)
+  expect(getMockLogger('DeploymentOperations').error).toHaveBeenCalledWith(
+    '[request-excel] Excel deployment snapshot refused',
+    { workflowId: 'workflow-1', check, ...extra }
+  )
+}
 
 const WORKFLOW_ID = 'workflow-1'
 const NOW = new Date('2026-07-14T08:00:00.000Z')
@@ -605,10 +617,12 @@ describe('Excel snapshot admission', () => {
         idempotencyKey: 'excel-request',
         workflowState: workflowState(),
         excelProcedureSnapshot: capture,
+        requestId: 'request-excel',
       })
       expect(result.success).toBe(false)
       expect(dbChainMockFns.select).not.toHaveBeenCalled()
       expect(dbChainMockFns.values).not.toHaveBeenCalled()
+      expectExcelRefusalCheck('capture_handle')
     }
   )
 })
@@ -667,6 +681,7 @@ function excelFixture() {
     idempotencyKey: 'stable-excel-key',
     workflowState: graph,
     excelProcedureSnapshot: capture,
+    requestId: 'request-excel',
   }
   return { graph, plan, capture, params, block }
 }
@@ -674,7 +689,9 @@ function queueExcelRows(
   f: ReturnType<typeof excelFixture>,
   options: {
     revision?: number
+    rawRevision?: number
     organizationId?: string | null
+    workspaceArchived?: boolean
     workspaceId?: string
     changedGraph?: boolean
     existing?: unknown
@@ -686,7 +703,10 @@ function queueExcelRows(
     { workspaceId: options.workspaceId ?? 'space', variables: {} },
   ])
   queueTableRows(schemaMock.workspace, [
-    { organizationId: options.organizationId ?? null, archivedAt: null },
+    {
+      organizationId: options.organizationId ?? null,
+      archivedAt: options.workspaceArchived ? NOW : null,
+    },
   ])
   queueTableRows(schemaMock.workflowBlocks, [
     {
@@ -698,7 +718,9 @@ function queueExcelRows(
   ])
   queueTableRows(schemaMock.workflowEdges, [])
   queueTableRows(schemaMock.workflowSubflows, [])
-  queueTableRows(schemaMock.workflow, [{ workspaceId: 'space', draftRevision: 7 }])
+  queueTableRows(schemaMock.workflow, [
+    { workspaceId: 'space', draftRevision: options.rawRevision ?? 7 },
+  ])
   queueTableRows(schemaMock.workflow, [{ id: WORKFLOW_ID, archivedAt: null }])
   queueTableRows(schemaMock.workflowDeploymentOperation, options.existing ? [options.existing] : [])
   if (options.stored) queueTableRows(schemaMock.workflowDeploymentVersion, [options.stored])
@@ -714,6 +736,47 @@ function queueExcelRows(
   ])
   mockGenerateId.mockReturnValueOnce('allocated-version').mockReturnValueOnce('allocated-operation')
 }
+
+describe('deployment refusal error fields', () => {
+  it.each(['55P03', '57014'])(
+    'keeps only class names and the SQLSTATE %s of a Drizzle-wrapped driver error',
+    (code) => {
+      const cause = new postgres.PostgresError({
+        message: 'canceling statement for fixture-secret-value',
+        code,
+      } as never)
+      const error = new DrizzleQueryError('select "fixture-secret-value"', ['secret'], cause)
+      expect(deploymentRefusalErrorFields(error)).toEqual({
+        errorName: 'Error',
+        causeName: 'PostgresError',
+        sqlState: code,
+      })
+    }
+  )
+  it('reads the SQLSTATE on the error itself and ignores malformed codes', () => {
+    expect(deploymentRefusalErrorFields(Object.assign(new Error('x'), { code: '40001' }))).toEqual({
+      errorName: 'Error',
+      sqlState: '40001',
+    })
+    expect(
+      deploymentRefusalErrorFields(Object.assign(new Error('x'), { code: 'not a sqlstate' }))
+    ).toEqual({ errorName: 'Error' })
+    for (const code of ['ab cd', '55p03', '55P0\n'])
+      expect(deploymentRefusalErrorFields(Object.assign(new Error('x'), { code }))).toEqual({
+        errorName: 'Error',
+      })
+    expect(deploymentRefusalErrorFields('thrown string')).toEqual({})
+  })
+  it('never lets a throwing accessor escape the refusal path', () => {
+    const error = new Error('x')
+    Object.defineProperty(error, 'cause', {
+      get() {
+        throw new Error('accessor')
+      },
+    })
+    expect(deploymentRefusalErrorFields(error)).toEqual({})
+  })
+})
 
 describe('Excel native raw graph and deployment lock composition (DB chains doubled)', () => {
   beforeEach(() => {
@@ -755,11 +818,13 @@ describe('Excel native raw graph and deployment lock composition (DB chains doub
     expect(callback).toHaveBeenCalledOnce()
   })
   it.each([
-    { revision: 8 },
-    { organizationId: 'other' },
-    { workspaceId: 'other' },
-    { changedGraph: true },
-  ])('refuses drift %j without INSERT or callback', async (options) => {
+    { options: { revision: 8 }, check: 'draft_revision_conflict', extra: {} },
+    { options: { rawRevision: 8 }, check: 'raw_draft', extra: {} },
+    { options: { organizationId: 'other' }, check: 'workspace', extra: {} },
+    { options: { workspaceArchived: true }, check: 'workspace', extra: {} },
+    { options: { workspaceId: 'other' }, check: 'workflow_row', extra: {} },
+    { options: { changedGraph: true }, check: 'state_digest', extra: {} },
+  ])('refuses drift $options without INSERT or callback', async ({ options, check, extra }) => {
     const f = excelFixture()
     queueExcelRows(f, options)
     const callback = vi.fn()
@@ -768,6 +833,25 @@ describe('Excel native raw graph and deployment lock composition (DB chains doub
     ).toBe(false)
     expect(dbChainMockFns.values).not.toHaveBeenCalled()
     expect(callback).not.toHaveBeenCalled()
+    expectExcelRefusalCheck(check, extra)
+  })
+  it('refuses a lock timeout on the native draft lock with only classes and SQLSTATE', async () => {
+    const f = excelFixture()
+    queueExcelRows(f)
+    const cause = new postgres.PostgresError({
+      message: 'canceling statement due to lock timeout',
+      code: '55P03',
+    } as never)
+    dbChainMockFns.for.mockImplementationOnce(() =>
+      Promise.reject(new DrizzleQueryError('select "draft_revision"', [WORKFLOW_ID], cause))
+    )
+    expect((await prepareWorkflowDeployment(f.params)).success).toBe(false)
+    expect(dbChainMockFns.values).not.toHaveBeenCalled()
+    expectExcelRefusalCheck('locked_read_failed', {
+      errorName: 'Error',
+      causeName: 'PostgresError',
+      sqlState: '55P03',
+    })
   })
   it('refuses a global pool in place of a business transaction', async () => {
     const f = excelFixture()
@@ -781,6 +865,51 @@ describe('Excel native raw graph and deployment lock composition (DB chains doub
     f.params.workflowState.blocks.excel.name = 'Changed'
     expect((await prepareWorkflowDeployment(f.params)).success).toBe(false)
     expect(dbChainMockFns.select).not.toHaveBeenCalled()
+    expectExcelRefusalCheck('capture_identity_mismatch')
+  })
+  it('refuses a throwing workflowId accessor with the fixed refusal before SQL', async () => {
+    const f = excelFixture()
+    const accessor = vi.fn(() => {
+      throw new Error('private accessor detail')
+    })
+    const { workflowId: _workflowId, ...rest } = f.params
+    const forged = Object.defineProperty({ ...rest }, 'workflowId', {
+      get: accessor,
+      enumerable: true,
+    }) as typeof f.params
+    expect(await prepareWorkflowDeployment(forged)).toEqual({
+      success: false,
+      reason: 'invalid_request',
+      error: 'Excel deployment snapshot refused',
+    })
+    // Only the guarded caller-input read runs it; the log correlation never does.
+    expect(accessor).toHaveBeenCalledTimes(1)
+    expect(dbChainMockFns.select).not.toHaveBeenCalled()
+    expect(getMockLogger('DeploymentOperations').error).toHaveBeenCalledWith(
+      '[request-excel] Excel deployment snapshot refused',
+      { workflowId: undefined, check: 'caller_input' }
+    )
+  })
+  it('never runs an accessor-backed requestId, which is correlation only', async () => {
+    const f = excelFixture()
+    queueExcelRows(f)
+    const accessor = vi.fn(() => {
+      throw new Error('private accessor detail')
+    })
+    const { requestId: _requestId, ...rest } = f.params
+    const forged = Object.defineProperty({ ...rest }, 'requestId', {
+      get: accessor,
+      enumerable: true,
+    }) as typeof f.params
+    expect((await prepareWorkflowDeployment(forged)).success).toBe(true)
+    expect(accessor).not.toHaveBeenCalled()
+  })
+  it('refuses a supplied graph that is not strict JSON before SQL', async () => {
+    const f = excelFixture()
+    Object.assign(f.params.workflowState.blocks.excel, { locked: undefined })
+    expect((await prepareWorkflowDeployment(f.params)).success).toBe(false)
+    expect(dbChainMockFns.select).not.toHaveBeenCalled()
+    expectExcelRefusalCheck('state_not_strict_json')
   })
   it('reuses only the exact final snapshot associated with the captured input', async () => {
     const f = excelFixture()
@@ -837,6 +966,7 @@ describe('Excel native raw graph and deployment lock composition (DB chains doub
       })
       expect((await prepareWorkflowDeployment(f.params)).success).toBe(false)
       expect(dbChainMockFns.values).not.toHaveBeenCalled()
+      expectExcelRefusalCheck(kind === 'missing' ? 'reused_version_row' : 'reused_version_mismatch')
     }
   )
   it('captures caller primitives and handle before waiting for the native lock', async () => {

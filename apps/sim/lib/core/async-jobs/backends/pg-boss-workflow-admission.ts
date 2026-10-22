@@ -34,11 +34,69 @@ interface PreparedState {
 // The server caller must still authenticate and complete native preprocessing/reservation.
 const prepared = new WeakMap<PreparedPgBossWorkflowAdmission, PreparedState>()
 
-function rejection(acceptance: 'rejected' | 'unknown' = 'rejected') {
-  return new AsyncJobEnqueueError('workflow_admission_rejected', { acceptance, retryable: false })
+/**
+ * One bounded code per refusing check, for the server log only: the error message, acceptance and
+ * client response are those of every admission refusal. `admission_*` are the fixed codes of
+ * `PgBossAdmissionError` raised by persistence.
+ */
+export type PgBossWorkflowAdmissionRefusal =
+  | 'caller_input_not_strict_json'
+  | 'identity_not_strict_json'
+  | 'identity_shape'
+  | 'credential_enforcement'
+  | 'public_api_access'
+  | 'command_id_invalid'
+  | 'submitted_at_invalid'
+  | 'execution_id_invalid'
+  | 'correlation_id_invalid'
+  | 'principal_invalid'
+  | 'principal_not_session'
+  | 'actor_mismatch'
+  | 'billing_attribution_invalid'
+  | 'billing_attribution_mismatch'
+  | 'trigger_type_unsupported'
+  | 'execution_timeout_invalid'
+  | 'max_duration_invalid'
+  | 'payload_preparation_failed'
+  | 'payload_not_strict_json'
+  | 'preparation_unclassified'
+  | 'admission_handle_unknown'
+  | 'authority_refused'
+  | 'authority_organization_mismatch'
+  | 'envelope_invalid'
+  | 'persistence_unknown'
+  | `admission_${string}`
+
+export class PgBossWorkflowAdmissionRejection extends AsyncJobEnqueueError {
+  constructor(
+    readonly reason: PgBossWorkflowAdmissionRefusal,
+    acceptance: 'rejected' | 'unknown' = 'rejected'
+  ) {
+    super('workflow_admission_rejected', { acceptance, retryable: false })
+  }
 }
 
+function rejection(
+  reason: PgBossWorkflowAdmissionRefusal,
+  acceptance: 'rejected' | 'unknown' = 'rejected'
+) {
+  return new PgBossWorkflowAdmissionRejection(reason, acceptance)
+}
+
+/** Runs one native check: any throw, never its message or cause, refuses with that check's code. */
+function checked<T>(reason: PgBossWorkflowAdmissionRefusal, run: () => T): T {
+  try {
+    return run()
+  } catch {
+    throw rejection(reason)
+  }
+}
+
+const PERSISTENCE_CODE = /^admission_[a-z_]{1,48}$/
+
 const optionalNativeFields = new Set([
+  // A session queue request (queueSessionWorkflowContract) may carry no input at all.
+  'input',
   'triggerBlockId',
   'copilotToolCallId',
   'callChain',
@@ -66,59 +124,72 @@ export function preparePgBossWorkflowAdmission(
       )
         delete descriptors[key]
     }
-    const raw = copyPgBossAdmissionJson(
-      Object.defineProperties(
-        Object.create(Object.getPrototypeOf(params)),
-        descriptors
-      ) as EnqueueWorkflowExecutionParams
+    const raw = checked('caller_input_not_strict_json', () =>
+      copyPgBossAdmissionJson(
+        Object.defineProperties(
+          Object.create(Object.getPrototypeOf(params)),
+          descriptors
+        ) as EnqueueWorkflowExecutionParams
+      )
     )
-    const id = copyPgBossAdmissionJson(identity)
+    const id = checked('identity_not_strict_json', () => copyPgBossAdmissionJson(identity))
     if (
       Object.keys(id).sort().join(',') !== 'admissionCompleted,commandId,submittedAt' ||
-      id.admissionCompleted !== true ||
-      raw.enforceCredentialAccess !== true ||
-      raw.isPublicApiAccess !== false
+      id.admissionCompleted !== true
     )
-      throw rejection()
-    const commandId = JobEnvelopeSchema.shape.commandId.parse(id.commandId)
-    const submittedAt = JobEnvelopeSchema.shape.submittedAt.parse(id.submittedAt)
-    JobEnvelopeSchema.shape.runId.parse(raw.executionId)
+      throw rejection('identity_shape')
+    if (raw.enforceCredentialAccess !== true) throw rejection('credential_enforcement')
+    if (raw.isPublicApiAccess !== false) throw rejection('public_api_access')
+    const commandId = checked('command_id_invalid', () =>
+      JobEnvelopeSchema.shape.commandId.parse(id.commandId)
+    )
+    const submittedAt = checked('submitted_at_invalid', () =>
+      JobEnvelopeSchema.shape.submittedAt.parse(id.submittedAt)
+    )
+    checked('execution_id_invalid', () => JobEnvelopeSchema.shape.runId.parse(raw.executionId))
     for (const value of [raw.workflowId, raw.workspaceId, raw.userId, raw.requestId]) {
-      if (typeof value !== 'string' || value.length === 0 || value.length > 128) throw rejection()
+      if (typeof value !== 'string' || value.length === 0 || value.length > 128)
+        throw rejection('correlation_id_invalid')
     }
-    const principal = parsePrincipal({ version: 1, principal: raw.principal })
-    if (principal.kind !== 'session' || principal.userId !== raw.userId) throw rejection()
-    const billingAttribution = assertBillingAttributionSnapshot(raw.billingAttribution)
+    const principal = checked('principal_invalid', () =>
+      parsePrincipal({ version: 1, principal: raw.principal })
+    )
+    if (principal.kind !== 'session') throw rejection('principal_not_session')
+    if (principal.userId !== raw.userId) throw rejection('actor_mismatch')
+    const billingAttribution = checked('billing_attribution_invalid', () =>
+      assertBillingAttributionSnapshot(raw.billingAttribution)
+    )
     if (
       billingAttribution.actorUserId !== principal.userId ||
       billingAttribution.workspaceId !== raw.workspaceId
     )
-      throw rejection()
-    if (
-      !CORE_TRIGGER_TYPES.includes(raw.triggerType) ||
-      !Number.isFinite(raw.executionTimeoutMs) ||
-      raw.executionTimeoutMs <= 0
-    )
-      throw rejection()
-    const maxDurationSeconds = validateMaxDurationSeconds(
-      toTriggerMaxDurationSeconds(raw.executionTimeoutMs)
+      throw rejection('billing_attribution_mismatch')
+    if (!CORE_TRIGGER_TYPES.includes(raw.triggerType)) throw rejection('trigger_type_unsupported')
+    if (!Number.isFinite(raw.executionTimeoutMs) || raw.executionTimeoutMs <= 0)
+      throw rejection('execution_timeout_invalid')
+    const maxDurationSeconds = checked('max_duration_invalid', () =>
+      validateMaxDurationSeconds(toTriggerMaxDurationSeconds(raw.executionTimeoutMs))
     )
     if (maxDurationSeconds === undefined || maxDurationSeconds > PG_BOSS_MAX_DURATION_SECONDS)
-      throw rejection()
-    const { payload, correlation } = prepareWorkflowExecutionPayload({
-      ...raw,
-      principal,
-      billingAttribution,
-    })
-    const snapshot = copyPgBossAdmissionJson({
-      payload,
-      metadata: {
-        workflowId: raw.workflowId,
-        workspaceId: raw.workspaceId,
-        userId: raw.userId,
-        correlation,
-      },
-    })
+      throw rejection('max_duration_invalid')
+    const { payload, correlation } = checked('payload_preparation_failed', () =>
+      prepareWorkflowExecutionPayload({
+        ...raw,
+        principal,
+        billingAttribution,
+      })
+    )
+    const snapshot = checked('payload_not_strict_json', () =>
+      copyPgBossAdmissionJson({
+        payload,
+        metadata: {
+          workflowId: raw.workflowId,
+          workspaceId: raw.workspaceId,
+          userId: raw.userId,
+          correlation,
+        },
+      })
+    )
     const handle = Object.freeze({ kind: 'prepared_workflow_admission' as const })
     prepared.set(handle, {
       ...snapshot,
@@ -130,18 +201,21 @@ export function preparePgBossWorkflowAdmission(
       inFlight: 0,
     })
     return handle
-  } catch {
-    throw rejection()
+  } catch (error) {
+    throw error instanceof PgBossWorkflowAdmissionRejection
+      ? error
+      : rejection('preparation_unclassified')
   }
 }
 
 /** Owns the top-level commit. No consumer, slot release, business effect, ACK or retry. */
 export async function admitPgBossWorkflowAdmission(handle: PreparedPgBossWorkflowAdmission) {
   const state = prepared.get(handle)
-  if (!state) throw rejection()
+  if (!state) throw rejection('admission_handle_unknown')
   // The private snapshot is never returned or passed to caller callbacks.
   const { principal, payload, metadata, commandId, submittedAt, maxDurationSeconds } = state
   let transactionStarted = false
+  let step: 'authority' | 'envelope' | 'persistence' = 'authority'
   // Authority reads can pause after observing a live session; that attempt may still commit.
   // Count the entire operation before its first await, independently of DB error classification.
   state.inFlight++
@@ -151,7 +225,9 @@ export async function admitPgBossWorkflowAdmission(handle: PreparedPgBossWorkflo
       workflowId: payload.workflowId,
       workspaceId: payload.workspaceId,
     })
-    if (authority.organizationId !== payload.billingAttribution.organizationId) throw rejection()
+    if (authority.organizationId !== payload.billingAttribution.organizationId)
+      throw rejection('authority_organization_mismatch')
+    step = 'envelope'
     const envelope = JobEnvelopeSchema.parse({
       schemaVersion: 'memlia.job/v1',
       commandId,
@@ -167,6 +243,7 @@ export async function admitPgBossWorkflowAdmission(handle: PreparedPgBossWorkflo
         .digest('hex'),
       effectPolicy: { kind: 'no_automatic_retry' },
     })
+    step = 'persistence'
     transactionStarted = true
     const result = await db.transaction((tx) =>
       admitPgBossJob(tx, {
@@ -188,7 +265,17 @@ export async function admitPgBossWorkflowAdmission(handle: PreparedPgBossWorkflo
       state.possiblyAccepted = true
     // Preserve uncertainty across retries, including concurrent attempts and later revocation.
     if (state.inFlight > 1) state.possiblyAccepted = true
-    throw rejection(state.possiblyAccepted ? 'unknown' : 'rejected')
+    const reason: PgBossWorkflowAdmissionRefusal =
+      error instanceof PgBossWorkflowAdmissionRejection
+        ? error.reason
+        : step === 'authority'
+          ? 'authority_refused'
+          : step === 'envelope'
+            ? 'envelope_invalid'
+            : error instanceof PgBossAdmissionError && PERSISTENCE_CODE.test(error.code)
+              ? (error.code as `admission_${string}`)
+              : 'persistence_unknown'
+    throw rejection(reason, state.possiblyAccepted ? 'unknown' : 'rejected')
   } finally {
     state.inFlight--
   }

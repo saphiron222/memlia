@@ -1,4 +1,9 @@
 // Copyright (c) 2026 Memlia. All rights reserved.
+// Environment contract (private file MEMLIA_QUEUE_ADMISSION_TEST_ENV_FILE, never printed):
+// MEMLIA_PG_BOSS_DATABASE_URL is the transport role; TEST_DATABASE_URL is a role of the same
+// `_test_` database WITHOUT rights on business tables (SELECT on public."user" must fail with
+// 42501) nor CREATE. The bootstrap `web` and `realtime` roles both read public."user", so the
+// web-role file of pg-boss-workflow-admission.integration.test.ts never satisfies this suite.
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'

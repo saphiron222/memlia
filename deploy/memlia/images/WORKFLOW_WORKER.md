@@ -211,6 +211,7 @@ La configuration JSON administrateur suit `memlia.excel-durable-qualification/v1
 | `bootstrapFile` | Chemin absolu de la configuration du bootstrap produit, jamais des commandes SQL arbitraires |
 | `images` | `web`, `realtime`, `migrations`, `cron`, `workflow-worker`, `db`, `redis` ; chaque entrée contient `reference` et `imageId` ; les cinq premières comportent aussi `sourceCommit` et `lockSha256` |
 | `browser` | `node`, `chromium`, `certutil`, `ca` ; chaque entrée contient un chemin absolu et son SHA256 |
+| `journey` (facultatif) | Uniquement `inactive-test` pour la variante décrite ci-dessous ; absent pour le parcours historique |
 
 Le champ de version s’appelle `schemaVersion`. Les autres champs ou services
 sont refusés. Les fichiers de configuration et la CA sont root-owned, 0400/0600,
@@ -289,3 +290,55 @@ doublées. **Compose, TLS/Chromium, le worker réel, les images, la base nouvell
 et le parcours Excel durable restent NON TESTÉS nativement dans cette tranche.**
 Ces tests ne remplacent pas la qualification Windows/Excel Desktop, Hyper-V,
 les scénarios crash/reprise/concurrence ni la checklist commerciale.
+
+
+### Variante de test préparé inactif — non qualifiée
+
+La même configuration peut porter uniquement le champ optionnel
+`"journey": "inactive-test"`. Son absence conserve le parcours durable historique
+avec déploiement. Cette variante utilise le même lanceur, les mêmes images
+admises, rôles, CA/NSS isolé, hôte Excel et contrôles de ressources ; elle n’ajoute
+aucun runner, bypass TLS ou couche d’exécution. Les scripts publics de lancement
+CI ne sélectionnent pas encore ce champ : le raccord de leur option CLI attend
+la coordination de leur propriétaire.
+
+Le navigateur utilise le profil existant `--inactive-test` : session réelle,
+observation de la révision et du digest, opération de préparation stable,
+version `excel_test_v1` inactive, puis POST de test et reçu202 avec ID
+stable. Aucun déploiement ni activation n’est demandé. La recette relit les
+captures privées bornées `test-observe`, `test-identities`, `test-prepare` et
+`test-enqueue` avant de démarrer le worker. Un reçu final seul ne suffit pas ;
+une capture ambiguë ou une fermeture de groupe non confirmée bloque le démarrage.
+L’identifiant `workflow-execution:<executionId>` est d’abord **dérivé attendu**
+(`jobIdSource=derived_expected`), puis comparé aux véritables lignes de queue.
+Il n’est jamais présenté comme un ID déjà observé avant cette lecture.
+
+Après fermeture du navigateur et publication native, le worker existant traite
+le test. Les observations privées précèdent leur projection : payload humain
+et `excelTestExecution` identiques au binding admis, exécution asynchrone avec
+contrôles de credentials, version inactive/propriétaire/digest du graphe,
+`workflow_execution_logs.deployment_version_id` exact, fichier d’exécution
+propriétaire sous le préfixe de ce même run. Le téléchargement natif doit rendre
+les mêmes octets que le fichier enregistré et l’oracle XLSX indépendant reste
+inchangé. Le résultat porte le scope distinct
+`native_inactive_test_compose` et les gardes `payloadBound`,
+`journalVersionBound`, `resultFileBound` et `versionInactive`. Il ne prouve ni
+lecture humaine ni justesse d’une règle métier arbitraire. Aucun résultat
+n’active la version.
+
+Après drainage confirmé, le nettoyage vérifie de nouveau la préparation native,
+puis verrouille ses lignes exactes avec celles du run. Il ne retire la clé
+`excel-test-preparation:<digest(scope,acteur)>:<operationId>` qu’après vérification
+du fingerprint, du résultat `completed`, du reçu exact, du propriétaire, de la
+version inactive et du digest de son état. Sa suppression utilise `xmin` et
+`md5(row_to_json(...))` dans la même transaction que le nettoyage ciblé du run.
+Aucune suppression par préfixe, reprise de test ou activation implicite. Une
+ambiguïté conserve les ressources et les preuves pour diagnostic.
+
+Les tests portables avec doubles vérifient ces gardes et l’oracle Python/XLSX ;
+ils ne qualifient pas PostgreSQL, les images, le navigateur, le vrai worker ou
+une installation cabinet. **La variante reste NON TESTÉE sur Linux réel**
+jusqu’à un essai unique sur les sources/images exactes admises. Les reçus
+historiques durables, en processus et Office09 conservent leur périmètre propre.
+La reprise d’une préparation après rechargement de la page reste un chantier
+produit distinct.

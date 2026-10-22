@@ -1,10 +1,14 @@
 // Modified by Memlia: preserve native payload/legacy dispatch; durable mode accepts only server-minted admission.
+// Modified by Memlia: log durable enqueue refusals with a stable code and safe fields only.
 import { randomUUID } from 'node:crypto'
 import { createLogger } from '@sim/logger'
 import { toError } from '@sim/utils/errors'
 import { releaseExecutionSlot } from '@/lib/billing/calculations/usage-reservation'
 import { getJobQueue, shouldExecuteInline } from '@/lib/core/async-jobs'
-import { preparePgBossWorkflowAdmission } from '@/lib/core/async-jobs/backends/pg-boss-workflow-admission'
+import {
+  PgBossWorkflowAdmissionRejection,
+  preparePgBossWorkflowAdmission,
+} from '@/lib/core/async-jobs/backends/pg-boss-workflow-admission'
 import { isAsyncJobEnqueueError } from '@/lib/core/async-jobs/types'
 import { toTriggerMaxDurationSeconds } from '@/lib/core/execution-limits'
 import { WORKFLOW_EXECUTION_JOB_ID_PREFIX } from '@/lib/workflows/executor/execution-job-ids'
@@ -17,6 +21,44 @@ import {
 const logger = createLogger('WorkflowEnqueueExecution')
 
 const ASYNC_ENQUEUE_ATTEMPTS = 2
+
+type DurableEnqueueStage = 'admission_preparation' | 'queue_initialization' | 'admission'
+const ERROR_NAME = /^[A-Za-z][A-Za-z0-9_]{0,63}$/
+const CORRELATION_ID = /^[A-Za-z0-9_-]{1,128}$/
+
+/** Own data property only: a caller accessor is never run; a malformed value is omitted. */
+function ownCorrelationId(params: object, key: 'requestId' | 'workflowId'): string | undefined {
+  const value = Object.getOwnPropertyDescriptor(params, key)?.value
+  return typeof value === 'string' && CORRELATION_ID.test(value) ? value : undefined
+}
+
+/**
+ * Server log of a durable refusal, the client response staying unchanged: the admission's bounded
+ * refusal code, otherwise only the error class (queue initialization, unclassified errors), never
+ * a message, which can carry SQL, parameters or payload.
+ */
+function logDurableEnqueueRefusal(
+  params: object,
+  stage: DurableEnqueueStage,
+  error: unknown,
+  acceptance?: 'rejected' | 'unknown'
+): void {
+  try {
+    const requestId = ownCorrelationId(params, 'requestId')
+    const workflowId = ownCorrelationId(params, 'workflowId')
+    const reason = error instanceof PgBossWorkflowAdmissionRejection ? error.reason : undefined
+    const name = error instanceof Error && ERROR_NAME.test(error.name) ? error.name : undefined
+    logger.error(`${requestId ? `[${requestId}] ` : ''}Durable workflow enqueue refused`, {
+      code: 'durable_enqueue_refused',
+      stage,
+      ...(acceptance ? { acceptance } : {}),
+      ...(workflowId ? { workflowId } : {}),
+      ...(reason ? { reason } : name ? { errorName: name } : {}),
+    })
+  } catch {
+    // Diagnostics never change the refusal returned to the caller.
+  }
+}
 
 export {
   RESUME_EXECUTION_JOB_ID_PREFIX,
@@ -58,14 +100,17 @@ export async function enqueueWorkflowExecution(
     const executionId = params.executionId
     let queue: Awaited<ReturnType<typeof getJobQueue>>
     let admission: ReturnType<typeof preparePgBossWorkflowAdmission>
+    let stage: DurableEnqueueStage = 'admission_preparation'
     try {
       admission = preparePgBossWorkflowAdmission(params, {
         commandId: randomUUID(),
         submittedAt: new Date().toISOString(),
         admissionCompleted: true,
       })
+      stage = 'queue_initialization'
       queue = await getJobQueue()
-    } catch {
+    } catch (error) {
+      logDurableEnqueueRefusal(params, stage, error)
       await releaseExecutionSlot(executionId)
       return { outcome: 'rejected', executionId, retainExecutionClaim: false }
     }
@@ -75,7 +120,9 @@ export async function enqueueWorkflowExecution(
     } catch (error) {
       // The native admission handle retains uncertainty across concurrent/previous attempts.
       // Never retry an unknown commit with a new identity or release its native slot.
-      if (isAsyncJobEnqueueError(error) && error.acceptance === 'rejected') {
+      const rejected = isAsyncJobEnqueueError(error) && error.acceptance === 'rejected'
+      logDurableEnqueueRefusal(params, 'admission', error, rejected ? 'rejected' : 'unknown')
+      if (rejected) {
         await releaseExecutionSlot(executionId)
         return { outcome: 'rejected', executionId, retainExecutionClaim: false }
       }

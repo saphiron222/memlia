@@ -1,4 +1,5 @@
 // Copyright 2026 Memlia. All rights reserved.
+import { getMockLogger } from '@sim/testing/mocks/logger.mock'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { EnqueueWorkflowExecutionParams } from './workflow-execution-payload'
 const ports = vi.hoisted(() => ({
@@ -12,7 +13,9 @@ vi.mock('@/lib/core/async-jobs', () => ({
   getJobQueue: ports.get,
   shouldExecuteInline: () => false,
 }))
-vi.mock('@/lib/core/async-jobs/backends/pg-boss-workflow-admission', () => ({
+// Only the preparation entry is doubled: its rejection class and admission stay native.
+vi.mock('@/lib/core/async-jobs/backends/pg-boss-workflow-admission', async (original) => ({
+  ...(await original<typeof import('@/lib/core/async-jobs/backends/pg-boss-workflow-admission')>()),
   preparePgBossWorkflowAdmission: ports.prepare,
 }))
 vi.mock('@/lib/billing/calculations/usage-reservation', () => ({
@@ -21,6 +24,10 @@ vi.mock('@/lib/billing/calculations/usage-reservation', () => ({
 vi.mock('@/background/workflow-execution', () => ({ executeWorkflowJob: ports.runner }))
 import { enqueueWorkflowExecution } from './enqueue-execution'
 import { AsyncJobEnqueueError } from '@/lib/core/async-jobs/types'
+const log = getMockLogger('WorkflowEnqueueExecution')
+const native = await vi.importActual<
+  typeof import('@/lib/core/async-jobs/backends/pg-boss-workflow-admission')
+>('@/lib/core/async-jobs/backends/pg-boss-workflow-admission')
 const input = (): EnqueueWorkflowExecutionParams => ({
   requestId: 'request',
   workflowId: 'workflow',
@@ -110,6 +117,110 @@ describe('durable native enqueue caller, persistence ports doubled', () => {
       expect(ports.release).toHaveBeenCalledTimes(acceptance === 'unknown' ? 0 : 1)
     }
   )
+  it('the native preparation admits this fixture, so each refusal below has one cause', async () => {
+    ports.prepare.mockImplementation(native.preparePgBossWorkflowAdmission)
+    await expect(enqueueWorkflowExecution(input())).resolves.toMatchObject({ outcome: 'queued' })
+    expect(log.error).not.toHaveBeenCalled()
+  })
+  it.each([
+    ['credential_enforcement', { enforceCredentialAccess: false }],
+    ['public_api_access', { isPublicApiAccess: true }],
+    [
+      'principal_not_session',
+      { principal: { kind: 'personal_api_key', userId: 'user', keyId: 'k' } },
+    ],
+    ['caller_input_not_strict_json', { input: { nested: undefined } }],
+  ] as const)(
+    'logs the native preparation refusal %s with its stage, response unchanged',
+    async (reason, patch) => {
+      ports.prepare.mockImplementation(native.preparePgBossWorkflowAdmission)
+      await expect(enqueueWorkflowExecution({ ...input(), ...patch })).resolves.toEqual({
+        outcome: 'rejected',
+        executionId: 'execution',
+        retainExecutionClaim: false,
+      })
+      expect(ports.get).not.toHaveBeenCalled()
+      expect(log.error).toHaveBeenCalledExactlyOnceWith(
+        '[request] Durable workflow enqueue refused',
+        {
+          code: 'durable_enqueue_refused',
+          stage: 'admission_preparation',
+          workflowId: 'workflow',
+          reason,
+        }
+      )
+    }
+  )
+  it('logs a queue initialization refusal by its error class only', async () => {
+    // The native error and code getJobQueue raises when the selected backend changed.
+    ports.get.mockRejectedValue(
+      new AsyncJobEnqueueError('async_backend_configuration_changed', {
+        acceptance: 'rejected',
+        retryable: false,
+      })
+    )
+    await expect(enqueueWorkflowExecution(input())).resolves.toMatchObject({ outcome: 'rejected' })
+    expect(log.error).toHaveBeenCalledExactlyOnceWith(
+      '[request] Durable workflow enqueue refused',
+      {
+        code: 'durable_enqueue_refused',
+        stage: 'queue_initialization',
+        workflowId: 'workflow',
+        errorName: 'AsyncJobEnqueueError',
+      }
+    )
+  })
+  it('logs the native admission refusal of a handle it did not mint, with its acceptance', async () => {
+    ports.enqueue.mockImplementation((_type: string, handle: never) =>
+      native.admitPgBossWorkflowAdmission(handle)
+    )
+    await expect(enqueueWorkflowExecution(input())).resolves.toMatchObject({ outcome: 'rejected' })
+    expect(log.error).toHaveBeenCalledExactlyOnceWith(
+      '[request] Durable workflow enqueue refused',
+      {
+        code: 'durable_enqueue_refused',
+        stage: 'admission',
+        acceptance: 'rejected',
+        workflowId: 'workflow',
+        reason: 'admission_handle_unknown',
+      }
+    )
+  })
+  it('logs an unclassified post-preparation error as unknown, never its message', async () => {
+    ports.enqueue.mockRejectedValue(new Error('PRIVATE_CANARY select'))
+    await expect(enqueueWorkflowExecution(input())).resolves.toMatchObject({ outcome: 'ambiguous' })
+    expect(log.error).toHaveBeenCalledExactlyOnceWith(
+      '[request] Durable workflow enqueue refused',
+      {
+        code: 'durable_enqueue_refused',
+        stage: 'admission',
+        acceptance: 'unknown',
+        workflowId: 'workflow',
+        errorName: 'Error',
+      }
+    )
+    expect(JSON.stringify(log.error.mock.calls)).not.toContain('PRIVATE_CANARY')
+  })
+  it('never invokes a caller accessor or logs a malformed correlation value', async () => {
+    const read = vi.fn(() => 'PRIVATE_CANARY')
+    const params = Object.defineProperty(
+      { ...input(), workflowId: 'PRIVATE_CANARY\nforged' },
+      'requestId',
+      { get: read, enumerable: true }
+    )
+    ports.prepare.mockImplementation(native.preparePgBossWorkflowAdmission)
+    await expect(enqueueWorkflowExecution(params)).resolves.toMatchObject({ outcome: 'rejected' })
+    expect(read).not.toHaveBeenCalled()
+    expect(log.error).toHaveBeenCalledExactlyOnceWith('Durable workflow enqueue refused', {
+      code: 'durable_enqueue_refused',
+      stage: 'admission_preparation',
+      reason: 'caller_input_not_strict_json',
+    })
+  })
+  it('does not log a queued durable admission', async () => {
+    await expect(enqueueWorkflowExecution(input())).resolves.toMatchObject({ outcome: 'queued' })
+    expect(log.error).not.toHaveBeenCalled()
+  })
   it('retains ownership on an unclassified post-admission error', async () => {
     ports.enqueue.mockRejectedValue(new Error('private_cause'))
     await expect(enqueueWorkflowExecution(input())).resolves.toMatchObject({

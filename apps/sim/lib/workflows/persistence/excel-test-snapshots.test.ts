@@ -11,6 +11,7 @@ import { fixtures } from '../../../../../packages/memlia-contracts/tests/fixture
 import {
   prepareExcelTestSnapshot,
   readExcelTestPreparationObservation,
+  verifyExcelTestSnapshot,
 } from './excel-test-snapshots'
 
 vi.mock('@sim/utils/id', () => idMock)
@@ -110,6 +111,61 @@ describe('préparation inactive Excel — SQL doublé, contrats et matérialisat
     resetDbChainMock()
     idMockFns.mockGenerateId.mockReset()
   })
+  it('admet seulement une préparation déjà persistée, sans nouvelle écriture ni activation', async () => {
+    const f = fixture()
+    queueFresh(f)
+    const receipt = await prepareExcelTestSnapshot(f.input)
+    const row = structuredClone(insertedSnapshot())
+    resetDbChainMock()
+    queueGraph(f)
+    queueTableRows(schemaMock.idempotencyKey, [
+      {
+        result: {
+          status: 'completed',
+          requestFingerprint: hash({ ...f.input, policyVersion: policy }),
+          result: receipt,
+        },
+      },
+    ])
+    queueTableRows(schemaMock.workflowDeploymentVersion, [row])
+    expect(await verifyExcelTestSnapshot(f.input, receipt)).toEqual(receipt)
+    expect(dbChainMockFns.insert).not.toHaveBeenCalled()
+    expect(dbChainMockFns.update).not.toHaveBeenCalled()
+  })
+  it.each(['absent', 'fingerprint', 'pending', 'owner', 'active', 'receipt', 'draft'])(
+    'refuse la préparation test altérée : %s',
+    async (kind) => {
+      const f = fixture()
+      queueFresh(f)
+      const receipt = await prepareExcelTestSnapshot(f.input)
+      const row = structuredClone(insertedSnapshot())
+      resetDbChainMock()
+      queueGraph(f, kind === 'draft' ? { name: 'changed' } : {})
+      queueTableRows(
+        schemaMock.idempotencyKey,
+        kind === 'absent'
+          ? []
+          : [
+              {
+                result: {
+                  status: kind === 'pending' ? 'in-progress' : 'completed',
+                  requestFingerprint:
+                    kind === 'fingerprint' ? hash({}) : hash({ ...f.input, policyVersion: policy }),
+                  result: receipt,
+                },
+              },
+            ]
+      )
+      if (kind === 'owner') row.createdBy = 'foreign'
+      if (kind === 'active') row.isActive = true
+      queueTableRows(schemaMock.workflowDeploymentVersion, [row])
+      await expect(
+        verifyExcelTestSnapshot(f.input, kind === 'receipt' ? { ...receipt, version: 99 } : receipt)
+      ).rejects.toThrow(refused)
+      expect(dbChainMockFns.insert).not.toHaveBeenCalled()
+      expect(dbChainMockFns.update).not.toHaveBeenCalled()
+    }
+  )
   it('enregistre seulement le snapshot test avec identité serveur et politique explicite', async () => {
     const f = fixture()
     queueFresh(f)

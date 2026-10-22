@@ -1,6 +1,5 @@
 // Copyright (c) 2026 Memlia. All rights reserved.
 import { generateId } from '@sim/utils/id'
-import { type AgentTurnFinishReason, isAgentStreamEvent } from '@/providers/stream-events'
 import { WORKFLOW_PROPOSAL_TOOL_NAME } from '@/lib/api/contracts/copilot'
 import { stringifyBoundedJson } from '@/lib/core/utils/bounded-json'
 import { waitWithAbort } from '@/lib/core/utils/concurrency'
@@ -20,9 +19,11 @@ import type {
   StreamingContext,
 } from '@/lib/mothership/request/types'
 import { isTerminalToolCallStatus } from '@/lib/mothership/request/types'
+import { type AgentTurnFinishReason, isAgentStreamEvent } from '@/providers/stream-events'
+import { selectedExcelFileIdsSchema } from '../excel/selected-files'
 import { catalogToolInputs } from './catalog-tools'
 import { ModelAdapterStop, type ToolActivity } from './model-adapter'
-import { workflowCompletion, type WorkflowPreparation } from './workflow-completion'
+import { type WorkflowPreparation, workflowCompletion } from './workflow-completion'
 
 export type LocalChatOptions = Omit<BudgetedCatalogProviderOptions, 'signal' | 'proposal'>
 const unavailable = () => new Error('Local Chat is unavailable.')
@@ -33,6 +34,7 @@ const readTools = new Set([
   'preview_workflow_operations',
   'excel_describe_capabilities',
   'excel_preview_procedure',
+  'excel_inspect_selected_files',
 ])
 
 /** Own JSON before the lifecycle's first await. Not authentication or permission to send. */
@@ -74,6 +76,8 @@ export function captureLocalChatOptions(raw: LocalChatOptions): LocalChatOptions
       )
     )
       throw unavailable()
+    if (owned.workflow.excelFileIds !== undefined)
+      selectedExcelFileIdsSchema.parse(owned.workflow.excelFileIds)
     if (
       Object.hasOwn(owned, 'anthropicWorkspaceId') &&
       (owned.budget?.pricingProfile?.provider !== 'anthropic' ||

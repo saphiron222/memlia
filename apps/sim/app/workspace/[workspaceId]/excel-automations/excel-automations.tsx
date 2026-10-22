@@ -1,9 +1,11 @@
 // Copyright (c) 2026 Memlia. All rights reserved.
 'use client'
-import { useId, useRef, useState } from 'react'
+import { type MutableRefObject, useId, useLayoutEffect, useRef, useState } from 'react'
 import { Button, pageHeadingClassName, Textarea } from '@sim/emcn'
 import Link from 'next/link'
 import { PermissionAccessBoundary } from '@/components/permissions/access-boundary'
+import { useSession } from '@/lib/auth/client'
+import { prepareSelectedExcelMessage } from '@/lib/memlia/excel/selected-files'
 import { useCreateWorkflowDraft } from '@/app/workspace/[workspaceId]/home/hooks/use-create-workflow-draft'
 import { useWorkflows } from '@/hooks/queries/workflows'
 import { useWorkspaceFiles } from '@/hooks/queries/workspace-files'
@@ -15,6 +17,9 @@ const focus =
 type Props = { workspaceId: string; userId: string }
 
 export function ExcelAutomations(props: Props) {
+  const session = useSession()
+  if (session.isPending || session.error || session.data?.user?.id !== props.userId)
+    return <p role='status'>Vérifiez votre compte avant de préparer une automatisation Excel.</p>
   return (
     <PermissionAccessBoundary configKey='hideCopilot'>
       <ExcelAutomationsContent key={`${props.workspaceId}:${props.userId}`} {...props} />
@@ -70,8 +75,29 @@ function CatalogList({
   )
 }
 
-function ExampleFiles({ workspaceId }: { workspaceId: string }) {
+type FileSelection = { fileIds: string[]; valid: boolean }
+function ExampleFiles({
+  workspaceId,
+  selection,
+  disabled,
+}: {
+  workspaceId: string
+  selection: MutableRefObject<FileSelection>
+  disabled: boolean
+}) {
   const query = useWorkspaceFiles(workspaceId)
+  const [selected, setSelected] = useState<string[]>([])
+  const catalog = projectExcelCatalog(workspaceId, query, 'files')
+  const valid =
+    selected.length === 0 ||
+    (catalog.status === 'ready' &&
+      selected.every((id) => catalog.items.some((item) => item.id === id)))
+  useLayoutEffect(() => {
+    selection.current = { fileIds: [...selected], valid }
+    return () => {
+      selection.current = { fileIds: [], valid: true }
+    }
+  }, [selection, selected, valid])
   const base = `/workspace/${encodeURIComponent(workspaceId)}/files`
   return (
     <section aria-labelledby='excel-example-files' className='space-y-4'>
@@ -79,10 +105,37 @@ function ExampleFiles({ workspaceId }: { workspaceId: string }) {
         Fichiers exemples
       </h2>
       <p className='text-[var(--text-secondary)]'>
-        Consultez vos classeurs et précisez les règles à appliquer dans votre demande.
+        Sélectionnez jusqu’à quatre classeurs et précisez vos règles. Leurs échantillons pourront
+        être transmis au fournisseur IA configuré lorsque vous enverrez votre demande dans le Chat.
+        La sélection reste visible et modifiable dans ce brouillon avant son envoi.
       </p>
+      {catalog.status === 'ready' && (
+        <fieldset disabled={disabled} className='space-y-2'>
+          <legend>Classeurs exemples à analyser</legend>
+          {catalog.items.map((item) => (
+            <label key={item.id} className='flex items-center gap-2'>
+              <input
+                type='checkbox'
+                checked={selected.includes(item.id)}
+                disabled={!selected.includes(item.id) && selected.length >= 4}
+                onChange={(event) =>
+                  setSelected((ids) =>
+                    event.target.checked ? [...ids, item.id] : ids.filter((id) => id !== item.id)
+                  )
+                }
+              />
+              {item.name}
+            </label>
+          ))}
+        </fieldset>
+      )}
+      {!valid && (
+        <p role='alert'>
+          La sélection n’est plus disponible. Actualisez les fichiers avant de continuer.
+        </p>
+      )}
       <CatalogList
-        catalog={projectExcelCatalog(workspaceId, query, 'files')}
+        catalog={catalog}
         href={(id) => `${base}/${encodeURIComponent(id)}/view`}
         empty='Aucun classeur Excel dans cet espace.'
         retry={() => {
@@ -102,6 +155,8 @@ function ExampleFiles({ workspaceId }: { workspaceId: string }) {
 function ExcelAutomationsContent({ workspaceId, userId }: Props) {
   const [text, setText] = useState('')
   const currentText = useRef('')
+  const fileSelection = useRef<FileSelection>({ fileIds: [], valid: true })
+  const [selectionError, setSelectionError] = useState(false)
   const instructionId = useId()
   const helpId = useId()
   const workflowDraft = useCreateWorkflowDraft({ workspaceId, userId, enabled: true })
@@ -124,7 +179,10 @@ function ExcelAutomationsContent({ workspaceId, userId }: Props) {
           </h2>
           <p className='text-[var(--text-secondary)]'>
             Le volet Memlia pour Excel de bureau sur Windows permet de sauvegarder une copie privée
-            du classeur sur le serveur du cabinet. Il ne modifie pas vos cellules.
+            du classeur sur le serveur du cabinet, puis de prévisualiser et d’approuver des
+            modifications. Après application et vérification, l’enregistrement du classeur reste une
+            action explicite ; son acquittement par Excel ne remplace pas une vérification du
+            fichier.
           </p>
           <a
             href='/excel-addin/manifest.xml'
@@ -139,8 +197,24 @@ function ExcelAutomationsContent({ workspaceId, userId }: Props) {
           onSubmit={(event) => {
             event.preventDefault()
             const instruction = currentText.current
-            if (tooLong || !workflowDraft.available) return
-            void workflowDraft.create(instruction, () => currentText.current === instruction)
+            const selected = JSON.stringify(fileSelection.current)
+            if (tooLong || !workflowDraft.available || !fileSelection.current.valid) return
+            try {
+              const message = prepareSelectedExcelMessage(
+                instruction,
+                fileSelection.current.fileIds
+              )
+              if (new TextEncoder().encode(message).byteLength > 64 * 1024) throw new Error('limit')
+              setSelectionError(false)
+              void workflowDraft.create(
+                message,
+                () =>
+                  currentText.current === instruction &&
+                  JSON.stringify(fileSelection.current) === selected
+              )
+            } catch {
+              setSelectionError(true)
+            }
           }}
         >
           <label htmlFor={instructionId} className='block font-medium'>
@@ -167,6 +241,12 @@ function ExcelAutomationsContent({ workspaceId, userId }: Props) {
           {tooLong && (
             <p role='alert'>Votre demande est trop longue. Raccourcissez-la avant de continuer.</p>
           )}
+          {selectionError && (
+            <p role='alert'>
+              La demande ou sa sélection est invalide ou trop longue. Corrigez-la avant de
+              continuer.
+            </p>
+          )}
           {workflowDraft.message && <p role='status'>{workflowDraft.message}</p>}
           {!workflowDraft.available && !workflowDraft.pending && !workflowDraft.message && (
             <p role='status'>La préparation avec le Chat n’est pas disponible pour le moment.</p>
@@ -181,7 +261,11 @@ function ExcelAutomationsContent({ workspaceId, userId }: Props) {
           </Button>
         </form>
         <PermissionAccessBoundary configKey='hideFilesTab'>
-          <ExampleFiles workspaceId={workspaceId} />
+          <ExampleFiles
+            workspaceId={workspaceId}
+            selection={fileSelection}
+            disabled={workflowDraft.pending}
+          />
         </PermissionAccessBoundary>
         <ExcelTestPreparation
           workspaceId={workspaceId}

@@ -22,6 +22,10 @@ import {
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const proposalInfra = vi.hoisted(() => ({ propose: vi.fn() }))
+const selectedFileInfra = vi.hoisted(() => ({ inspect: vi.fn() }))
+vi.mock('@/lib/memlia/excel/application/selected-files', () => ({
+  inspectSelectedExcelFiles: selectedFileInfra.inspect,
+}))
 vi.mock('@/lib/memlia/chat/workflow-preview-tools', async (original) => {
   const actual = await original<typeof import('@/lib/memlia/chat/workflow-preview-tools')>()
   return {
@@ -2571,7 +2575,8 @@ describe('P11 Excel dispatch through native controlled providers', () => {
   async function turn(
     provider: 'openai' | 'anthropic',
     name: string,
-    params: Record<string, unknown>
+    params: Record<string, unknown>,
+    excelFileIds?: string[]
   ) {
     const http = vi
       .fn()
@@ -2590,6 +2595,7 @@ describe('P11 Excel dispatch through native controlled providers', () => {
         workflowId: 'bound-workflow',
         policy: 'sanitized_details',
         previewOperations: true,
+        ...(excelFileIds ? { excelFileIds } : {}),
       },
     })
     const events = await collect(run.stream)
@@ -2602,6 +2608,48 @@ describe('P11 Excel dispatch through native controlled providers', () => {
             .find((x: { type: string }) => x.type === 'tool_result').content
     return { result: JSON.parse(wire), http, events, run }
   }
+  it.each(['openai', 'anthropic'] as const)(
+    'raccorde inspection sélectionnée via %s natif, transport et lecture fichiers doublés',
+    async (provider) => {
+      selectedFileInfra.inspect
+        .mockReset()
+        .mockResolvedValue({
+          analysis: 'selected_file_sample',
+          executionAvailable: false,
+          persisted: false,
+          files: [{ fileId: 'selected-file', sample: 'Fictif' }],
+        })
+      const { result, http } = await turn(provider, 'excel_inspect_selected_files', {}, [
+        'selected-file',
+      ])
+      expect(result).toMatchObject({
+        analysis: 'selected_file_sample',
+        files: [{ fileId: 'selected-file' }],
+      })
+      expect(selectedFileInfra.inspect).toHaveBeenCalledWith(
+        { principal, workspaceId: 'workspace-1', fileIds: ['selected-file'] },
+        expect.any(AbortSignal)
+      )
+      const first = JSON.parse(http.mock.calls[0][1].body)
+      const tool = first.tools.find(
+        (value: { name: string }) => value.name === 'excel_inspect_selected_files'
+      )
+      expect((provider === 'openai' ? tool.parameters : tool.input_schema).properties).toEqual({})
+      expect(toolsMockFns.mockExecuteTool).not.toHaveBeenCalled()
+    }
+  )
+  it('refuse un fileId inventé dans l’outil natif plutôt que d’élargir la sélection', async () => {
+    selectedFileInfra.inspect.mockReset()
+    const { result } = await turn(
+      'openai',
+      'excel_inspect_selected_files',
+      { fileId: 'PRIVATE_FOREIGN' },
+      ['selected-file']
+    )
+    expect(result).toMatchObject({ ok: false, error: { code: 'invalid_input' } })
+    expect(selectedFileInfra.inspect).not.toHaveBeenCalled()
+    expect(JSON.stringify(result)).not.toContain('PRIVATE_FOREIGN')
+  })
   it.each(['openai', 'anthropic'] as const)(
     'executes description and real draft analysis under %s without registry fallback',
     async (provider) => {
@@ -2817,7 +2865,9 @@ it('refuses native thinking adjustment that would expand an observed output ceil
 describe('v6 diagnosis — certain proposal effect at the final allowed transport', () => {
   it.each([1, 2])('Anthropic synthesis consumes a distinct transport (cap %s)', async (cap) => {
     proposalInfra.propose.mockReset().mockResolvedValue({
-      ok: true, proposal: { proposalId: 'server-proposal', expectedRevision: 7 }, persisted: true,
+      ok: true,
+      proposal: { proposalId: 'server-proposal', expectedRevision: 7 },
+      persisted: true,
     })
     const applied = vi.fn(async () => ({
       status: 'applied' as const,
@@ -2841,7 +2891,8 @@ describe('v6 diagnosis — certain proposal effect at the final allowed transpor
       .mockResolvedValueOnce(anthropicSse())
     vi.stubGlobal('fetch', http)
     const run = runCatalogProvider({
-      ...scope, provider: 'anthropic',
+      ...scope,
+      provider: 'anthropic',
       request: { ...modelRequest, model: 'claude-sonnet-4-5' },
       workflow: {
         workflowId: 'bound-workflow',
@@ -2855,7 +2906,12 @@ describe('v6 diagnosis — certain proposal effect at the final allowed transpor
     if (cap === 1) {
       await expect(collected).rejects.toBeInstanceOf(ModelAdapterStop)
       await expect(collected).rejects.toMatchObject({ code: 'model_calls' })
-    } else expect(await collected).toContainEqual({ type: 'turn_end', turn: 'final', finishReason: 'end_turn' })
+    } else
+      expect(await collected).toContainEqual({
+        type: 'turn_end',
+        turn: 'final',
+        finishReason: 'end_turn',
+      })
     expect(applied).toHaveBeenCalledOnce()
     expect(http).toHaveBeenCalledTimes(cap)
     expect(run.usage()).toEqual({ modelCalls: cap, toolCalls: 1 })

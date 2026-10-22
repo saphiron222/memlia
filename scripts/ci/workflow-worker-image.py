@@ -29,6 +29,7 @@ PROVENANCE_HELPER = ROOT/'deploy/memlia/images/tests/prepare_context.py'
 DOCKER = ['/usr/bin/docker', '--host', 'unix:///var/run/docker.sock']
 BUILDKIT = 'moby/buildkit@sha256:ca9db05302dc3a4846e3401ecfbd27e349fcc614ab046a7d89a83b0a5c313cee'
 BUILDKIT_CONFIG = 'sha256:4a177e10126688bb9608de9661b5c2204222e232d261339ff4c94eb785b211fa'
+SAVE_SECONDS = 180  # local export of the BuildKit image, as in excel-durable-ci.py
 RECIPE = 'deploy/memlia/images/workflow-worker.Dockerfile'
 INPUTS = ('package.json','bun.lock','bunfig.toml','patches','packages','apps/sim',
           'compliance/upstream',RECIPE,RECIPE+'.dockerignore',
@@ -39,8 +40,6 @@ MAX_CONTEXT = 512*1024**2
 MIN_DISK = 12*1024**3
 ID = re.compile(r'sha256:[a-f0-9]{64}\Z')
 CID = re.compile(r'[a-f0-9]{64}\Z')
-EXCLUDED = {'ee','node_modules','.git','.scratch','.next','.turbo','.cache',
-            '__pycache__','uploads','coverage','dist','references','engineering','windows-lab'}
 
 
 def require(ok, reason):
@@ -51,6 +50,10 @@ def load(path, name):
     spec=importlib.util.spec_from_file_location(name,path)
     module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
     return module
+
+
+# Pinned-image admission shared with runtimes/excel/linux/qualification.py (both stores).
+IDENTITY = load(ROOT/'runtimes/excel/linux/image_identity.py','worker_image_identity')
 
 
 def git(root,*args):
@@ -65,6 +68,15 @@ def prepare_context(root, destination, expected):
             'source_refused')
     require(git(root,'rev-parse','HEAD').decode().strip()==expected,'source_refused')
     require(not destination.exists() and not destination.is_symlink(),'context_refused')
+    # Same path rule and guards as every other image context (prepare_context.py).
+    # Loaded directly (not through load()) like the provenance writer it also provides.
+    try:
+        spec=importlib.util.spec_from_file_location('worker_build_provenance',PROVENANCE_HELPER)
+        rule=importlib.util.module_from_spec(spec);spec.loader.exec_module(rule)
+        exclusion,tolerated,refused=rule.exclusion,rule.TOLERATED_EXCLUSIONS,rule.refused
+        write_provenance,image_modes=rule.write_provenance,rule.image_modes
+    except Exception:
+        raise ValueError('context_refused') from None
     hashes={}; total=0
     tree=git(root,'ls-tree','-rz',expected,'--',*INPUTS)
     require(len(tree)<=8*1024**2,'context_refused')
@@ -88,8 +100,7 @@ def prepare_context(root, destination, expected):
                 path=PurePosixPath(entry.name.rstrip('/'))
                 require(not path.is_absolute() and str(path)==entry.name.rstrip('/')
                         and all(p not in ('','.','..') for p in path.parts),'context_refused')
-                if (set(path.parts)&EXCLUDED or any(p.startswith('.env') for p in path.parts)
-                        or path.suffix.lower() in {'.key','.pem','.p12','.pfx','.pyc','.log'}):continue
+                if exclusion(str(path)) is not None:continue
                 if entry.isdir():continue
                 require(entry.isfile() and not entry.issym() and not entry.islnk()
                         and 0<=entry.size<=MAX_MEMBER and str(path) not in hashes,'context_refused')
@@ -103,16 +114,21 @@ def prepare_context(root, destination, expected):
                         and hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()==blob[2],
                         'context_refused')
                 target=staging/str(path); target.parent.mkdir(parents=True,exist_ok=True)
-                target.write_bytes(data); target.chmod(0o755 if entry.mode&0o111 else 0o644)
+                target.write_bytes(data)  # mode from Git below, never from the archive member
                 hashes[str(path)]=hashlib.sha256(data).hexdigest()
         require(all(key in hashes for key in ('package.json','bun.lock','bunfig.toml',RECIPE,
                     RECIPE+'.dockerignore','deploy/memlia/images/tests/bun-LICENSE.md'))
                 and any(p.startswith('compliance/upstream/') for p in hashes),'context_refused')
+        # Every admitted path is copied or left out for a tolerated reason: export-ignore,
+        # gitlinks or a source below a generated-output name never vanish silently.
+        for path in sorted(blobs):
+            reason=exclusion(path)
+            if (path not in hashes) if reason is None else (reason not in tolerated):
+                raise refused('context_refused',path,reason)
         # The same metadata writer consumes only Git-verified archive bytes here.
-        spec=importlib.util.spec_from_file_location('worker_build_provenance',
-            PROVENANCE_HELPER)
-        provenance=importlib.util.module_from_spec(spec);spec.loader.exec_module(provenance)
-        provenance.write_provenance(staging,expected,(staging/'bun.lock').read_bytes())
+        write_provenance(staging,expected,(staging/'bun.lock').read_bytes())
+        # Image-readable modes from the admitted Git modes, whatever the umask (CI: 077).
+        image_modes(staging,{p for p in hashes if blobs[p][0]==b'100755'})
         for path in (staging/'build-provenance').iterdir():
             data=path.read_bytes();total+=len(data)
             require(total<=MAX_CONTEXT,'context_refused')
@@ -215,9 +231,18 @@ def owned_client(argv,work,deadline,cancel,*,capture=False,receipt=None):
             finally:child.stdout.close()
 
 
-def verify_builder(row,cid,name):
-    require(row.get('Id')==cid and row.get('Name')=='/buildx_buildkit_'+name+'0'
-            and row.get('Image')==BUILDKIT_CONFIG,'builder_identity_refused')
+def admit_builder_image(row,save):
+    """Inspect Id of the pinned BuildKit image: config (classic) or verified manifest (containerd)."""
+    try:return IDENTITY.admit(row,BUILDKIT,BUILDKIT_CONFIG,save)
+    except ValueError as error:
+        index=error.args==('image_identity_index_refused',)
+        raise ValueError('builder_identity_index_refused' if index else 'builder_identity_refused') from None
+
+
+def verify_builder(row,cid,name,image):
+    require(image in (BUILDKIT_CONFIG,BUILDKIT.split('@')[1]) and row.get('Id')==cid
+            and row.get('Name')=='/buildx_buildkit_'+name+'0'
+            and row.get('Image')==image,'builder_identity_refused')
 
 
 def verify_image(row,image,name,commit,lock):
@@ -243,7 +268,7 @@ def run(expected,output):
     native=load(ROOT/'runtimes/excel/linux/supervisor.py','worker_native_transport')
     metrics=load(ROOT/'scripts/ci/linux-build-metrics.py','worker_cgroup_metrics')
     deadline=time.monotonic()+1200; cancel=threading.Event(); stopped=threading.Event()
-    reasons=[]; identities={}; cid=None; volume=None; image=None; cgroup=None; monitor=None
+    reasons=[]; identities={}; cid=None; volume=None; image=None; cgroup=None; monitor=None; builder_image=None
     name='memlia-worker-'+uuid.uuid4().hex
     result={'status':'failed','reason':'recipe_refused','sourceCommit':expected,
             'imagePackagingVerified':False,'workerDatabaseQualified':False,
@@ -273,7 +298,7 @@ def run(expected,output):
 
     def inspect_builder(end=None):
         row=one(['container','inspect',cid],end=end)
-        verify_builder(row,cid,name)
+        verify_builder(row,cid,name,builder_image)
         return row
 
     def reading():
@@ -325,6 +350,15 @@ def run(expected,output):
         require(raw(create).decode().strip()==name,'builder_identity_refused')
         result['serverStateUnknown']=True
         client(['buildx','inspect',name,'--bootstrap'])
+        archive=output/'buildkit-image.tar'
+        def save_builder():
+            require(not archive.exists() and not archive.is_symlink(),'builder_identity_refused')
+            # Dedicated bound: raw() caps every other call at 30 s.
+            native._command([*DOCKER,'image','save','--output',str(archive),BUILDKIT],b'',
+                            min(deadline,time.monotonic()+SAVE_SECONDS),None,output,1024**2)
+            return archive
+        try:builder_image=admit_builder_image(one(['image','inspect',BUILDKIT]),save_builder)
+        finally:archive.unlink(missing_ok=True)
         candidate=one(['container','inspect','buildx_buildkit_'+name+'0'])
         require(CID.fullmatch(candidate.get('Id','')) is not None,'builder_identity_refused')
         cid=candidate['Id']; row=inspect_builder()
@@ -359,7 +393,7 @@ def run(expected,output):
         result['imagePackagingVerified']=True;result['reason']=None
     except (ValueError,OSError,subprocess.SubprocessError,KeyError,TypeError) as error:
         allowed={'source_refused','context_refused','host_refused','disk_refused',
-                 'builder_identity_refused','limits_refused','cgroup_refused','buildx_refused',
+                 'builder_identity_refused','builder_identity_index_refused','limits_refused','cgroup_refused','buildx_refused',
                  'image_refused','observation_refused','client_ownership_refused','recipe_build_failed',
                  'recipe_build_interrupted','recipe_build_log_limit'}
         result['reason']=str(error) if str(error) in allowed else 'recipe_refused'

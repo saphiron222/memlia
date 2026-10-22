@@ -3089,6 +3089,34 @@
       "when": 1792587396265,
       "tag": "0441_memlia_desktop_agent_enrollment",
       "breakpoints": true
+    },
+    {
+      "idx": 442,
+      "version": "7",
+      "when": 1792605000000,
+      "tag": "0442_memlia_desktop_agent_commands",
+      "breakpoints": true
+    },
+    {
+      "idx": 443,
+      "version": "7",
+      "when": 1792605000001,
+      "tag": "0443_memlia_desktop_agent_artifacts",
+      "breakpoints": true
+    },
+    {
+      "idx": 444,
+      "version": "7",
+      "when": 1792605000002,
+      "tag": "0444_memlia_desktop_agent_presence",
+      "breakpoints": true
+    },
+    {
+      "idx": 445,
+      "version": "7",
+      "when": 1792605000003,
+      "tag": "0445_memlia_desktop_procedures",
+      "breakpoints": true
     }
   ]
 }

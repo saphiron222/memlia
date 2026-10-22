@@ -1,3 +1,4 @@
+// Modified by Memlia: optional deployment fields are never forwarded as undefined keys.
 import type { Principal } from '@sim/auth/principal'
 import { WorkflowLockedError } from '@sim/platform-authz/workflow'
 import {
@@ -23,6 +24,7 @@ import {
 } from '@sim/testing/mocks/workflows-persistence-utils.mock'
 import { workspaceAuthzMock, workspaceAuthzMockFns } from '@sim/testing/mocks/workspace-authz.mock'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { stringifyBoundedJson } from '@/lib/core/utils/bounded-json'
 
 const mocks = vi.hoisted(() => ({
   listMcpTools: vi.fn(),
@@ -182,6 +184,53 @@ describe('workflow deployment application use cases', () => {
         })
       )
       expect(mockAudit).not.toHaveBeenCalled()
+    }
+  )
+
+  // The Excel publish snapshot captures these params as strict JSON: a present
+  // `undefined` field is refused there, so an absent input must stay absent.
+  it.each([
+    {
+      route: 'UI session deploy',
+      principal: createSessionPrincipal({ userId: 'session-user' }),
+      input: { workflowId: 'workflow-1', requestId: 'request-1' },
+      present: {},
+    },
+    {
+      route: 'v2 deploy without metadata',
+      principal: createSessionPrincipal({ userId: 'session-user' }),
+      input: {
+        workflowId: 'workflow-1',
+        name: undefined,
+        description: undefined,
+        requestId: 'request-1',
+        lintDeployedVersion: true,
+      },
+      present: {},
+    },
+    {
+      route: 'delegated deploy with an operation key',
+      principal: adminPrincipals[2].principal,
+      input: {
+        workflowId: 'workflow-1',
+        description: undefined,
+        requestId: 'request-1',
+        idempotencyKey: 'deploy-idempotency-1',
+      },
+      present: { idempotencyKey: 'deploy-idempotency-1', captureAnalytics: false },
+    },
+  ])(
+    'passes no undefined optional field to the deploy for a $route',
+    async ({ principal, input, present }) => {
+      await deployWorkflow.execute({ principal, input })
+
+      const params = mockDeploy.mock.calls[0][0]
+      for (const key of ['versionName', 'versionDescription', 'idempotencyKey']) {
+        expect(Object.hasOwn(params, key)).toBe(Object.hasOwn(present, key))
+      }
+      expect(params).toMatchObject({ requestId: 'request-1', ...present })
+      expect(Object.values(params)).not.toContain(undefined)
+      expect(stringifyBoundedJson(params, 2 * 1024 * 1024, { strict: true })).toBeDefined()
     }
   )
 

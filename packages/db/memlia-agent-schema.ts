@@ -5,6 +5,7 @@ import {
   check,
   foreignKey,
   index,
+  jsonb,
   pgTable,
   text,
   timestamp,
@@ -148,6 +149,189 @@ export const memliaDesktopAgentCertificate = pgTable(
     check(
       'memlia_agent_cert_input_bounds',
       sql`length(${t.id}) BETWEEN 1 AND 128 AND length(${t.agentId}) BETWEEN 1 AND 128 AND length(${t.installationId}) BETWEEN 1 AND 128 AND length(${t.fqdn}) BETWEEN 1 AND 2048 AND ${t.windowsSid} ~ '^S-1-([0-9]+-){1,14}[0-9]+$' AND ${t.certificateSerial} ~ '^[a-f0-9]{1,40}$' AND octet_length(${t.certificatePem}) BETWEEN 1 AND 16384`
+    ),
+  ]
+)
+
+/** Serializes a desktop across certificates/sessions; counters never reset on expiry. */
+export const memliaDesktopAgentState = pgTable(
+  'memlia_desktop_agent_state',
+  {
+    agentId: text('agent_id').primaryKey(),
+    epoch: bigint('epoch', { mode: 'number' }).notNull().default(0),
+    observedCertificateId: text('observed_certificate_id').references(
+      () => memliaDesktopAgentCertificate.id
+    ),
+    observedSessionId: text('observed_session_id'),
+    observedWindowsSid: text('observed_windows_sid'),
+    observedAt: timestamp('observed_at', { withTimezone: true }),
+  },
+  (t) => [
+    check('memlia_agent_state_epoch', sql`${t.epoch} BETWEEN 0 AND 9007199254740991`),
+    check(
+      'memlia_agent_presence_complete',
+      sql`(${t.observedAt} IS NULL AND ${t.observedCertificateId} IS NULL AND ${t.observedSessionId} IS NULL AND ${t.observedWindowsSid} IS NULL) OR (${t.observedAt} IS NOT NULL AND ${t.observedCertificateId} IS NOT NULL AND ${t.observedSessionId} IS NOT NULL AND ${t.observedWindowsSid} IS NOT NULL)`
+    ),
+  ]
+)
+
+/** Browser-authored intent and immutable claimed command; no certificate can create an intent. */
+export const memliaDesktopAgentCommand = pgTable(
+  'memlia_desktop_agent_command',
+  {
+    id: text('id').primaryKey(),
+    agentId: text('agent_id')
+      .notNull()
+      .references(() => memliaDesktopAgentState.agentId),
+    certificateId: text('certificate_id')
+      .notNull()
+      .references(() => memliaDesktopAgentCertificate.id),
+    organizationId: text('organization_id').references(() => organization.id),
+    workspaceId: text('workspace_id')
+      .notNull()
+      .references(() => workspace.id),
+    ownerUserId: text('owner_user_id')
+      .notNull()
+      .references(() => user.id),
+    sessionId: text('session_id').notNull(),
+    windowsSid: text('windows_sid').notNull(),
+    runId: text('run_id').notNull(),
+    capabilityId: text('capability_id').notNull(),
+    requestId: text('request_id'),
+    requestDigest: text('request_digest'),
+    status: text('status').notNull().default('queued'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    epoch: bigint('epoch', { mode: 'number' }),
+    leaseUntil: timestamp('lease_until', { withTimezone: true }),
+    digest: text('digest'),
+    intent: jsonb('intent').notNull(),
+    command: jsonb('command'),
+    capability: jsonb('capability'),
+    consentId: text('consent_id'),
+    lastSequence: bigint('last_sequence', { mode: 'number' }).notNull().default(-1),
+  },
+  (t) => [
+    check(
+      'memlia_agent_request_complete',
+      sql`(${t.requestId} IS NULL AND ${t.requestDigest} IS NULL) OR (${t.requestId} IS NOT NULL AND ${t.requestDigest} IS NOT NULL AND ${t.requestId} ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' AND ${t.requestDigest} ~ '^sha256:[0-9a-f]{64}$')`
+    ),
+    uniqueIndex('memlia_agent_command_request_uq').on(t.ownerUserId, t.workspaceId, t.requestId),
+    uniqueIndex('memlia_agent_command_run_uq').on(t.runId),
+    uniqueIndex('memlia_agent_command_cap_uq').on(t.capabilityId),
+    uniqueIndex('memlia_agent_command_consent_uq').on(t.consentId),
+    uniqueIndex('memlia_agent_command_desktop_uq')
+      .on(t.agentId)
+      .where(sql`${t.status} IN ('claimed','consented','running','hold')`),
+    index('memlia_agent_command_queue_idx').on(t.agentId, t.status, t.createdAt),
+    check(
+      'memlia_agent_command_status',
+      sql`${t.status} IN ('queued','claimed','consented','running','hold','terminal')`
+    ),
+    check(
+      'memlia_agent_command_lifetime',
+      sql`${t.expiresAt} > ${t.createdAt} AND ${t.expiresAt} <= ${t.createdAt} + interval '30 minutes'`
+    ),
+    check(
+      'memlia_agent_command_counters',
+      sql`${t.lastSequence} BETWEEN -1 AND 9007199254740991 AND (${t.epoch} IS NULL OR ${t.epoch} BETWEEN 1 AND 9007199254740991)`
+    ),
+    check(
+      'memlia_agent_command_claimed',
+      sql`${t.status} = 'queued' OR (${t.command} IS NOT NULL AND ${t.epoch} IS NOT NULL AND ${t.digest} IS NOT NULL AND ${t.leaseUntil} IS NOT NULL)`
+    ),
+    check(
+      'memlia_agent_command_capability',
+      sql`(${t.capability} IS NULL) = (${t.consentId} IS NULL)`
+    ),
+  ]
+)
+
+/** Append-only receipt CAS: identical retry succeeds, divergent same sequence never does. */
+export const memliaDesktopAgentReceipt = pgTable(
+  'memlia_desktop_agent_receipt',
+  {
+    id: text('id').primaryKey(),
+    commandId: text('command_id')
+      .notNull()
+      .references(() => memliaDesktopAgentCommand.id),
+    sequence: bigint('sequence', { mode: 'number' }).notNull(),
+    digest: text('digest').notNull(),
+    receipt: jsonb('receipt').notNull(),
+    artifacts: jsonb('artifacts').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('memlia_agent_receipt_sequence_uq').on(t.commandId, t.sequence),
+    check('memlia_agent_receipt_sequence', sql`${t.sequence} BETWEEN 0 AND 9007199254740991`),
+    check('memlia_agent_receipt_digest', sql`${t.digest} ~ '^sha256:[a-f0-9]{64}$'`),
+  ]
+)
+
+/** Personal metadata only. Bytes and native run history remain in the command store. */
+export const memliaDesktopProcedure = pgTable(
+  'memlia_desktop_procedure',
+  {
+    id: text('id').primaryKey(),
+    workspaceId: text('workspace_id')
+      .notNull()
+      .references(() => workspace.id, { onDelete: 'cascade' }),
+    ownerUserId: text('owner_user_id')
+      .notNull()
+      .references(() => user.id, { onDelete: 'cascade' }),
+    revision: bigint('revision', { mode: 'number' }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('memlia_procedure_scope_uq').on(t.id, t.workspaceId, t.ownerUserId),
+    index('memlia_procedure_owner_idx').on(t.workspaceId, t.ownerUserId, t.createdAt),
+    check('memlia_procedure_revision', sql`${t.revision} BETWEEN 1 AND 9007199254740991`),
+  ]
+)
+/** Application append-only; DB prevents version/key reuse and foreign parent scope. */
+export const memliaDesktopProcedureVersion = pgTable(
+  'memlia_desktop_procedure_version',
+  {
+    id: text('id').primaryKey(),
+    procedureId: text('procedure_id').notNull(),
+    workspaceId: text('workspace_id').notNull(),
+    ownerUserId: text('owner_user_id').notNull(),
+    revision: bigint('revision', { mode: 'number' }).notNull(),
+    requestId: text('request_id').notNull(),
+    requestDigest: text('request_digest').notNull(),
+    commandId: text('command_id')
+      .notNull()
+      .references(() => memliaDesktopAgentCommand.id),
+    artifactId: text('artifact_id').notNull(),
+    artifactSha256: text('artifact_sha256').notNull(),
+    name: text('name').notNull(),
+    description: text('description').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    foreignKey({
+      name: 'memlia_procedure_version_scope_fk',
+      columns: [t.procedureId, t.workspaceId, t.ownerUserId],
+      foreignColumns: [
+        memliaDesktopProcedure.id,
+        memliaDesktopProcedure.workspaceId,
+        memliaDesktopProcedure.ownerUserId,
+      ],
+    }).onDelete('cascade'),
+    uniqueIndex('memlia_procedure_version_uq').on(t.procedureId, t.revision),
+    uniqueIndex('memlia_procedure_request_uq').on(t.workspaceId, t.ownerUserId, t.requestId),
+    check('memlia_procedure_version_revision', sql`${t.revision} BETWEEN 1 AND 9007199254740991`),
+    check(
+      'memlia_procedure_text_bounds',
+      sql`length(${t.name}) BETWEEN 1 AND 120 AND length(${t.description}) <= 2000`
+    ),
+    check(
+      'memlia_procedure_hashes',
+      sql`${t.requestDigest} ~ '^sha256:[a-f0-9]{64}$' AND ${t.artifactSha256} ~ '^sha256:[a-f0-9]{64}$'`
+    ),
+    check(
+      'memlia_procedure_request_id',
+      sql`${t.requestId} ~ '^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$'`
     ),
   ]
 )

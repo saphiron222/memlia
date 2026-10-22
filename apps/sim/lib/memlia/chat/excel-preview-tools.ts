@@ -1,7 +1,8 @@
 // Copyright (c) 2026 Memlia. All rights reserved.
+
+import { ExcelProcedureSchema } from '@memlia/contracts'
 import { parsePrincipal, type SessionPrincipal } from '@sim/auth/principal'
 import { db } from '@sim/db'
-import { ExcelProcedureSchema } from '@memlia/contracts'
 import { z } from 'zod'
 import { stringifyBoundedJson } from '@/lib/core/utils/bounded-json'
 import { waitWithAbort } from '@/lib/core/utils/concurrency'
@@ -9,23 +10,32 @@ import { assertWorkspaceCapability } from '@/lib/permission-groups/capability-as
 import { defineAuthorizedWorkflowUseCase } from '@/lib/workflows/application/authorized-workflow-use-case'
 import { workflowOperations } from '@/lib/workflows/application/operations'
 import { resolvePrincipalWorkflowContext } from '@/lib/workflows/application/principal-scope'
+import { inspectSelectedExcelFiles } from '../excel/application/selected-files'
 import {
   describeExcelProcedureProfile,
   excelProcedureDraftSchema,
   inspectExcelProcedureDraftCapabilities,
 } from '../excel/procedure-capabilities'
 import { validateExcelProcedureDraftDataflow } from '../excel/procedure-dataflow'
+import { selectedExcelFileIdsSchema } from '../excel/selected-files'
 
 export const excelPreviewInputs = Object.freeze({
   excel_describe_capabilities: z.object({}).strict(),
   excel_preview_procedure: z.object({ request: excelProcedureDraftSchema }).strict(),
+  excel_inspect_selected_files: z.object({}).strict(),
 })
-type Context = { principal: SessionPrincipal; workspaceId: string; workflowId: string }
+type Context = {
+  principal: SessionPrincipal
+  workspaceId: string
+  workflowId: string
+  excelFileIds?: string[]
+}
 const scopeSchema = z
   .object({
     principal: z.unknown(),
     workspaceId: ExcelProcedureSchema.shape.workspaceId,
     workflowId: ExcelProcedureSchema.shape.workflowId,
+    excelFileIds: selectedExcelFileIdsSchema.optional(),
   })
   .strict()
 const failure = (
@@ -80,7 +90,11 @@ export function createExcelPreviewTools(raw: Context) {
     async dispatch(toolId: string, input: unknown, signal?: AbortSignal) {
       try {
         signal?.throwIfAborted()
-        if (toolId !== 'excel_describe_capabilities' && toolId !== 'excel_preview_procedure')
+        if (
+          toolId !== 'excel_describe_capabilities' &&
+          toolId !== 'excel_preview_procedure' &&
+          toolId !== 'excel_inspect_selected_files'
+        )
           return failure('tool_not_allowed')
         // Own the complete bounded wrapper before any authorization await. No Zod default/coercion.
         const captured = stringifyBoundedJson(input, 512 * 1024, { strict: true })
@@ -95,6 +109,19 @@ export function createExcelPreviewTools(raw: Context) {
           signal
         )
         signal?.throwIfAborted()
+        if (toolId === 'excel_inspect_selected_files') {
+          if (!scope.excelFileIds?.length) return failure('unavailable')
+          const data = await inspectSelectedExcelFiles(
+            {
+              principal: scope.principal,
+              workspaceId: scope.workspaceId,
+              fileIds: scope.excelFileIds,
+            },
+            signal
+          )
+          signal?.throwIfAborted()
+          return { ok: true as const, data }
+        }
         const data =
           'request' in parsed.data
             ? {

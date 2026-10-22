@@ -12,10 +12,12 @@ import {
 } from '@/lib/api/contracts/excel-test-preparations'
 import { useWorkspacePermissionsContext } from '@/app/workspace/[workspaceId]/providers/workspace-permissions-provider'
 import type { Catalog } from './catalog'
+import { ExcelExecution } from './execution'
 import {
-  clearPreparationRecovery,
   persistPreparationRecovery,
   readPreparationRecovery,
+  readPreparedRecovery,
+  retainPreparedRecovery,
 } from './preparation-recovery'
 
 type Props = { workspaceId: string; userId: string; catalog: Catalog }
@@ -43,7 +45,8 @@ function PreparationSelection({ workspaceId, userId, catalog }: Props) {
       </p>
       <p className='text-[var(--text-secondary)]'>
         Après rechargement dans cet onglet, choisissez le même workflow pour vérifier manuellement
-        une préparation non confirmée. Fermer l’onglet peut perdre cette reprise.
+        une préparation ou son résultat. Fermer l’onglet peut perdre cette reprise ; elle n’est pas
+        partagée entre navigateurs.
       </p>
       <label className='flex flex-col gap-2'>
         Workflow à préparer
@@ -104,6 +107,7 @@ function PreparationActions({
     | 'preparing'
     | 'uncertain'
     | 'prepared'
+    | 'restored'
     | 'refused'
     | 'storage-refused'
     | 'recovery-blocked'
@@ -128,6 +132,11 @@ function PreparationActions({
       setAttempt(recovery.body)
       setPhase('uncertain')
       onLock(true)
+    } else if (recovery.status === 'prepared') {
+      recoveryEntry.current = recovery.entry
+      setAttempt(recovery.body)
+      setReceipt(recovery.prepared)
+      setPhase('restored')
     } else if (recovery.status === 'blocked') {
       setPhase('recovery-blocked')
     }
@@ -140,6 +149,14 @@ function PreparationActions({
   const pending = phase === 'observing' || phase === 'preparing'
   async function observe() {
     if (!canEdit || !live.current || busy.current || phase === 'uncertain') return
+    if ((phase === 'prepared' || phase === 'restored') && attempt && receipt) {
+      const found = readPreparedRecovery({ userId, workspaceId, workflowId }, attempt, receipt)
+      if (found.status !== 'prepared') {
+        setPhase('recovery-blocked')
+        return
+      }
+      recoveryEntry.current = found.entry
+    }
     busy.current = true
     onLock(true)
     setPhase('observing')
@@ -206,13 +223,18 @@ function PreparationActions({
       })
       if (!live.current || controller.signal.aborted) return
       if (result.workflowId !== workflowId) throw new Error('scope')
-      if (!clearPreparationRecovery({ userId, workspaceId, workflowId }, saved.entry)) {
+      const retained = retainPreparedRecovery(
+        { userId, workspaceId, workflowId },
+        saved.body,
+        result,
+        saved.entry
+      )
+      if (retained.status !== 'saved') {
         setPhase('recovery-blocked')
         return
       }
-      recoveryEntry.current = null
+      recoveryEntry.current = retained.entry
       setReceipt(result)
-      setAttempt(null)
       setPhase('prepared')
       onLock(false)
     } catch {
@@ -238,6 +260,20 @@ function PreparationActions({
           Version {receipt?.version} préparée pour test. Aucun fichier exécuté ; aucune
           automatisation activée.
         </p>
+      )}
+      {phase === 'restored' && (
+        <p role='status'>
+          Reprise non confirmée depuis cet onglet. Aucun résultat ni accord n’a été restauré. La
+          lecture et le test restent soumis aux droits et à la version vérifiés par le serveur.
+        </p>
+      )}
+      {(phase === 'prepared' || phase === 'restored') && receipt && attempt && (
+        <ExcelExecution
+          workspaceId={workspaceId}
+          userId={userId}
+          prepared={receipt}
+          preparation={attempt}
+        />
       )}
       {phase === 'refused' && (
         <p role='alert'>
@@ -267,6 +303,7 @@ function PreparationActions({
       {(phase === 'idle' ||
         phase === 'observing' ||
         phase === 'prepared' ||
+        phase === 'restored' ||
         phase === 'refused') && (
         <Button
           type='button'

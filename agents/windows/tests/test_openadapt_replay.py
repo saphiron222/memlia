@@ -37,7 +37,7 @@ class ReplayControlsTests(unittest.TestCase):
 
 
 class ReplayCompositionTests(unittest.TestCase):
-    def fixture(self,*,cancel=False,revoke=False,clean=True,forced=False,partial=False,verified=False,worker_unknown=False):
+    def fixture(self,*,cancel=False,revoke=False,clean=True,forced=False,partial=False,verified=False,worker_unknown=False,demo=False):
         module=importlib.import_module('memlia_agent.openadapt_replay')
         trace=[];jobs=[];state={'input':False}
         class Reservation:
@@ -53,6 +53,8 @@ class ReplayCompositionTests(unittest.TestCase):
         class Controls:
             def __init__(self,*args):self._lock=threading.RLock();self._recording_indicated=False
             def _start(self):trace.append('consented')
+            def consent_observation(self,**kwargs):
+                return {'commandDigest':'sha256:'+'a'*64}
             def checkpoint(self,**kwargs):trace.append('indicator')
             def recording_preparing(self,**kwargs):trace.append('preparing')
             def recording_started(self,**kwargs):self._recording_indicated=True;trace.append('indicated')
@@ -71,6 +73,7 @@ class ReplayCompositionTests(unittest.TestCase):
                 report={'transaction_outcome':'VERIFIED' if verified else 'COMPLETED_UNVERIFIED',
                         'execution_outcome':'VERIFIED' if verified else 'COMPLETED_UNVERIFIED',
                         'production_eligible':verified}
+                if demo:report['execution_profile']='demo'
                 (self.root/'run').mkdir(exist_ok=True)
                 (self.root/'run'/'report.json').write_text(json.dumps(report))
                 return JobState(0,True,1 if worker_unknown else 0,forced,True)
@@ -84,9 +87,14 @@ class ReplayCompositionTests(unittest.TestCase):
             def cleanup(self):trace.append('job_closed');return clean
         def authority():
             if revoke and state['input']:raise ValueError('PRIVATE_LEASE_FAILURE')
+        class AdmissionDouble:
+            # Explicit mTLS boundary double; real child IPC is tested separately.
+            closed=True
+            def __init__(self,root,request,revalidate):self.revalidate=revalidate
+            def serve(self):self.revalidate()
         stack=ExitStack()
         for key,value in dict(_ready=lambda:None,reserve_desktop=Reservation,LocalStop=Signal,
-                              _ReplayControls=Controls,OwnedJob=Job,_active=None).items():
+                              _ReplayControls=Controls,OwnedJob=Job,ParentAdmission=AdmissionDouble,_active=None).items():
             stack.enter_context(patch.object(module,key,value))
         stack.enter_context(patch.object(module.sys,'platform','win32'))
         stack.enter_context(patch.dict(os.environ,{'SYSTEMROOT':'C:\\Windows'}))
@@ -94,6 +102,22 @@ class ReplayCompositionTests(unittest.TestCase):
                      deployment_bytes=b'{}',parameters_bytes=b'{}',admission_bytes=b'fictive-only',
                      deadline_monotonic=time.monotonic()+20,revalidate=authority)
         return module,stack,request,trace,jobs
+
+    def test_replay_hook_is_after_local_decision_and_before_worker(self):
+        module,stack,request,trace,jobs=self.fixture()
+        def accepted(observation):
+            self.assertEqual(observation['commandDigest'],request['operation_digest'])
+            trace.append('server_consent')
+        request['on_local_consent']=accepted
+        with stack:module.replay_compiled_recording(**request)
+        self.assertLess(trace.index('consented'),trace.index('server_consent'))
+        self.assertLess(trace.index('server_consent'),trace.index('start'))
+
+    def test_replay_hook_refusal_prevents_any_worker(self):
+        module,stack,request,trace,jobs=self.fixture()
+        request['on_local_consent']=lambda observation:True
+        with stack,self.assertRaises(module.ReplayError):module.replay_compiled_recording(**request)
+        self.assertNotIn('start',trace)
 
     def test_unverified_native_completion_is_uncertain_after_real_host_cleanup(self):
         module,stack,request,trace,jobs=self.fixture()
@@ -161,3 +185,36 @@ class ReplayCompositionTests(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main()
+
+
+class PersonalReplayCompositionTests(ReplayCompositionTests):
+    # Only these new methods are selected; inherited historical tests are not replayed.
+    def test_demo_completion_is_observed_without_production_verification(self):
+        module,stack,request,trace,jobs=self.fixture(demo=True)
+        class AdmissionDouble:
+            closed=True
+            def __init__(self,root,request,revalidate):self.revalidate=revalidate
+            def serve(self):self.revalidate();trace.append('parent_checkpoint')
+        with stack,patch.object(module,'ParentAdmission',AdmissionDouble):
+            result=module.replay_compiled_recording(**request)
+        self.assertEqual(result.status,'test_observed')
+        self.assertIn('parent_checkpoint',trace)
+        self.assertEqual(result.transaction_outcome,'COMPLETED_UNVERIFIED')
+        self.assertFalse(jobs[0].root.exists())
+
+    def test_production_refuses_before_local_consent_or_worker(self):
+        module,stack,request,trace,jobs=self.fixture();request['mode']='production'
+        with stack,self.assertRaises(module.ReplayError) as caught:module.replay_compiled_recording(**request)
+        self.assertEqual(caught.exception.code,'replay_production_unqualified')
+        self.assertEqual(jobs,[]);self.assertNotIn('consented',trace)
+
+    def test_demo_cannot_claim_a_verified_production_report(self):
+        module,stack,request,trace,jobs=self.fixture(demo=True,verified=True)
+        class AdmissionDouble:
+            closed=True
+            def __init__(self,*args):pass
+            def serve(self):pass
+        with stack,patch.object(module,'ParentAdmission',AdmissionDouble),self.assertRaises(module.ReplayError) as caught:
+            module.replay_compiled_recording(**request)
+        self.assertEqual(caught.exception.effect_state,'uncertain')
+        self.assertIn('run/report.json',dict(caught.exception.private_artifacts))

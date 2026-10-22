@@ -1,6 +1,10 @@
 // Modified by Memlia: qualify opt-in strict JSON capture while retaining legacy semantics.
 import { describe, expect, it, vi } from 'vitest'
-import { isJsonWithinByteLimit, stringifyBoundedJson } from '@/lib/core/utils/bounded-json'
+import {
+  isJsonWithinByteLimit,
+  readOwnDataString,
+  stringifyBoundedJson,
+} from '@/lib/core/utils/bounded-json'
 
 describe('strict bounded JSON capture for workflow previews', () => {
   it.each([Number.NaN, Number.POSITIVE_INFINITY, -1, 1.5])(
@@ -186,4 +190,35 @@ describe('bounded JSON', () => {
       expect(serialize).not.toHaveBeenCalled()
     }
   )
+})
+
+describe('own data string reads for log correlation', () => {
+  it('reads a nested own data string', () => {
+    expect(readOwnDataString({ params: { workflowId: 'w' } }, ['params', 'workflowId'])).toBe('w')
+  })
+  it('never runs an accessor and reads it as absent', () => {
+    const get = vi.fn(() => 'w')
+    expect(readOwnDataString(Object.defineProperty({}, 'id', { get }), ['id'])).toBeUndefined()
+    expect(get).not.toHaveBeenCalled()
+  })
+  it.each([
+    [undefined, ['id']],
+    [{ id: 1 }, ['id']],
+    [{ params: undefined }, ['params', 'workflowId']],
+    [Object.create({ id: 'inherited' }), ['id']],
+    [{ id: 'x'.repeat(257) }, ['id']],
+  ])('reads %j along %j as absent', (value, path) => {
+    expect(readOwnDataString(value, path)).toBeUndefined()
+  })
+  it('swallows a throwing proxy trap', () => {
+    const proxy = new Proxy(
+      {},
+      {
+        getOwnPropertyDescriptor() {
+          throw new Error('trap')
+        },
+      }
+    )
+    expect(readOwnDataString(proxy, ['id'])).toBeUndefined()
+  })
 })

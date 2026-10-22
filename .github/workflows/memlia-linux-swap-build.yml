@@ -2,6 +2,11 @@
 name: Expérience Linux avec swap — non qualifiée
 on:
   workflow_dispatch:
+    inputs:
+      worker_image:
+        description: Construire seulement l’image worker (sans build Next)
+        type: boolean
+        default: false
   push:
     branches: [build/linux-swap-measurement]
 permissions:
@@ -10,8 +15,13 @@ concurrency:
   group: memlia-linux-swap-${{ github.ref }}
   cancel-in-progress: false
 jobs:
+  worker-image:
+    if: github.event_name == 'workflow_dispatch' && github.event.repository.private == false && github.repository == 'saphiron222/memlia' && inputs.worker_image == true
+    uses: ./.github/workflows/memlia-workflow-worker-image.yml
+    with:
+      expected_source_sha: ${{ github.sha }}
   measure:
-    if: github.event.repository.private == false
+    if: github.event.repository.private == false && inputs.worker_image != true
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     strategy:

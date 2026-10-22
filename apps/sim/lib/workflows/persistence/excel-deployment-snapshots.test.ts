@@ -2,10 +2,13 @@
 import { ExcelProcedureSchema } from '@memlia/contracts'
 import type { PrincipalActor } from '@sim/auth/principal'
 import { dbChainMockFns, queueTableRows, resetDbChainMock, schemaMock } from '@sim/testing'
+import { getMockLogger } from '@sim/testing/mocks/logger.mock'
 import {
   permissionGroupScopeMock,
   permissionGroupScopeMockFns,
 } from '@sim/testing/mocks/permission-group-scope.mock'
+import { DrizzleQueryError } from 'drizzle-orm/errors'
+import postgres from 'postgres'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   materializeExcelProcedureSnapshot,
@@ -18,12 +21,27 @@ import { captureWorkflowExcelDeploymentSnapshot } from './excel-deployment-snaps
 vi.mock('@/lib/permission-groups/config-scope.server', () => permissionGroupScopeMock)
 
 function input(actor: PrincipalActor | undefined = { kind: 'session', userId: 'author' }) {
-  return { workflowId: 'workflow', assertedWorkspaceId: 'space', idempotencyKey: 'publish', actor }
+  return {
+    workflowId: 'workflow',
+    assertedWorkspaceId: 'space',
+    idempotencyKey: 'publish',
+    actor,
+    requestId: 'request',
+  }
+}
+function expectRefusalCheck(check: string, extra: Record<string, unknown> = {}) {
+  expect(getMockLogger('ExcelDeploymentSnapshots').error).toHaveBeenCalledTimes(1)
+  expect(getMockLogger('ExcelDeploymentSnapshots').error).toHaveBeenCalledWith(
+    '[request] Excel deployment snapshot refused',
+    { workflowId: 'workflow', check, ...extra }
+  )
 }
 function queueGraph(
   change: {
     workspaceId?: string
     revision?: number
+    storedRevision?: number
+    padRequestTo?: number
     archived?: boolean
     workspaceArchived?: boolean
     noExcel?: boolean
@@ -42,13 +60,16 @@ function queueGraph(
   queueTableRows(schemaMock.workflow, [
     {
       workspaceId: 'space',
-      draftRevision: 7,
+      draftRevision: change.storedRevision ?? 7,
       variables: {},
       archivedAt: change.archived ? new Date() : null,
     },
   ])
   queueTableRows(schemaMock.workflow, [
-    { workspaceId: change.workspaceId ?? 'space', draftRevision: change.revision ?? 7 },
+    {
+      workspaceId: change.workspaceId ?? 'space',
+      draftRevision: change.revision ?? change.storedRevision ?? 7,
+    },
   ])
   queueTableRows(schemaMock.workspace, [
     { organizationId: null, archivedAt: change.workspaceArchived ? new Date() : null },
@@ -68,21 +89,27 @@ function queueGraph(
         request: {
           id: 'request',
           type: 'code',
-          value:
+          value: pad(
             change.requestValue ??
-            JSON.stringify(
-              change.request ?? {
-                procedure,
-                sources: { source: { fileId: 'file-fixture', sheetName: 'Source' } },
-                output: { fileName: 'result.xlsx', sheetName: 'Result' },
-              }
-            ),
+              JSON.stringify(
+                change.request ?? {
+                  procedure,
+                  sources: { source: { fileId: 'file-fixture', sheetName: 'Source' } },
+                  output: { fileName: 'result.xlsx', sheetName: 'Result' },
+                }
+              ),
+            change.padRequestTo
+          ),
         },
       },
     },
   ])
   queueTableRows(schemaMock.workflowEdges, [])
   queueTableRows(schemaMock.workflowSubflows, [])
+}
+/** Pads with JSON whitespace to an exact UTF-8 byte size, keeping the same parsed request. */
+function pad(value: string, bytes?: number) {
+  return bytes === undefined ? value : value + ' '.repeat(bytes - Buffer.byteLength(value, 'utf8'))
 }
 function noPublicationSideEffect() {
   expect(dbChainMockFns.insert).not.toHaveBeenCalled()
@@ -139,6 +166,7 @@ describe('ordinary Excel publication capture — raw SQL boundary doubled', () =
         captureWorkflowExcelDeploymentSnapshot({ ...input(), assertedWorkspaceId })
       ).rejects.toMatchObject({ code: 'validation' })
       noPublicationSideEffect()
+      expectRefusalCheck('asserted_workspace')
     }
   )
 
@@ -160,6 +188,7 @@ describe('ordinary Excel publication capture — raw SQL boundary doubled', () =
         captureWorkflowExcelDeploymentSnapshot({ ...input(), actor })
       ).rejects.toMatchObject({ code: 'validation' })
       noPublicationSideEffect()
+      expectRefusalCheck('author')
     }
   )
 
@@ -194,30 +223,122 @@ describe('ordinary Excel publication capture — raw SQL boundary doubled', () =
   })
 
   it.each([
-    { revision: 8 },
-    { workspaceId: 'foreign' },
-    { archived: true },
-    { workspaceArchived: true },
-  ])('refuses a divergent or archived raw snapshot %j', async (change) => {
+    { change: { revision: 8 }, check: 'draft_revision' },
+    { change: { workspaceId: 'foreign' }, check: 'workflow_row' },
+    { change: { archived: true }, check: 'workflow_row' },
+    { change: { workspaceArchived: true }, check: 'workspace' },
+  ])('refuses a divergent or archived raw snapshot $change', async ({ change, check }) => {
     queueGraph(change)
     await expect(captureWorkflowExcelDeploymentSnapshot(input())).rejects.toMatchObject({
       code: 'validation',
     })
     noPublicationSideEffect()
+    expectRefusalCheck(check)
   })
 
+  it.each(['', 'k'.repeat(1025)])('refuses a native operation key of %#', async (key) => {
+    queueGraph()
+    await expect(
+      captureWorkflowExcelDeploymentSnapshot({ ...input(), idempotencyKey: key })
+    ).rejects.toMatchObject({ code: 'validation', message: 'Excel deployment snapshot refused' })
+    noPublicationSideEffect()
+    expectRefusalCheck('idempotency_key')
+  })
+
+  it('never runs an accessor-backed requestId, which is correlation only', async () => {
+    queueGraph()
+    const accessor = vi.fn(() => {
+      throw new Error('private accessor detail')
+    })
+    const { requestId: _requestId, ...rest } = input()
+    const forged = Object.defineProperty({ ...rest }, 'requestId', {
+      get: accessor,
+      enumerable: true,
+    }) as ReturnType<typeof input>
+    expect(await captureWorkflowExcelDeploymentSnapshot(forged)).not.toBeNull()
+    expect(accessor).not.toHaveBeenCalled()
+  })
+
+  it('accepts a native operation key of exactly 1024 characters', async () => {
+    queueGraph()
+    expect(
+      await captureWorkflowExcelDeploymentSnapshot({ ...input(), idempotencyKey: 'k'.repeat(1024) })
+    ).not.toBeNull()
+    expect(getMockLogger('ExcelDeploymentSnapshots').error).not.toHaveBeenCalled()
+  })
+
+  it.each([-1, 1.5])('refuses a stored draft revision %s', async (storedRevision) => {
+    queueGraph({ storedRevision })
+    await expect(captureWorkflowExcelDeploymentSnapshot(input())).rejects.toMatchObject({
+      code: 'validation',
+    })
+    noPublicationSideEffect()
+    expectRefusalCheck('draft_revision')
+  })
+
+  it('accepts a 512 KiB request and refuses one byte more', async () => {
+    queueGraph({ padRequestTo: 512 * 1024 })
+    expect(await captureWorkflowExcelDeploymentSnapshot(input())).not.toBeNull()
+    expect(getMockLogger('ExcelDeploymentSnapshots').error).not.toHaveBeenCalled()
+    resetDbChainMock()
+    queueGraph({ padRequestTo: 512 * 1024 + 1 })
+    await expect(captureWorkflowExcelDeploymentSnapshot(input())).rejects.toMatchObject({
+      code: 'validation',
+    })
+    noPublicationSideEffect()
+    expectRefusalCheck('excel_request')
+  })
+
+  it('refuses a raw graph outside the workflow state contract', async () => {
+    queueGraph({ name: 42 as unknown as string })
+    await expect(captureWorkflowExcelDeploymentSnapshot(input())).rejects.toMatchObject({
+      code: 'validation',
+      message: 'Excel deployment snapshot refused',
+    })
+    noPublicationSideEffect()
+    expectRefusalCheck('workflow_state')
+  })
+
+  it.each(['55P03', '57014'])(
+    'refuses a Drizzle-wrapped read failure %s, logging classes and SQLSTATE but never its message',
+    async (code) => {
+      queueGraph()
+      const cause = new postgres.PostgresError({
+        message: 'canceling statement for fixture-secret-value',
+        code,
+      } as never)
+      dbChainMockFns.execute.mockRejectedValueOnce(
+        new DrizzleQueryError('select set_config($1)', ['fixture-secret-value'], cause)
+      )
+      await expect(captureWorkflowExcelDeploymentSnapshot(input())).rejects.toMatchObject({
+        code: 'validation',
+        message: 'Excel deployment snapshot refused',
+      })
+      noPublicationSideEffect()
+      expectRefusalCheck('read_transaction_failed', {
+        errorName: 'Error',
+        causeName: 'PostgresError',
+        sqlState: code,
+      })
+    }
+  )
+
   it.each([
-    { requestValue: '{private-fixture' },
-    { request: { procedure: fixtures.ExcelProcedure, sources: {}, output: {} } },
+    { change: { requestValue: '{private-fixture' }, check: 'excel_request' },
+    {
+      change: { request: { procedure: fixtures.ExcelProcedure, sources: {}, output: {} } },
+      check: 'procedure_capture',
+    },
   ])(
-    'returns a fixed refusal for malformed drafts or client-owned authority envelopes %j',
-    async (change) => {
+    'returns a fixed refusal for malformed drafts or client-owned authority envelopes $check',
+    async ({ change, check }) => {
       queueGraph(change)
       await expect(captureWorkflowExcelDeploymentSnapshot(input())).rejects.toMatchObject({
         code: 'validation',
         message: 'Excel deployment snapshot refused',
       })
       noPublicationSideEffect()
+      expectRefusalCheck(check)
     }
   )
 

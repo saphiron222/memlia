@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Memlia. All rights reserved.
 import { ExcelProcedureSchema } from '@memlia/contracts'
-import { db, workflow, workflowDeploymentVersion, workspace } from '@sim/db'
+import { db, idempotencyKey, workflow, workflowDeploymentVersion, workspace } from '@sim/db'
 import { sha256Hex } from '@sim/security/hash'
 import { generateId } from '@sim/utils/id'
 import { loadWorkflowFromNormalizedTablesRaw } from '@sim/workflow-persistence/load'
@@ -8,6 +8,7 @@ import { lockWorkflowDraft } from '@sim/workflow-persistence/revision'
 import { and, eq, sql } from 'drizzle-orm'
 import { z } from 'zod'
 import { workflowStateSchema } from '@/lib/api/contracts/workflows'
+import { excelTestPreparationReceiptSchema } from '@/lib/api/contracts/excel-test-preparations'
 import { executeTransactionallyIdempotent } from '@/lib/core/idempotency/transaction'
 import { stringifyBoundedJson } from '@/lib/core/utils/bounded-json'
 import {
@@ -159,17 +160,49 @@ function receipt(
  * supplies the verified subject and scope; HTTP observations grant no authority to this port.
  * Owns its TX: a positive result is returned only after COMMIT, never permission to execute.
  */
-export async function prepareExcelTestSnapshot(value: unknown): Promise<Result> {
+export function prepareExcelTestSnapshot(value: unknown): Promise<Result> {
+  return resolveSnapshot(value)
+}
+
+/** Read an existing committed preparation, never create one or enable a deployment.
+ * Scope/subject authorization belongs to the native application funnel. The original
+ * preparation CAS and operation are required: a caller-supplied version receipt is
+ * not evidence that this actor prepared the current draft.
+ */
+export function verifyExcelTestSnapshot(value: unknown, expectedReceipt: unknown): Promise<Result> {
+  return resolveSnapshot(value, { expectedReceipt })
+}
+
+async function resolveSnapshot(
+  value: unknown,
+  verification?: { expectedReceipt: unknown }
+): Promise<Result> {
   let input: Input
+  let expectedReceipt: Result | undefined
   try {
     input = inputSchema.parse(copy(value, 8192))
+    if (verification)
+      expectedReceipt = excelTestPreparationReceiptSchema.parse(
+        copy(verification.expectedReceipt, 8192)
+      )
   } catch {
     return refuse()
   }
   try {
     return await db.transaction(async (tx) => {
       await setDeploymentTxTimeouts(tx)
-      const revision = await lockWorkflowDraft(tx, input.scope.workflowId, input.expectedRevision)
+      // Verification uses a consistent read-only snapshot, also usable by the
+      // least-privilege worker; it must not acquire mutation locks or mint keys.
+      const revision = expectedReceipt
+        ? (
+            await tx
+              .select({ draftRevision: workflow.draftRevision })
+              .from(workflow)
+              .where(eq(workflow.id, input.scope.workflowId))
+              .limit(1)
+          )[0]?.draftRevision
+        : await lockWorkflowDraft(tx, input.scope.workflowId, input.expectedRevision)
+      if (revision !== input.expectedRevision) refuse()
       const [row] = await tx
         .select({
           workspaceId: workflow.workspaceId,
@@ -180,7 +213,7 @@ export async function prepareExcelTestSnapshot(value: unknown): Promise<Result> 
         .where(eq(workflow.id, input.scope.workflowId))
         .limit(1)
       if (!row || row.archivedAt || row.workspaceId !== input.scope.workspaceId) refuse()
-      const [space] = await tx
+      const spaceQuery = tx
         .select({
           organizationId: workspace.organizationId,
           archivedAt: workspace.archivedAt,
@@ -188,7 +221,7 @@ export async function prepareExcelTestSnapshot(value: unknown): Promise<Result> 
         .from(workspace)
         .where(eq(workspace.id, row.workspaceId))
         .limit(1)
-        .for('share')
+      const [space] = await (expectedReceipt ? spaceQuery : spaceQuery.for('share'))
       if (!space || space.archivedAt || space.organizationId !== input.scope.organizationId)
         refuse()
       const raw = await loadWorkflowFromNormalizedTablesRaw(input.scope.workflowId, tx)
@@ -197,7 +230,7 @@ export async function prepareExcelTestSnapshot(value: unknown): Promise<Result> 
       if (digest(state) !== input.expectedStateDigest) refuse()
       const draftRequests = requests(state)
       const readVersion = async (id: string) => {
-        const [version] = await tx
+        const versionQuery = tx
           .select()
           .from(workflowDeploymentVersion)
           .where(
@@ -207,7 +240,7 @@ export async function prepareExcelTestSnapshot(value: unknown): Promise<Result> 
             )
           )
           .limit(1)
-          .for('share')
+        const [version] = await (expectedReceipt ? versionQuery : versionQuery.for('share'))
         return version
       }
       const previous = input.previousTestVersionId
@@ -240,8 +273,25 @@ export async function prepareExcelTestSnapshot(value: unknown): Promise<Result> 
           }),
         })
       const capturedInputDigest = digest({ ...input, policyVersion: POLICY })
-      const { result, isFirstTime } = await executeTransactionallyIdempotent(tx, {
-        namespace: `excel-test-preparation:${digest({ scope: input.scope, actorId: input.actorId })}`,
+      const namespace = `excel-test-preparation:${digest({ scope: input.scope, actorId: input.actorId })}`
+      const readCommitted = async () => {
+        const [stored] = await tx
+          .select({ result: idempotencyKey.result })
+          .from(idempotencyKey)
+          .where(eq(idempotencyKey.key, `${namespace}:${input.operationId}`))
+          .limit(1)
+        const record = z
+          .strictObject({
+            status: z.literal('completed'),
+            requestFingerprint: z.string(),
+            result: excelTestPreparationReceiptSchema,
+          })
+          .parse(copy(stored?.result, 16384))
+        if (record.requestFingerprint !== capturedInputDigest) refuse()
+        return { result: record.result, isFirstTime: false }
+      }
+      const writeCommitted = () => executeTransactionallyIdempotent(tx, {
+        namespace,
         operationId: input.operationId,
         requestFingerprint: capturedInputDigest,
         operation: async () => {
@@ -288,6 +338,7 @@ export async function prepareExcelTestSnapshot(value: unknown): Promise<Result> 
           )
         },
       })
+      const { result, isFirstTime } = await (expectedReceipt ? readCommitted() : writeCommitted())
       if (isFirstTime) return result
       // The idempotency table holds JSON, never a trustworthy version or authority by itself.
       const cached = z
@@ -341,8 +392,14 @@ export async function prepareExcelTestSnapshot(value: unknown): Promise<Result> 
         normalizedStringify(expected.workflowState) !== normalizedStringify(stored.state)
       )
         refuse()
-      return receipt(stored, input.scope.workflowId)
-    })
+      const verified = receipt(stored, input.scope.workflowId)
+      if (
+        expectedReceipt &&
+        normalizedStringify(verified) !== normalizedStringify(expectedReceipt)
+      )
+        refuse()
+      return verified
+    }, verification ? { isolationLevel: 'repeatable read', accessMode: 'read only' } : undefined)
   } catch {
     // Rollback/COMMIT uncertainty is not a prepared result. Never retry a transaction here.
     return refuse()

@@ -20,6 +20,7 @@ from .openadapt_capture import _environment
 from .openadapt_capture_worker import inventory, read_small, write_once
 from .openadapt_compile import BundleFile, CompiledRecording, _VERSIONS, _digest, _names
 from .openadapt_compile_process import _CompileRun, _compiler_ready
+from .openadapt_replay_admission import ParentAdmission
 from .owned_job import JobError, JobIO, OwnedJob
 from .resources import reserve_desktop
 from .stop import LocalStop, StopRequested
@@ -93,7 +94,7 @@ class _ReplayControls(_CaptureControls):
 class ReplayObservation:
     mode: str
     transaction_outcome: str | None
-    status: str  # observed_verified or uncertain; never procedure ready/qualified.
+    status: str  # test_observed or uncertain; never procedure ready/qualified.
     operation_digest: str
     bundle_sha256: str
     private_artifacts: tuple[tuple[str,bytes], ...] = field(repr=False)
@@ -140,9 +141,10 @@ _registry_lock=threading.Lock()
 
 
 class _ReplayRun(_CompileRun):
-    def __init__(self,files,request,inputs,revalidate):
+    def __init__(self,files,request,inputs,revalidate,on_local_consent=None):
         super().__init__(files,request['operationDigest'],request,revalidate)
         self.inputs=inputs
+        self.on_local_consent=on_local_consent
         self.controls=None
         self.prepared=False
         self.started_attempt=False
@@ -192,7 +194,12 @@ class _ReplayRun(_CompileRun):
         self.request.update(windowsSid=observed.windows_sid,sessionId=observed.session_id)
         self.request=_request(self.request)
         self.controls=_ReplayControls(self.reservation,self.signal,self.operation_digest,self.request['mode'])
-        self.controls._start();self.checkpoint()
+        self.controls._start()
+        if self.on_local_consent is not None:
+            observation=self.controls.consent_observation(operation_digest=self.operation_digest)
+            if self.on_local_consent(observation) is not None:
+                raise ReplayError('replay_authority_unavailable')
+        self.checkpoint()
         self.temporary=tempfile.TemporaryDirectory(prefix='memlia-replay-')
         root=Path(self.temporary.name);os.chmod(root,0o700)
         bundle=root/'bundle';bundle.mkdir(mode=0o700)
@@ -208,10 +215,11 @@ class _ReplayRun(_CompileRun):
         except BaseException:
             with self.controls._lock:self.prepared=self.controls._work_pending
             raise
+        admission=ParentAdmission(root,self.request,self.revalidate)
         self.prepared=True;self.checkpoint();self.output_pending=True;self.started_attempt=True;self.job.start()
         started=False
         while True:
-            self.checkpoint();inventory(root,64*1024*1024)
+            self.checkpoint();admission.serve();inventory(root,64*1024*1024)
             state=self.job.poll()
             if state.forced:raise ReplayError('replay_worker_refused')
             if not started and (root/'ready').exists():
@@ -228,7 +236,7 @@ class _ReplayRun(_CompileRun):
             time.sleep(.05)
         self.take_output()
         self.artifacts(root);self.checkpoint()
-        if (state.root_exit_code!=0 or self.output.stdin_complete is not True
+        if (not admission.closed or state.root_exit_code!=0 or self.output.stdin_complete is not True
                 or self.output.stdout_eof is not True or self.output.stderr_eof is not True):
             raise ReplayError('replay_worker_refused')
         try:
@@ -242,12 +250,16 @@ class _ReplayRun(_CompileRun):
             metadata=json.loads(report)
             if (not valid or hashlib.sha256(report).hexdigest()!=result['reportSha256']
                     or type(metadata) is not dict or metadata.get('transaction_outcome')!=result['transactionOutcome']
+                    or self.request['mode']=='test' and (result['verified'] or metadata.get('production_eligible') is not False)
                     or result['verified'] and (metadata.get('execution_outcome')!='VERIFIED'
                                               or metadata.get('production_eligible') is not True)):
                 raise ValueError()
         except Exception:raise ReplayError('replay_worker_refused') from None
+        tested = (self.request['mode']=='test' and result['transactionOutcome']=='COMPLETED_UNVERIFIED'
+                  and metadata.get('execution_profile')=='demo'
+                  and metadata.get('execution_outcome')=='COMPLETED_UNVERIFIED')
         return ReplayObservation(self.request['mode'],result['transactionOutcome'],
-            'observed_verified' if result['verified'] else 'uncertain',self.operation_digest,
+            'test_observed' if tested else 'uncertain',self.operation_digest,
             self.request['bundleSha256'],self.private_artifacts,self.output)
 
     def cleanup(self):
@@ -279,17 +291,20 @@ class _ReplayRun(_CompileRun):
 
 
 def replay_compiled_recording(*,compiled,operation_digest,mode,deployment_bytes,parameters_bytes,
-                              admission_bytes,deadline_monotonic,revalidate):
+                              admission_bytes,deadline_monotonic,revalidate,on_local_consent=None):
     """Internal only. Root must bind command, exact artifacts, mode, SID, lease/fence.
 
-    Compilation to_test is provenance, never permission or qualification. No default
-    mode/parameters/admission, no network dispatcher and no CLI command are supplied.
+    Compilation to_test is provenance, never permission or qualification. The
+    native dispatcher supplies immutable personal-test inputs and live mTLS checks;
+    production remains refused before local consent or engine initialization.
     """
     global _active
+    if mode == 'production':raise ReplayError('replay_production_unqualified')
     try:
         if (type(compiled) is not CompiledRecording or type(compiled.files) is not tuple
                 or not 3<=len(compiled.files)<=128 or compiled.status!='to_test'
-                or compiled.versions!=tuple(sorted(_VERSIONS.items())) or not callable(revalidate)):
+                or compiled.versions!=tuple(sorted(_VERSIONS.items())) or not callable(revalidate)
+                or on_local_consent is not None and not callable(on_local_consent)):
             raise ValueError()
         files=[]
         for item in compiled.files:
@@ -311,7 +326,7 @@ def replay_compiled_recording(*,compiled,operation_digest,mode,deployment_bytes,
     with _registry_lock:
         if _active is not None:raise ReplayError('replay_hold')
         if sys.platform!='win32':raise ReplayError('replay_runtime_unavailable')
-        owner=_ReplayRun(files,request,inputs,revalidate);_active=owner
+        owner=_ReplayRun(files,request,inputs,revalidate,on_local_consent);_active=owner
     failure,result='replay_failed',None
     try:result=owner.run();failure=None
     except ReplayError as error:failure=error.code

@@ -5,6 +5,9 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const rights = vi.hoisted(() => ({ canEdit: true }))
+vi.mock('@/lib/auth/client', () => ({
+  useSession: () => ({ data: { user: { id: 'subject' } }, isPending: false, error: null }),
+}))
 vi.mock('@/app/workspace/[workspaceId]/providers/workspace-permissions-provider', () => ({
   useWorkspacePermissionsContext: () => ({
     userPermissions: { canEdit: rights.canEdit, isLoading: false, error: null },
@@ -113,6 +116,8 @@ describe('action Excel native — client/contrat/DOM réels, HTTP doublé', () =
     })
     expect(host.textContent).toContain('préparée pour test')
     expect(host.textContent).toContain('Aucun fichier exécuté')
+    expect(button('Tester cette version inactive').disabled).toBe(true)
+    expect(host.textContent).not.toContain('Activer cette version')
     expect(host.textContent).not.toContain(digest)
     expect(host.textContent).not.toContain('opaque-deployment-id') // opaque id must not be rendered as an identifier
   })
@@ -354,10 +359,15 @@ it('recharge un POST dont le COMMIT est possible, sans réseau, puis reprend exa
   await click('Vérifier cette préparation')
   expect(fetcher.mock.calls[2][1].body).toBe(body)
   expect(fetcher.mock.calls[2][1].method).toBe('POST')
-  expect(sessionStorage.getItem(recoveryKey)).toBeNull()
+  expect(JSON.parse(sessionStorage.getItem(recoveryKey)!)).toMatchObject({
+    version: 2,
+    prepared: receipt,
+    executionId: null,
+  })
   remount()
   expect(host.textContent).not.toContain('Résultat non confirmé')
   expect(fetcher).toHaveBeenCalledTimes(3)
+  expect(host.textContent).toContain('Reprise non confirmée')
 })
 it('persiste le corps fermé avant le premier transport et ne stocke ni reçu ni graphe', async () => {
   render()
@@ -514,6 +524,112 @@ it('un POST révoqué puis démonté conserve sa reprise malgré un reçu tardif
   await click('Vérifier cette préparation')
   expect(fetcher.mock.calls[2][1].body).toBe(original)
 })
+
+it('reprise reload — préparation réussie conservée sans effet et sans réaffirmer son reçu', async () => {
+  render()
+  choose()
+  await click('Vérifier la version enregistrée')
+  await click('Préparer une version de test')
+  const saved = sessionStorage.getItem(recoveryKey)
+  expect(JSON.parse(saved!)).toMatchObject({ version: 2, prepared: receipt, executionId: null })
+  remount()
+  expect(fetcher).toHaveBeenCalledTimes(2)
+  expect(host.textContent).toContain('Reprise non confirmée')
+  expect(host.textContent).not.toContain('Version 1 préparée')
+  expect(host.textContent).not.toContain('Activer cette version')
+  expect(button('Tester cette version inactive').disabled).toBe(true)
+  expect(sessionStorage.getItem(recoveryKey)).toBe(saved)
+  expect(host.textContent).toContain('pas partagée entre navigateurs')
+})
+it('reprise reload — parcours menu après 202 garde uniquement le même test et son binding', async () => {
+  render()
+  choose()
+  await click('Vérifier la version enregistrée')
+  await click('Préparer une version de test')
+  act(() => host.querySelector<HTMLInputElement>('input[type=checkbox]')!.click())
+  fetcher.mockImplementationOnce(async (_url, options) =>
+    reply(
+      {
+        status: 'queued',
+        workflowId: 'workflow',
+        deploymentVersionId: receipt.deploymentVersionId,
+        snapshotDigest: digest,
+        executionId: JSON.parse(options.body).executionId,
+      },
+      202
+    )
+  )
+  await click('Tester cette version inactive')
+  const sent = JSON.parse(fetcher.mock.calls[2][1].body)
+  const saved = sessionStorage.getItem(recoveryKey)
+  expect(JSON.parse(saved!).executionId).toBe(sent.executionId)
+  remount()
+  expect(fetcher).toHaveBeenCalledTimes(3)
+  expect(host.textContent).not.toContain('Tester cette version inactive')
+  expect(host.textContent).not.toContain('Activer cette version')
+  expect(button('Actualiser le résultat').disabled).toBe(false)
+  fetcher.mockResolvedValueOnce(
+    reply({
+      executionId: sent.executionId,
+      workflowId: 'workflow',
+      status: 'queued',
+      trigger: 'manual',
+      level: 'info',
+      startedAt: null,
+      endedAt: null,
+      totalDurationMs: null,
+      paused: null,
+      cost: null,
+      error: null,
+      finalOutput: null,
+      blockOutputs: null,
+    })
+  )
+  await click('Actualiser le résultat')
+  expect(fetcher.mock.calls[3][0]).toContain(`/executions/${sent.executionId}?`)
+  expect(
+    fetcher.mock.calls.filter(([url]) => url.endsWith('/excel/test-preparations/run'))
+  ).toHaveLength(1)
+  expect(sessionStorage.getItem(recoveryKey)).toBe(saved)
+})
+it('reprise reload — navigation vers un autre workflow masque la reprise sans la détruire', async () => {
+  render()
+  choose()
+  await click('Vérifier la version enregistrée')
+  await click('Préparer une version de test')
+  const saved = sessionStorage.getItem(recoveryKey)
+  act(() => {
+    const select = host.querySelector('select')!
+    select.value = ''
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+  })
+  expect(host.textContent).not.toContain('Tester cette version inactive')
+  expect(sessionStorage.getItem(recoveryKey)).toBe(saved)
+  choose()
+  expect(host.textContent).toContain('Reprise non confirmée')
+  expect(fetcher).toHaveBeenCalledTimes(2)
+})
+it.each(['user', 'workspace'] as const)(
+  'reprise reload — reçu préparé isolé du changement de portée %s',
+  async (dimension) => {
+    render()
+    choose()
+    await click('Vérifier la version enregistrée')
+    await click('Préparer une version de test')
+    const saved = sessionStorage.getItem(recoveryKey)
+    act(() => root.render(null))
+    render(
+      dimension === 'workspace' ? 'foreign-space' : 'space',
+      dimension === 'user' ? 'foreign-user' : 'subject'
+    )
+    choose()
+    expect(host.textContent).not.toContain('Reprise non confirmée')
+    expect(host.textContent).not.toContain('Tester cette version inactive')
+    expect(host.textContent).not.toContain('Activer cette version')
+    expect(sessionStorage.getItem(recoveryKey)).toBe(saved)
+    expect(fetcher).toHaveBeenCalledTimes(2)
+  }
+)
 it('la récupération manuelle ne double pas le POST même sur deux clics', async () => {
   render()
   choose()

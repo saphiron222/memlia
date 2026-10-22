@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 from typing import Any
 from jsonschema import Draft202012Validator, FormatChecker
+from .desktop_digest import desktop_command_digest
 
 
 def _reject_remote_refs(value: Any) -> None:

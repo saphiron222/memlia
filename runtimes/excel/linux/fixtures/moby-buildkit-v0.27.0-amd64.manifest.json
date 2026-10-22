@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.manifest.v1+json",
+  "config": {
+    "mediaType": "application/vnd.oci.image.config.v1+json",
+    "digest": "sha256:4a177e10126688bb9608de9661b5c2204222e232d261339ff4c94eb785b211fa",
+    "size": 2127
+  },
+  "layers": [
+    {
+      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+      "digest": "sha256:1074353eec0db2c1d81d5af2671e56e00cf5738486f5762609ea33d606f88612",
+      "size": 3860104
+    },
+    {
+      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+      "digest": "sha256:487896c7079e703beba14b37b5f74eacb31f60a7a1e7b969152a5fa479367980",
+      "size": 10461202
+    },
+    {
+      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+      "digest": "sha256:ad2d6d203afa10539f8131a519156afb0263d0d2136c07f87bb3d5d3f4b30b92",
+      "size": 939
+    },
+    {
+      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+      "digest": "sha256:062997ac353c6485127b7f1c442b6280f1f5c7cb2f584bee0421b6fdf8c4247b",
+      "size": 170
+    },
+    {
+      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+      "digest": "sha256:f07a92a393a56b63eb2ff279b22fb178f232450a6151c728e5ffff323c6b18fa",
+      "size": 92333939
+    }
+  ],
+  "annotations": {
+    "org.opencontainers.image.created": "2026-01-21T22:46:28.007Z",
+    "org.opencontainers.image.description": "concurrent, cache-efficient, and Dockerfile-agnostic builder toolkit",
+    "org.opencontainers.image.licenses": "Apache-2.0",
+    "org.opencontainers.image.revision": "2bcd66daa720bd45da2a43db59cd3e8ddf3f39ae",
+    "org.opencontainers.image.source": "https://github.com/moby/buildkit",
+    "org.opencontainers.image.title": "BuildKit",
+    "org.opencontainers.image.url": "https://github.com/moby/buildkit",
+    "org.opencontainers.image.vendor": "Moby",
+    "org.opencontainers.image.version": "v0.27.0"
+  }
+}

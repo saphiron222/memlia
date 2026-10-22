@@ -9,6 +9,7 @@ import {
   workflowAuthzMockFns,
 } from '@sim/testing'
 import { auditMock, auditMockFns } from '@sim/testing/mocks/audit.mock'
+import { getMockLogger } from '@sim/testing/mocks/logger.mock'
 import { posthogServerMock } from '@sim/testing/mocks/posthog-server.mock'
 import {
   workflowsPersistenceUtilsMock,
@@ -357,6 +358,51 @@ describe('performFullDeploy workspace event emission', () => {
     expect(mockProcessWorkflowDeploymentOutboxEvent).toHaveBeenCalledWith('prepare-event-default')
   })
 
+  it('refuses a present undefined caller field and logs which check refused', async () => {
+    // The UI deploy route's params before the use-case fix (CI pass 10).
+    const actual = await vi.importActual<
+      typeof import('@/lib/workflows/persistence/excel-deployment-snapshots')
+    >('@/lib/workflows/persistence/excel-deployment-snapshots')
+    mockCaptureWorkflowExcelDeploymentSnapshot.mockImplementationOnce(
+      actual.captureWorkflowExcelDeploymentSnapshot
+    )
+    const { plan } = excelDeploymentInput()
+    queueTableRows(schemaMock.workflow, [
+      { workspaceId: 'space', draftRevision: 7, variables: {}, archivedAt: null },
+    ])
+    queueTableRows(schemaMock.workflow, [{ workspaceId: 'space', draftRevision: 7 }])
+    queueTableRows(schemaMock.workspace, [{ organizationId: null, archivedAt: null }])
+    queueTableRows(schemaMock.workflowBlocks, [
+      { ...plan.workflowState.blocks.excel, positionX: 0, positionY: 0, height: 100 },
+    ])
+    queueTableRows(schemaMock.workflowEdges, [])
+    queueTableRows(schemaMock.workflowSubflows, [])
+
+    const result = await performFullDeploy({
+      workflowId: 'workflow-1',
+      assertedWorkspaceId: 'space',
+      userId: 'user-1',
+      actorId: 'user-1',
+      actor: { kind: 'session', userId: 'author' },
+      versionName: undefined,
+      versionDescription: undefined,
+      requestId: 'request-excel',
+      idempotencyKey: undefined,
+    })
+
+    expect(result).toEqual({
+      success: false,
+      error: 'Excel deployment snapshot refused',
+      errorCode: 'validation',
+    })
+    expect(mockPrepareWorkflowDeployment).not.toHaveBeenCalled()
+    expect(mockEnqueueWorkflowDeploymentPreparation).not.toHaveBeenCalled()
+    expect(getMockLogger('DeployOrchestration').error).toHaveBeenCalledWith(
+      '[request-excel] Excel deployment snapshot refused',
+      { workflowId: 'workflow-1', check: 'caller_input_not_strict_json' }
+    )
+  })
+
   it('does not finish or process an Excel deployment refused by the native CAS', async () => {
     const { args } = excelDeploymentInput()
     mockCaptureWorkflowExcelDeploymentSnapshot.mockResolvedValueOnce({
@@ -385,10 +431,18 @@ describe('performFullDeploy workspace event emission', () => {
     mockLoadWorkflowDeploymentSnapshot.mockResolvedValueOnce(
       excelDeploymentInput().args.workflowState
     )
-    const result = await performFullDeploy({ workflowId: 'workflow-1', userId: 'user-1' })
+    const result = await performFullDeploy({
+      workflowId: 'workflow-1',
+      userId: 'user-1',
+      requestId: 'request-legacy',
+    })
     expect(result).toMatchObject({ success: false, errorCode: 'validation' })
     expect(mockPrepareWorkflowDeployment).not.toHaveBeenCalled()
     expect(mockEnqueueWorkflowDeploymentPreparation).not.toHaveBeenCalled()
+    expect(getMockLogger('DeployOrchestration').error).toHaveBeenCalledWith(
+      '[request-legacy] Excel deployment snapshot refused',
+      { workflowId: 'workflow-1', check: 'legacy_loader_excel_block' }
+    )
   })
 
   it('does not reuse a correlation request ID as an implicit idempotency key', async () => {
@@ -1027,8 +1081,90 @@ describe('Excel snapshot orchestration (infrastructure doubled)', () => {
       })
       expect(mockPrepareWorkflowDeployment).not.toHaveBeenCalled()
       expect(mockEnqueueWorkflowDeploymentPreparation).not.toHaveBeenCalled()
+      expect(getMockLogger('DeployOrchestration').error).toHaveBeenCalledWith(
+        '[request] Excel deployment snapshot refused',
+        { workflowId: 'workflow-1', check: 'capture_handle' }
+      )
     }
   )
+  it('refuses absent caller params with the fixed refusal, never a TypeError', async () => {
+    const { args } = excelDeploymentInput()
+    const result = await prepareWorkflowSnapshotDeployment({
+      ...args,
+      params: undefined as unknown as typeof args.params,
+    })
+    expect(result).toEqual({
+      success: false,
+      error: 'Excel deployment snapshot refused',
+      errorCode: 'validation',
+    })
+    expect(mockPrepareWorkflowDeployment).not.toHaveBeenCalled()
+    expect(getMockLogger('DeployOrchestration').error).toHaveBeenCalledWith(
+      '[request] Excel deployment snapshot refused',
+      { workflowId: undefined, check: 'caller_input_not_strict_json' }
+    )
+  })
+  it('refuses a throwing requestId accessor with the fixed refusal, read only inside the capture', async () => {
+    const { args } = excelDeploymentInput()
+    const accessor = vi.fn(() => {
+      throw new Error('private accessor detail')
+    })
+    const { requestId: _requestId, ...rest } = args
+    const forged = Object.defineProperty({ ...rest }, 'requestId', {
+      get: accessor,
+      enumerable: true,
+    }) as typeof args
+    const result = await prepareWorkflowSnapshotDeployment(forged)
+    expect(result).toEqual({
+      success: false,
+      error: 'Excel deployment snapshot refused',
+      errorCode: 'validation',
+    })
+    // Only the guarded capture literal reads it; the log correlation never runs it.
+    expect(accessor).toHaveBeenCalledTimes(1)
+    expect(mockPrepareWorkflowDeployment).not.toHaveBeenCalled()
+    expect(getMockLogger('DeployOrchestration').error).toHaveBeenCalledWith(
+      '[undefined] Excel deployment snapshot refused',
+      { workflowId: 'workflow-1', check: 'caller_input_not_strict_json' }
+    )
+  })
+  it('refuses an accessor-backed workflowId in caller params without ever running it', async () => {
+    const { args } = excelDeploymentInput()
+    const accessor = vi.fn(() => 'workflow-1')
+    const { workflowId: _workflowId, ...params } = args.params
+    const forged = {
+      ...args,
+      params: Object.defineProperty({ ...params }, 'workflowId', {
+        get: accessor,
+        enumerable: true,
+      }) as typeof args.params,
+    }
+    expect(await prepareWorkflowSnapshotDeployment(forged)).toEqual({
+      success: false,
+      error: 'Excel deployment snapshot refused',
+      errorCode: 'validation',
+    })
+    expect(accessor).not.toHaveBeenCalled()
+    expect(mockPrepareWorkflowDeployment).not.toHaveBeenCalled()
+    expect(getMockLogger('DeployOrchestration').error).toHaveBeenCalledWith(
+      '[request] Excel deployment snapshot refused',
+      { workflowId: undefined, check: 'caller_input_not_strict_json' }
+    )
+  })
+  it('refuses caller params naming another workflow than the capture scope', async () => {
+    const { args } = excelDeploymentInput()
+    args.params.workflowId = 'another-workflow'
+    expect(await prepareWorkflowSnapshotDeployment(args)).toEqual({
+      success: false,
+      error: 'Excel deployment snapshot refused',
+      errorCode: 'validation',
+    })
+    expect(mockPrepareWorkflowDeployment).not.toHaveBeenCalled()
+    expect(getMockLogger('DeployOrchestration').error).toHaveBeenCalledWith(
+      '[request] Excel deployment snapshot refused',
+      { workflowId: 'another-workflow', check: 'capture_identity_mismatch' }
+    )
+  })
   it('captures primitives, graph and handle before native validation awaits', async () => {
     const { args } = excelDeploymentInput()
     const original = structuredClone({ ...args, excelProcedureSnapshot: undefined })
@@ -1056,6 +1192,7 @@ describe('Excel snapshot orchestration (infrastructure doubled)', () => {
         actorId: 'user-1',
         workflowState: original.workflowState,
         excelProcedureSnapshot: handle,
+        requestId: 'request',
       })
     )
     const captured = mockPrepareWorkflowDeployment.mock.calls[0][0]
@@ -1089,6 +1226,10 @@ describe('Excel snapshot orchestration (infrastructure doubled)', () => {
     args.workflowState.blocks.excel.name = 'Changed'
     expect((await prepareWorkflowSnapshotDeployment(args)).success).toBe(false)
     expect(mockPrepareWorkflowDeployment).not.toHaveBeenCalled()
+    expect(getMockLogger('DeployOrchestration').error).toHaveBeenCalledWith(
+      '[request] Excel deployment snapshot refused',
+      { workflowId: 'workflow-1', check: 'capture_identity_mismatch' }
+    )
   })
   it('keeps the real preparation outbox: this opt-in is NOT an inactive test admission', async () => {
     const { args } = excelDeploymentInput()

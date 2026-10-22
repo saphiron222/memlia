@@ -23,6 +23,29 @@ if spec.loader is not None and Path(spec.origin).exists():
     spec.loader.exec_module(m)
 
 
+def dockerignore_patterns(text):
+    """Reviewed recipe patterns; a negation would need the full BuildKit matcher."""
+    patterns=[line.strip() for line in text.splitlines() if line.strip() and not line.lstrip().startswith('#')]
+    assert not any(p.startswith('!') for p in patterns)
+    return [dockerignore_regex(p) for p in patterns]
+
+
+def dockerignore_regex(pattern):
+    # BuildKit semantics used here: `**` spans any directories, `*`/`?` one segment,
+    # and a matched directory excludes everything below it.
+    segments=pattern.strip('/').split('/'); out=''
+    for index,segment in enumerate(segments):
+        last=index==len(segments)-1
+        if segment=='**':out+='.*' if last else '(?:.*/)?';continue
+        out+=''.join('[^/]*' if c=='*' else '[^/]' if c=='?' else re.escape(c) for c in segment)+('' if last else '/')
+    return re.compile(out)
+
+
+def dockerignored(path,patterns):
+    parts=path.split('/');prefixes=['/'.join(parts[:i]) for i in range(1,len(parts)+1)]
+    return any(p.fullmatch(prefix) for p in patterns for prefix in prefixes)
+
+
 class ContextTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -63,12 +86,83 @@ class ContextTests(unittest.TestCase):
         self.assertEqual(result['sourceCommit'],rev)
 
     def test_forbidden_files_are_excluded_before_context_exists(self):
-        names=['apps/sim/.env.local','apps/sim/ee/restricted.ts','packages/a/node_modules/a.js',
-               'apps/sim/uploads/private.txt','apps/sim/tls.key','apps/sim/.next/cache.js']
+        # Tracked on purpose: these reasons are tolerated, so they stay out silently.
+        names=['apps/sim/.env.local','apps/sim/ee/restricted.ts','packages/a/lib/ee/billing.ts',
+               'apps/sim/uploads/private.txt','apps/sim/tls.key','packages/a/certs/server.crt',
+               'apps/sim/public/bundle.tgz','packages/db/migrations/meta/0001_snapshot.json',
+               # Same case folding as the EE gate; distinct directories on a case-folding Mac.
+               'apps/sim/server.PEM','packages/b/EE/x.ts','apps/sim/build.LOG','packages/b/Certs/c.ts','apps/sim/x.ZIP']
         for name in names:self.write(name,'FICTITIOUS FORBIDDEN')
         result=self.prepare()
         for name in names:
             self.assertNotIn(name,result['sha256']); self.assertFalse((self.root.parent/'context'/name).exists())
+
+    HOMONYMS=('apps/sim/lib/uploads/core/storage.ts','apps/sim/lib/workflows/references/index.ts',
+              'apps/sim/lib/secrets/references/route.ts','apps/sim/app/api/files/uploads/route.ts',
+              'apps/sim/app/(landing)/solutions/engineering/page.tsx','packages/a/windows-lab/a.ts')
+
+    def test_tracked_source_named_like_runtime_or_internal_folders_enters_the_context(self):
+        for name in self.HOMONYMS:self.write(name,'FICTITIOUS SOURCE '+name)
+        result=self.prepare()
+        for name in self.HOMONYMS:
+            self.assertEqual((self.root.parent/'context'/name).read_bytes(),(self.root/name).read_bytes())
+            self.assertEqual(result['sha256'][name],hashlib.sha256((self.root/name).read_bytes()).hexdigest())
+
+    def test_tracked_source_below_a_generated_output_name_is_refused_not_dropped(self):
+        rev=self.commit()
+        for name in ('packages/a/node_modules/a.js','apps/sim/.next/cache.js','packages/a/dist/index.js',
+                     'apps/sim/lib/cache/index.ts'):
+            with self.subTest(name=name):
+                self.write(name,'FICTITIOUS TRACKED');rev=self.commit()
+                with self.assertRaisesRegex(ValueError,'^context_refused$') as refused:self.prepare(rev)
+                self.assertEqual(refused.exception.detail,(name,'generated'))
+                self.assertFalse((self.root.parent/'context').exists())
+                self.git('rm','-q',name);rev=self.commit()
+
+    def test_export_ignore_or_gitlink_cannot_drop_tracked_source(self):
+        self.write('.gitattributes','apps/sim/lib/core.ts export-ignore\n');self.write('apps/sim/lib/core.ts','FICTITIOUS SOURCE')
+        with self.assertRaisesRegex(ValueError,'^context_refused$') as refused:self.prepare()
+        self.assertEqual(refused.exception.detail,('apps/sim/lib/core.ts',None))
+        self.assertFalse((self.root.parent/'context').exists())
+        self.git('rm','-q','.gitattributes');rev=self.commit()
+        self.git('update-index','--add','--cacheinfo','160000,'+rev+',apps/sim/vendor/module')
+        self.git('commit','-qm','fictitious gitlink')
+        with self.assertRaisesRegex(ValueError,'^context_refused$') as refused:self.prepare(self.git('rev-parse','HEAD'))
+        self.assertEqual(refused.exception.detail,('apps/sim/vendor/module',None))
+        self.assertFalse((self.root.parent/'context').exists())
+
+    def test_unloadable_or_incomplete_rule_refuses_the_context(self):
+        rev=self.commit();partial=self.root.parent/'partial_rule.py'
+        partial.write_text('def write_provenance(*args):pass\n')
+        for helper in (self.root.parent/'absent.py',partial):
+            with self.subTest(helper=helper.name),patch.object(m,'PROVENANCE_HELPER',helper):
+                with self.assertRaisesRegex(ValueError,'^context_refused$'):self.prepare(rev)
+                self.assertFalse((self.root.parent/'context').exists())
+
+    def test_real_recipe_dockerignore_keeps_homonym_sources_and_drops_only_tests_generated_secrets(self):
+        patterns=dockerignore_patterns((m.ROOT/(m.RECIPE+'.dockerignore')).read_text())
+        for name in self.HOMONYMS+('apps/sim/app/.well-known/route.ts','apps/sim/lib/uploads/index.ts'):
+            with self.subTest(kept=name):self.assertFalse(dockerignored(name,patterns))
+        for name in ('apps/sim/uploads/a.xlsx','apps/sim/ee/a.ts','packages/a/node_modules/x.js','apps/sim/.next/a.js',
+                     'apps/sim/.env.local','apps/sim/a.test.ts','apps/sim/lib/a.spec.tsx','apps/sim/tls.key','references/x'):
+            with self.subTest(dropped=name):self.assertTrue(dockerignored(name,patterns))
+
+    def test_context_modes_follow_git_not_umask_or_archive_member_modes(self):
+        self.write('apps/sim/scripts/run.sh','#!/bin/sh\n');(self.root/'apps/sim/scripts/run.sh').chmod(0o755)
+        # tar.umask rewrites archive member modes: 100755 becomes 0666, 100644 0666.
+        self.git('config','tar.umask','0111');rev=self.commit()
+        (self.root/'package.json').chmod(0o600)  # checked-out mode never decides
+        private=self.root.parent/'private';private.mkdir(mode=0o700)
+        secret=private/'compose.env';os.close(os.open(secret,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600))
+        previous=os.umask(0o077)
+        try:m.prepare_context(self.root,private/'context',rev)
+        finally:os.umask(previous)
+        output=private/'context';seen={'.':output.lstat().st_mode&0o7777}
+        for path in output.rglob('*'):seen[path.relative_to(output).as_posix()]=path.lstat().st_mode&0o7777
+        wanted={n:(0o755 if n=='.' or (output/n).is_dir() or n=='apps/sim/scripts/run.sh' else 0o644) for n in seen}
+        self.assertEqual(seen,wanted)
+        self.assertIn('build-provenance/source',seen)
+        self.assertEqual(private.stat().st_mode&0o777,0o700);self.assertEqual(secret.stat().st_mode&0o777,0o600)
 
     def test_selected_symlink_refuses_and_context_is_not_committed(self):
         (self.root/'apps/sim/link.ts').symlink_to('/etc/passwd')
@@ -140,6 +234,14 @@ class LimitTests(unittest.TestCase):
                 m.build_args('fixed',Path('/tmp/context'),Path('/tmp/work'),source,lock)
 
 
+def load_identity_fixture():
+    # Real registry manifests and archive builder of the shared image-identity tests.
+    directory=str(m.ROOT/'runtimes/excel/linux')
+    if directory not in sys.path:sys.path.insert(0,directory)
+    import test_image_identity
+    return test_image_identity
+
+
 class NativeMetadataTests(unittest.TestCase):
     def builder(self):
         return {'Id':'a'*64,'Name':'/buildx_buildkit_memlia-worker-fictitious0',
@@ -154,11 +256,33 @@ class NativeMetadataTests(unittest.TestCase):
                                     'org.memlia.worker.source':'c'*40,'org.memlia.source':'c'*40,'org.memlia.lock':'d'*64}}}
 
     def test_builder_identity_is_exact_before_owned_mutation(self):
-        m.verify_builder(self.builder(),'a'*64,'memlia-worker-fictitious')
-        for key,value in [('Id','b'*64),('Name','/different'),('Image','sha256:'+'d'*64)]:
+        manifest=m.BUILDKIT.split('@')[1]
+        m.verify_builder(self.builder(),'a'*64,'memlia-worker-fictitious',m.BUILDKIT_CONFIG)
+        # containerd store: the container's Image is the admitted manifest digest.
+        m.verify_builder(dict(self.builder(),Image=manifest),'a'*64,'memlia-worker-fictitious',manifest)
+        for key,value in [('Id','b'*64),('Name','/different'),('Image','sha256:'+'d'*64),('Image',manifest)]:
             row=self.builder(); row[key]=value
-            with self.subTest(key=key),self.assertRaisesRegex(ValueError,'builder_identity_refused'):
-                m.verify_builder(row,'a'*64,'memlia-worker-fictitious')
+            with self.subTest(key=key,value=value),self.assertRaisesRegex(ValueError,'builder_identity_refused'):
+                m.verify_builder(row,'a'*64,'memlia-worker-fictitious',m.BUILDKIT_CONFIG)
+        foreign='sha256:'+'d'*64
+        with self.assertRaisesRegex(ValueError,'builder_identity_refused'):
+            m.verify_builder(dict(self.builder(),Image=foreign),'a'*64,'memlia-worker-fictitious',foreign)
+
+    def test_builder_image_is_admitted_under_both_stores_by_the_shared_check(self):
+        fixture=load_identity_fixture()
+        self.assertEqual(m.admit_builder_image(fixture.classic_row(fixture.BUILDKIT),lambda:self.fail('no save')),m.BUILDKIT_CONFIG)
+        with tempfile.TemporaryDirectory() as tmp:
+            saved=lambda members:(lambda:fixture.archive(tmp,members))
+            self.assertEqual(m.admit_builder_image(fixture.containerd_row(fixture.BUILDKIT),
+                             saved(fixture.saved_members(fixture.BUILDKIT))),m.BUILDKIT.split('@')[1])
+            name='blobs/sha256/'+m.BUILDKIT.split('@')[1][7:]
+            for label,row,members in (
+                    ('other-manifest',fixture.containerd_row(fixture.PYTHON),fixture.saved_members(fixture.PYTHON)),
+                    ('other-config',fixture.classic_row(fixture.PYTHON),[]),
+                    ('blob-absent',fixture.containerd_row(fixture.BUILDKIT),
+                     [x for x in fixture.saved_members(fixture.BUILDKIT) if x[0]!=name])):
+                with self.subTest(case=label),self.assertRaisesRegex(ValueError,'builder_identity_refused'):
+                    m.admit_builder_image(row,saved(members))
 
     def test_built_image_requires_amd64_nonroot_source_and_campaign(self):
         m.verify_image(self.image(),'sha256:'+'b'*64,'memlia-worker-fictitious','c'*40,'d'*64)
@@ -349,12 +473,33 @@ class RecipeFlowTests(unittest.TestCase):
         self.assertEqual(calls.count('product-build'),1)
         self.assertIn('remove-owned-builder',calls)
 
-    def flow(self,bad_limits=False,bootstrap_failure=False,build_failure=False):
+    def test_containerd_builder_is_admitted_from_its_saved_manifest_before_any_mutation(self):
+        result,calls=self.flow(store='containerd')
+        self.assertIn('save-builder',calls);self.assertIn('update-pids',calls)
+
+    def test_containerd_builder_whose_saved_manifest_is_foreign_is_refused_before_mutation(self):
+        result,calls=self.flow(store='containerd-config')
+        self.assertEqual(result['status'],'failed')
+        self.assertIn('save-builder',calls);self.assertNotIn('update-pids',calls);self.assertNotIn('product-build',calls)
+
+    def test_failed_builder_export_leaves_no_partial_archive_and_no_mutation(self):
+        result,calls=self.flow(store='save-fails')
+        self.assertEqual(result['status'],'failed');self.assertIn('save-builder',calls)
+        self.assertNotIn('update-pids',calls)
+        self.assertFalse((self.root.parent/'receipt'/'buildkit-image.tar').exists())
+
+    def test_builder_pulled_by_index_reports_its_own_closed_reason(self):
+        result,calls=self.flow(store='index')
+        self.assertEqual(result['reason'],'builder_identity_index_refused')
+        self.assertNotIn('save-builder',calls);self.assertNotIn('update-pids',calls)
+
+    def flow(self,bad_limits=False,bootstrap_failure=False,build_failure=False,store='classic'):
         revision=self.commit(); output=self.root.parent/'receipt'; calls=[]
         group=self.root.parent/'group';group.mkdir();(group/'pids.max').write_text('512')
         cid='a'*64;image='sha256:'+'b'*64; running=True;present=True;volume=True
         name='memlia-worker-'+'c'*32
-        metadata=NativeMetadataTests()
+        metadata=NativeMetadataTests();fixture=load_identity_fixture()
+        saves=self.root.parent/'saves';saves.mkdir()
         def command(argv,payload,deadline,cancel,cwd,limit):
             nonlocal running,present,volume
             args=argv[len(m.DOCKER):]
@@ -364,8 +509,22 @@ class RecipeFlowTests(unittest.TestCase):
             if args[:2]==['buildx','version']:return b'github.com/docker/buildx v0.31.1 '+b'd'*40
             if args[:2]==['buildx','create']:return name.encode()
             if args[:2] in (['container','ls'],['volume','ls']):return b''
+            if args[:2]==['image','inspect'] and args[2]==m.BUILDKIT:
+                row=fixture.classic_row(fixture.BUILDKIT) if store=='classic' else fixture.containerd_row(fixture.BUILDKIT)
+                if store=='index':row['Descriptor']['mediaType']='application/vnd.oci.image.index.v1+json'
+                return json.dumps([row]).encode()
+            if args[:2]==['image','save']:
+                self.assertEqual(args[:3]+args[4:],['image','save','--output',m.BUILDKIT]);calls.append('save-builder')
+                self.assertGreater(deadline-time.monotonic(),m.SAVE_SECONDS-30)
+                if store=='save-fails':
+                    Path(args[3]).write_bytes(b'partial');raise ValueError('recipe_build_failed')
+                members=fixture.saved_members(fixture.BUILDKIT)
+                if store=='containerd-config':
+                    members=[(n,fixture.PYTHON[2].read_bytes() if n.startswith('blobs/sha256/'+m.BUILDKIT.split('@')[1][7:]) else d) for n,d in members]
+                saved=fixture.archive(saves,members);Path(args[3]).write_bytes(saved.read_bytes());return b''
             if args[:2]==['container','inspect']:
-                row={'Id':cid,'Name':'/buildx_buildkit_'+name+'0','Image':m.BUILDKIT_CONFIG,
+                row={'Id':cid,'Name':'/buildx_buildkit_'+name+'0',
+                     'Image':m.BUILDKIT_CONFIG if store=='classic' else m.BUILDKIT.split('@')[1],
                      'Mounts':[{'Destination':'/var/lib/buildkit','Type':'volume',
                                 'Name':'buildx_buildkit_'+name+'0_state'}],
                      'HostConfig':{'Memory':4*1024**3,'MemorySwap':4*1024**3,
@@ -374,6 +533,7 @@ class RecipeFlowTests(unittest.TestCase):
                 if bad_limits:row['HostConfig']['Memory']=0
                 return json.dumps([row]).encode()
             if args[:2]==['container','update']:
+                self.assertFalse((output/'buildkit-image.tar').exists())
                 self.assertEqual(args[-1],cid);calls.append('update-pids');return cid.encode()
             if args[:2]==['container','exec']:return b'0::/\n'
             if args[:2]==['container','stop']:
@@ -427,6 +587,35 @@ class RecipeFlowTests(unittest.TestCase):
         result=json.loads((output/'result.json').read_text())
         self.assertEqual(code,0 if result['status']=='passed' else 1)
         return result,calls
+
+
+class AdmittedWorkerContextTests(unittest.TestCase):
+    """Static proof on the admitted HEAD: the worker build sees every non-test source."""
+    def setUp(self):
+        helper=importlib.util.spec_from_file_location('worker_context_static',m.ROOT/'deploy/memlia/images/tests/test_context.py')
+        self.static=importlib.util.module_from_spec(helper);helper.loader.exec_module(self.static)
+        try:self.commit=self.static.git_bytes(m.ROOT,'rev-parse','HEAD').decode().strip()
+        except (OSError,subprocess.CalledProcessError):self.skipTest('admitted Git repository required')
+        self.blobs=self.static.tracked_blobs(m.ROOT,self.commit)
+        if not any(p.startswith('apps/sim/') for p in self.blobs):self.skipTest('Sim application sources required')
+        rule=self.static.context
+        inputs=[p for p in self.blobs if p in m.INPUTS or any(p.startswith(i+'/') for i in m.INPUTS)]
+        self.reasons={p:rule.exclusion(p) for p in inputs}
+        patterns=dockerignore_patterns((m.ROOT/(m.RECIPE+'.dockerignore')).read_text())
+        context={p for p,r in self.reasons.items() if r is None}
+        self.ignored={p for p in context if dockerignored(p,patterns)}
+        self.effective=context-self.ignored
+        self.tolerated=rule.TOLERATED_EXCLUSIONS
+
+    def test_worker_context_leaves_out_only_tolerated_files_and_build_drops_only_tests(self):
+        self.assertEqual({p:r for p,r in self.reasons.items() if r is not None and r not in self.tolerated},{})
+        self.assertEqual(sorted(p for p in self.ignored if not self.static.is_test(p)),[])
+        self.assertFalse(any(part=='ee' for p in self.effective for part in p.split('/')))
+
+    def test_every_non_test_sim_alias_import_resolves_inside_the_worker_build(self):
+        sources,missing=self.static.unresolved_imports(m.ROOT,self.blobs,self.effective)
+        self.assertGreater(len(sources),0)
+        self.assertEqual(missing,[])
 
 
 if __name__=='__main__':unittest.main()

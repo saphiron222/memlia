@@ -49,7 +49,8 @@ RUN node apps/sim/scripts/verify-oracledb-patch.cjs \
     && node /app/node_modules/node-gyp/bin/node-gyp.js rebuild --release --jobs=2 --nodedir=/usr/local
 WORKDIR /app/apps/sim
 RUN bun --no-env-file run build:cli-runtime \
-    && bun --no-env-file run build:sandbox-bundles
+    && bun --no-env-file run build:sandbox-bundles \
+    && bun --no-env-file build scripts/memlia-agent-control.ts --target=node --outfile=dist/memlia-agent-control.mjs
 
 FROM sources AS production-deps
 RUN sha256sum bun.lock > /tmp/lock.sha256 \

@@ -12,10 +12,93 @@ import tempfile
 import re
 import subprocess
 import os
+import stat
 
 SUPERCRONIC_SHA256 = 'f1f8585c66de020fef494dd636058f99949d108f569fef00016a1c8b9eb145b3'
-EXCLUDED_DIRS = {'ee', 'uploads', '.next', '.turbo', '.cache', 'references', 'engineering', 'windows-lab','node_modules', '__pycache__', 'certs', 'certificates', 'cache', 'dist', 'coverage'}
-EXCLUDED_SUFFIXES = ('.pem', '.key', '.crt', '.p12', '.pfx', '.zip', '.tar', '.tar.gz', '.tgz', '.pyc')
+# Directory names excluded at any depth: EE code (licence), generated outputs and
+# caches, certificate stores. None of them names a Sim source module.
+EE_DIRS = {'ee'}
+GENERATED_DIRS = {'.next', '.turbo', '.cache', 'node_modules', '__pycache__', 'cache', 'dist', 'coverage'}
+SECRET_DIRS = {'certs', 'certificates'}
+SECRET_SUFFIXES = ('.pem', '.key', '.crt', '.p12', '.pfx')
+ARCHIVE_SUFFIXES = ('.zip', '.tar', '.tar.gz', '.tgz')
+LOG_SUFFIXES = ('.log',)
+# Runtime stores, excluded by exact repository path only: `uploads`, `references`
+# or `engineering` are also real source modules (apps/sim/lib/uploads, ...).
+RUNTIME_DATA_PATHS = {'apps/sim/uploads'}
+# Public discovery routes/assets are source inputs, despite their dot-prefixed
+# directory. Only these reviewed locations pass the usual Git/byte verification.
+DISCOVERY_SOURCE_DIRS = {
+    'apps/sim/app/.well-known',
+    'apps/sim/app/api/auth/.well-known',
+    'apps/sim/app/api/mcp/copilot/.well-known',
+    'apps/sim/public/.well-known',
+}
+# Trees copied whole for the web, realtime and workflow-worker contexts.
+APPLICATION_TREES = ('patches', 'packages', 'apps', 'compliance/upstream')
+# Tracked files that may stay out of a copied tree; any other exclusion of a
+# tracked file (e.g. source below a `dist` or `cache` name) refuses the context.
+TOLERATED_EXCLUSIONS = {'ee', 'runtime-data', 'secret', 'archive', 'log', 'hidden', 'migration-snapshot'}
+
+
+def exclusion(relative):
+    """Why a source-relative POSIX path stays out of a context, or None."""
+    parts = relative.split('/')
+    for index, name in enumerate(parts):
+        prefix = '/'.join(parts[:index + 1])
+        folded = name.lower()  # EE, secrets, archives, logs: any case (as the EE gate)
+        if folded in EE_DIRS:
+            return 'ee'
+        if prefix in RUNTIME_DATA_PATHS:
+            return 'runtime-data'
+        if name in GENERATED_DIRS or name.endswith('.pyc'):
+            return 'generated'
+        if folded in SECRET_DIRS or folded.endswith(SECRET_SUFFIXES):
+            return 'secret'
+        if folded.endswith(ARCHIVE_SUFFIXES):
+            return 'archive'
+        if folded.endswith(LOG_SUFFIXES):
+            return 'log'
+        if name.startswith('.') and prefix not in DISCOVERY_SOURCE_DIRS:
+            return 'hidden'
+    return 'migration-snapshot' if parts[-1].endswith('_snapshot.json') else None
+
+
+def refused(code, path, reason):
+    """Closed error code for callers; the offending path and reason ride along as `detail`."""
+    error = ValueError(code)
+    error.detail = (path, reason)
+    return error
+
+
+def below(path, roots):
+    """True when a source-relative path lies inside one of the `roots` directories."""
+    parts = path.split('/')
+    return any('/'.join(parts[:index]) in roots for index in range(1, len(parts)))
+
+
+def excluded_tracked(paths, roots):
+    """Tracked paths below a copied root that stay out, with their reason."""
+    return {path: exclusion(path) for path in paths if below(path, roots) and exclusion(path) is not None}
+
+
+# Verified cron assets (not in Git) that the image executes.
+EXECUTABLE_ASSETS = {'supercronic'}
+
+
+def image_modes(staging, executables):
+    """Give every context entry the mode its image needs, whatever the caller's umask.
+
+    Directories 0755; files 0755 when admitted executable (Git 100755 or a verified
+    executable asset), else 0644. Docker COPY keeps these modes in the image.
+    """
+    for path in [staging, *sorted(staging.rglob('*'))]:
+        if path.is_symlink():
+            raise ValueError('mode_refused')
+        wanted = 0o755 if path.is_dir() or path.relative_to(staging).as_posix() in executables else 0o644
+        os.chmod(path, wanted)
+        if stat.S_IMODE(os.lstat(path).st_mode) != wanted:
+            raise ValueError('mode_refused')
 
 
 def digest(path):
@@ -54,11 +137,16 @@ def prepare(kind, source, recipes, output, assets=None, *, source_commit, archit
             header,name=entry.split(b'\t');mode,kind_,oid=header.split();inventory[name.decode()]=(mode,kind_,oid)
     selected = {}
     expected = {}
+    walked = set()
     def verified(origin):
         relative=origin.relative_to(source).as_posix()
-        data=origin.read_bytes();row=inventory.get(relative)
+        row=inventory.get(relative)
+        # Refuse an unadmitted path before reading any of its bytes.
+        if row is None or row[0] not in (b'100644',b'100755') or row[1]!=b'blob':
+            raise ValueError('source_refused')
+        data=origin.read_bytes()
         oid=hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest().encode()
-        if row is None or row[0] not in (b'100644',b'100755') or row[1:]!=(b'blob',oid):
+        if row[2]!=oid:
             raise ValueError('source_refused')
         return hashlib.sha256(data).hexdigest()
 
@@ -66,10 +154,10 @@ def prepare(kind, source, recipes, output, assets=None, *, source_commit, archit
         if origin.is_symlink():
             raise ValueError(f'Symlink forbidden in build inputs: {origin}')
         if origin.is_dir():
+            inside=origin.is_relative_to(source)
+            if inside: walked.add(origin.relative_to(source).as_posix())
             for child in sorted(origin.iterdir()):
-                if child.name.startswith('.') or child.name in EXCLUDED_DIRS:
-                    continue
-                if child.name.endswith(EXCLUDED_SUFFIXES) or child.name.endswith('_snapshot.json'):
+                if exclusion(child.relative_to(source).as_posix() if inside else child.name) is not None:
                     continue
                 add(child, destination / child.name)
         elif origin.is_file():
@@ -97,9 +185,8 @@ def prepare(kind, source, recipes, output, assets=None, *, source_commit, archit
         for name in ('db', 'logger', 'utils', 'tsconfig'):
             add(source / 'packages' / name, Path('packages') / name)
     elif kind in ('app','realtime','workflow-worker'):
-        for name in ('package.json','bun.lock','bunfig.toml','patches','packages','apps'):
+        for name in ('package.json','bun.lock','bunfig.toml',*APPLICATION_TREES):
             add(source/name,Path(name))
-        add(source/'compliance/upstream',Path('compliance/upstream'))
         if kind in ('app','realtime'):add(source/'turbo.json',Path('turbo.json'))
         if kind=='workflow-worker':
             add(recipes/'tests/bun-LICENSE.md',Path('deploy/memlia/images/tests/bun-LICENSE.md'))
@@ -126,6 +213,15 @@ def prepare(kind, source, recipes, output, assets=None, *, source_commit, archit
             add(apk, Path('apk') / apk.name)
     else:
         raise ValueError(kind)
+    # Every tracked file below a walked directory is copied or left out for a
+    # tolerated reason: no source is ever dropped silently (gitlinks included).
+    copied={origin.relative_to(source).as_posix() for origin in selected.values() if origin.is_relative_to(source)}
+    left_out=excluded_tracked(inventory,walked)
+    for path,reason in sorted(left_out.items()):
+        if reason not in TOLERATED_EXCLUSIONS:raise refused('source_refused',path,reason)
+    for path in sorted(inventory):
+        if path not in copied and path not in left_out and below(path,walked):
+            raise refused('source_refused',path,None)
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=output.parent, prefix='.context-') as temporary:
         staging = Path(temporary) / 'context'
@@ -144,6 +240,9 @@ def prepare(kind, source, recipes, output, assets=None, *, source_commit, archit
         (staging / 'context-manifest.json').write_text(json.dumps({'kind': kind, 'sourceCommit': source_commit, 'lockSha256': lock_hash, 'sha256': hashes}, indent=2) + '\n')
         if kind == 'cron':
             (staging / 'apk/SHA256SUMS').write_text(''.join(f'{hashes[name]}  {Path(name).name}\n' for name in sorted(hashes) if name.startswith('apk/')))
+        image_modes(staging, {name for name, origin in selected.items()
+                              if (inventory[origin.relative_to(source).as_posix()][0] == b'100755'
+                                  if origin.is_relative_to(source) else name in EXECUTABLE_ASSETS)})
         staging.rename(output)
     return output
 

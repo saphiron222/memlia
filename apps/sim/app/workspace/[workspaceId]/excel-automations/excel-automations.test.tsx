@@ -12,6 +12,7 @@ const fixture = vi.hoisted(() => ({
   push: vi.fn(),
   read: vi.fn(),
   canEdit: true,
+  userId: 'user-1',
   hideChat: false,
   hideFiles: false,
   workflows: {
@@ -24,6 +25,9 @@ const fixture = vi.hoisted(() => ({
     isPlaceholderData: false,
     data: [{ id: 'file-1', workspaceId: 'ws-1', name: 'Exemple.xlsx' }],
   },
+}))
+vi.mock('@/lib/auth/client', () => ({
+  useSession: () => ({ data: { user: { id: fixture.userId } }, isPending: false, error: null }),
 }))
 vi.mock('@/lib/api/client/request', () => ({ requestJson: fixture.request }))
 vi.mock('next/navigation', () => ({
@@ -100,6 +104,7 @@ async function submit() {
 beforeEach(() => {
   vi.clearAllMocks()
   fixture.canEdit = true
+  fixture.userId = 'user-1'
   fixture.hideChat = false
   fixture.hideFiles = false
   fixture.read.mockReturnValue({ status: 'ready', profile, scopeKey: 'scope' })
@@ -141,6 +146,70 @@ afterEach(() => {
   useMothershipDraftsStore.getState().reset()
 })
 describe('page Excel, vrai hook de création et stores natifs, transport HTTP doublé', () => {
+  it('changement de compte efface la sélection affichée et refuse une création tardive', async () => {
+    render()
+    act(() => host.querySelector<HTMLInputElement>('input[type=checkbox]')!.click())
+    type('Demande avant changement de compte')
+    let finish!: (value: unknown) => void
+    fixture.request.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve
+        })
+    )
+    await submit()
+    fixture.userId = 'other'
+    render()
+    await act(async () => finish({ id: 'wf-created', workspaceId: 'ws-1' }))
+    expect(host.textContent).not.toContain('Exemple.xlsx')
+    expect(host.querySelector('textarea')).toBeNull()
+    expect(
+      useMothershipDraftsStore.getState().drafts['ws-1:workflow-copilot:wf-created:new']
+    ).toBeUndefined()
+    expect(fixture.push).not.toHaveBeenCalled()
+  })
+  it('perte de la sélection pendant création refuse l’adoption du brouillon, sans lire un autre fichier', async () => {
+    render()
+    act(() => host.querySelector<HTMLInputElement>('input[type=checkbox]')!.click())
+    type('Analyser les fichiers choisis')
+    let finish!: (value: unknown) => void
+    fixture.request.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve
+        })
+    )
+    await submit()
+    fixture.hideFiles = true
+    render()
+    await act(async () => {
+      finish({ id: 'wf-created', workspaceId: 'ws-1' })
+      await Promise.resolve()
+    })
+    expect(
+      useMothershipDraftsStore.getState().drafts['ws-1:workflow-copilot:wf-created:new']
+    ).toBeUndefined()
+    expect(fixture.push).not.toHaveBeenCalled()
+    expect(fixture.request).toHaveBeenCalledTimes(1)
+  })
+  it('prépare une sélection Excel visible dans le seul brouillon relisible, sans lire ni envoyer les fichiers', async () => {
+    render()
+    const checkbox = host.querySelector<HTMLInputElement>('input[type=checkbox]')
+    expect(checkbox).not.toBeNull()
+    act(() => checkbox!.click())
+    type('Regrouper les montants par client')
+    await submit()
+    const draft = useMothershipDraftsStore.getState().drafts['ws-1:workflow-copilot:wf-created:new']
+    expect(draft?.text).toBe(
+      'MEMLIA_EXCEL_SELECTION_V1=["file-1"]\nRegrouper les montants par client'
+    )
+    expect(host.textContent).toContain('fournisseur IA')
+    expect(
+      fixture.request.mock.calls.every(
+        ([contract]) => !/execute|extract|content/.test(contract.path)
+      )
+    ).toBe(true)
+  })
   it('présente le parcours et ses liens natifs sans déclencher un effet', () => {
     render()
     expect(host.querySelector('h1')?.textContent).toBe('Automatiser Excel')

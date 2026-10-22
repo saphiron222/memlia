@@ -1,30 +1,55 @@
 // Copyright 2026 Memlia. All rights reserved.
 // Owned CI browser only. No session injection, provider credentials or public raw artifacts.
 import fs from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
 import path from 'node:path'
 
-export function durableExecutionRequest(workflowId) {
-  if (typeof workflowId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}(?![\s\S])/.test(workflowId))
-    throw Error('durable_workflow_refused')
+// The product's session queue entry, queueSessionWorkflowContract (apps/sim/lib/api/contracts/
+// workflows.ts): strict body, the interactive session user as actor, and an execution ID the
+// caller fixes before any mutation and never regenerates.
+export function durableExecutionRequest(workflowId, workspaceId, executionId) {
+  const id = value => typeof value === 'string' && /^[a-zA-Z0-9_-]{1,128}(?![\s\S])/.test(value)
+  if (!id(workflowId) || !id(workspaceId) || !id(executionId)) throw Error('durable_workflow_refused')
   return { path: `/api/workflows/${workflowId}/execute`,
-    headers: { 'content-type': 'application/json', 'X-Execution-Mode': 'async' },
-    body: JSON.stringify({ input: {}, triggerType: 'manual' }) }
+    headers: { 'content-type': 'application/json', 'X-Execution-Mode': 'async', 'X-Execution-Id': executionId },
+    body: JSON.stringify({ parentWorkspaceId: workspaceId, isClientSession: true }) }
 }
-export function durableQueueReceipt(status, value) {
+export function durableQueueReceipt(status, value, request) {
   if (status !== 202 || !value || value.success !== true || value.async !== true ||
     Object.keys(value).some(key => !['success', 'async', 'jobId', 'executionId', 'message', 'statusUrl'].includes(key)) ||
     typeof value.executionId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}(?![\s\S])/.test(value.executionId) ||
-    value.jobId !== 'workflow-execution:' + value.executionId)
+    value.jobId !== 'workflow-execution:' + value.executionId ||
+    value.executionId !== request?.headers?.['X-Execution-Id'])
     throw Error('durable_enqueue_unconfirmed')
   return { executionId: value.executionId, jobId: value.jobId }
+}
+// POST /api/workflows/[id]/deploy answers through deploymentInfoResponseSchema (apps/sim
+// lib/api/contracts/deployments.ts): the active version is `activeDeployment.deploymentVersionId`.
+// Require that the attempt this call admitted is the one now active and current.
+export function durableDeployReceipt(status, value) {
+  const id = item => typeof item === 'string' && /^[a-zA-Z0-9_-]{1,128}(?![\s\S])/.test(item)
+  const instant = item => typeof item === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z(?![\s\S])/.test(item)
+  const record = item => !!item && typeof item === 'object' && !Array.isArray(item)
+  const active = value?.activeDeployment
+  const attempt = value?.latestDeploymentAttempt
+  if (status !== 200 || !record(value) || value.isDeployed !== true ||
+      Object.keys(value).some(key => !['isDeployed', 'deployedAt', 'apiKey', 'warnings', 'activeDeployment', 'latestDeploymentAttempt'].includes(key)) ||
+      (value.deployedAt !== undefined && !instant(value.deployedAt)) ||
+      (value.warnings !== undefined && (!Array.isArray(value.warnings) || value.warnings.some(item => typeof item !== 'string'))) ||
+      !record(active) || Object.keys(active).sort().join(',') !== 'deployedAt,deploymentVersionId,version' ||
+      !id(active.deploymentVersionId) || !Number.isSafeInteger(active.version) || active.version < 1 || !instant(active.deployedAt) ||
+      !record(attempt) || attempt.action !== 'deploy' || attempt.status !== 'active' || attempt.isCurrent !== true ||
+      attempt.deploymentVersionId !== active.deploymentVersionId || attempt.version !== active.version)
+    throw Error('durable_deploy_refused')
+  return { deploymentVersionId: active.deploymentVersionId, version: active.version }
 }
 
 // Executes in the authenticated page. Keep the bounded response before parsing;
 // the owned host writes it to a private diagnostic file, including on HTTP refusal.
 export async function pageDurableWrite(request) {
-  const response = await fetch(request.path, { method: 'POST', credentials: 'same-origin',
+  const response = await fetch(request.path, { method: request.method ?? 'POST', credentials: 'same-origin',
     redirect: 'error', cache: 'no-store', headers: request.headers, body: request.body })
   if (!response.body) throw Error('durable_response_missing')
   const reader = response.body.getReader()
@@ -49,30 +74,92 @@ export async function pageDurableWrite(request) {
   return { status: response.status, raw: new TextDecoder().decode(bytes), overflow }
 }
 
-export async function durableJourney(page, fixture, prepared, observed, capture) {
+export function inactiveTestRequest(workflowId, workspaceId, preparation, prepared, executionId) {
+  durableExecutionRequest(workflowId, workspaceId, executionId)
+  const id = value => typeof value === 'string' && /^[a-zA-Z0-9_-]{1,128}(?![\s\S])/.test(value)
+  const hash = value => typeof value === 'string' && /^sha256:[a-f0-9]{64}(?![\s\S])/.test(value)
+  if (!id(workspaceId) || !id(executionId) || !preparation ||
+      Object.keys(preparation).sort().join(',') !== 'expectedRevision,expectedStateDigest,operationId' ||
+      !Number.isSafeInteger(preparation.expectedRevision) || preparation.expectedRevision < 0 ||
+      !hash(preparation.expectedStateDigest) || !id(preparation.operationId) || !prepared ||
+      Object.keys(prepared).sort().join(',') !== 'activationAvailable,deploymentVersionId,executionAvailable,snapshotDigest,status,version,workflowId' ||
+      prepared.status !== 'prepared_for_test' || prepared.workflowId !== workflowId ||
+      !id(prepared.deploymentVersionId) || !hash(prepared.snapshotDigest) ||
+      !Number.isSafeInteger(prepared.version) || prepared.version < 1 ||
+      prepared.executionAvailable !== false || prepared.activationAvailable !== false)
+    throw Error('inactive_test_preparation_refused')
+  return { path: `/api/workflows/${workflowId}/excel/test-preparations/run`,
+    headers: { 'content-type': 'application/json' }, body: JSON.stringify({
+      workspaceId, preparation, prepared, executionId, acknowledgeEffects: true,
+    }) }
+}
+export function inactiveQueueReceipt(status, value, request) {
+  const expected = JSON.parse(request.body)
+  if (status !== 202 || !value ||
+      Object.keys(value).sort().join(',') !== 'deploymentVersionId,executionId,snapshotDigest,status,workflowId' ||
+      value.status !== 'queued' || value.executionId !== expected.executionId ||
+      value.workflowId !== expected.prepared.workflowId ||
+      value.deploymentVersionId !== expected.prepared.deploymentVersionId ||
+      value.snapshotDigest !== expected.prepared.snapshotDigest)
+    throw Error('inactive_test_enqueue_unconfirmed')
+  return { executionId: value.executionId, deploymentVersionId: value.deploymentVersionId,
+    snapshotDigest: value.snapshotDigest }
+}
+export async function durableJourney(page, fixture, prepared, observed, capture, inactiveTest = false) {
   if (!prepared || Object.keys(prepared).sort().join(',') !== 'workflowId,workspaceId' ||
       typeof prepared.workspaceId !== 'string' ||
       !/^[a-zA-Z0-9_-]{1,128}(?![\s\S])/.test(prepared.workspaceId)) throw Error('durable_fixture_refused')
-  const execute = durableExecutionRequest(prepared.workflowId)
+  // Stable identity before the first mutation; a lost response is never resubmitted.
+  const executionId = randomUUID()
+  const execute = durableExecutionRequest(prepared.workflowId, prepared.workspaceId, executionId)
   await loginSession(page, fixture)
   observed.authenticated = true
+  if (inactiveTest) {
+    const path = `/api/workflows/${prepared.workflowId}/excel/test-preparations`
+    const observation = await page.evaluate(pageDurableWrite, {
+      path: path + '?workspaceId=' + encodeURIComponent(prepared.workspaceId), method: 'GET' })
+    capture('test-observe', observation)
+    if (observation.status !== 200 || observation.overflow) throw Error('inactive_test_observation_refused')
+    const current = JSON.parse(observation.raw)
+    if (!current || Object.keys(current).sort().join(',') !== 'expectedRevision,expectedStateDigest,workflowId,workspaceId' ||
+        current.workflowId !== prepared.workflowId || current.workspaceId !== prepared.workspaceId ||
+        !Number.isSafeInteger(current.expectedRevision) || current.expectedRevision < 0 ||
+        !/^sha256:[a-f0-9]{64}(?![\s\S])/.test(current.expectedStateDigest)) throw Error('inactive_test_observation_refused')
+    const preparation = { expectedRevision: current.expectedRevision,
+      expectedStateDigest: current.expectedStateDigest, operationId: randomUUID() }
+    // Keep stable identities before the first mutation; never redo a lost response.
+    capture('test-identities', { ...prepared, preparation, executionId })
+    const version = await page.evaluate(pageDurableWrite, { path: path + '?workspaceId=' + encodeURIComponent(prepared.workspaceId),
+      headers: { 'content-type': 'application/json' }, body: JSON.stringify(preparation) })
+    capture('test-prepare', version)
+    if (version.status !== 200 || version.overflow) throw Error('inactive_test_preparation_refused')
+    const request = inactiveTestRequest(prepared.workflowId, prepared.workspaceId, preparation, JSON.parse(version.raw), executionId)
+    const receipt = JSON.parse(request.body).prepared
+    observed.preparedForTest = true
+    observed.deploymentVersionId = receipt.deploymentVersionId
+    observed.snapshotDigest = receipt.snapshotDigest
+    observed.admissionMayExist = true
+    const queued = await page.evaluate(pageDurableWrite, request)
+    capture('test-enqueue', queued)
+    if (queued.overflow) throw Error('durable_response_overflow')
+    Object.assign(observed, inactiveQueueReceipt(queued.status, JSON.parse(queued.raw), request), { queued: true })
+    return // No deploy or activation call; worker starts only after caller closes browser.
+  }
+  capture('identities', { ...prepared, executionId })
   const deploy = await page.evaluate(pageDurableWrite, {
     path: `/api/workflows/${prepared.workflowId}/deploy`,
     headers: { 'content-type': 'application/json' }, body: '{}' })
   capture('deploy', deploy)
   if (deploy.overflow) throw Error('durable_response_overflow')
-  const deployed = JSON.parse(deploy.raw)
-  if (deploy.status !== 200 || deployed.isDeployed !== true ||
-      typeof deployed.activeDeployment?.id !== 'string' ||
-      !/^[a-zA-Z0-9_-]{1,128}(?![\s\S])/.test(deployed.activeDeployment.id)) throw Error('durable_deploy_refused')
+  const deployed = durableDeployReceipt(deploy.status, JSON.parse(deploy.raw))
   observed.deployed = true
-  observed.deploymentVersionId = deployed.activeDeployment.id
+  observed.deploymentVersionId = deployed.deploymentVersionId
   // A failed or lost response may have accepted work. The outer recipe never resubmits.
   observed.admissionMayExist = true
   const queued = await page.evaluate(pageDurableWrite, execute)
   capture('enqueue', queued)
   if (queued.overflow) throw Error('durable_response_overflow')
-  Object.assign(observed, durableQueueReceipt(queued.status, JSON.parse(queued.raw)), { queued: true })
+  Object.assign(observed, durableQueueReceipt(queued.status, JSON.parse(queued.raw), execute), { queued: true })
 }
 
 export function allowedOrigin(raw, origins) {
@@ -208,13 +295,24 @@ export function observeSocket(page, fixture) {
   })
   return () => token && live.size > 0
 }
+// React attaches its props key when it hydrates a node; text typed before that is dropped and
+// the controlled form stays unsubmittable (run12: Sign in disabled after fill at domcontentloaded).
+// Nodes are re-resolved on every poll: a client re-render may replace the server markup.
+export function loginFormHydrated() {
+  const nodes = [document.querySelector('input[name="email"]'), document.querySelector('input[type="password"]'),
+    [...document.querySelectorAll('button')].find((el) => el.textContent.trim() === 'Sign in')]
+  return nodes.every((el) => !!el && Object.keys(el).some((key) => key.startsWith('__reactProps$')))
+}
 async function loginSession(page, fixture) {
   page.setDefaultTimeout(45000)
   await page.goto(fixture.origin + '/login', { waitUntil: 'domcontentloaded', timeout: 60000 })
-  await page.locator('input[name="email"]').fill(fixture.email)
-  await page.locator('input[type="password"]').fill(fixture.password)
+  const email = page.locator('input[name="email"]')
+  const password = page.locator('input[type="password"]')
   const button = page.getByRole('button', { name: 'Sign in', exact: true })
   await button.waitFor({ state: 'visible' })
+  await page.waitForFunction(loginFormHydrated)
+  await email.fill(fixture.email)
+  await password.fill(fixture.password)
   await page.waitForFunction((el) => !el.disabled, await button.elementHandle())
   const response = await responseAfterClick(
     page,
@@ -315,7 +413,8 @@ export function readFixture(file, durable = false) {
 async function main() {
   process.umask(0o077)
   const [source, fixtureFile, report, mode, preparedFile, chromiumExecutable] = process.argv.slice(2)
-  const durable = mode === '--durable'
+  const inactiveTest = mode === '--inactive-test'
+  const durable = mode === '--durable' || inactiveTest
   let browser
   let error
   let interrupted = false
@@ -370,7 +469,7 @@ async function main() {
     if (durable) await durableJourney(await context.newPage(), fixture, prepared, observed, (phase, value) => {
       fs.writeFileSync(report + '.' + phase + '.private.json', JSON.stringify(value) + '\n',
         { flag: 'wx', mode: 0o600 })
-    })
+    }, inactiveTest)
     else await journey(await context.newPage(), fixture, observed)
   } catch (caught) {
     if (durable) {
@@ -392,10 +491,12 @@ async function main() {
     process.off('SIGTERM', stop)
     process.off('SIGINT', stop)
   }
+  const flags = inactiveTest ? ['authenticated', 'preparedForTest', 'queued', 'browserClosed'] : ['authenticated', 'deployed', 'queued', 'browserClosed']
   const receipt = durable ? {
-    status: !error && !interrupted && ['authenticated', 'deployed', 'queued', 'browserClosed'].every(k => observed[k] === true)
-      ? 'passed' : 'failed', scope: 'native_session_durable_submission',
-    ...Object.fromEntries(['authenticated', 'deployed', 'queued', 'browserClosed'].map(k => [k, observed[k] === true])),
+    status: !error && !interrupted && flags.every(k => observed[k] === true)
+      ? 'passed' : 'failed', scope: inactiveTest ? 'native_session_inactive_test_submission' : 'native_session_durable_submission',
+    ...(inactiveTest ? { snapshotDigest: observed.snapshotDigest, activationRequested: false } : {}),
+    ...Object.fromEntries(flags.map(k => [k, observed[k] === true])),
     workflowId: prepared?.workflowId, workspaceId: prepared?.workspaceId,
     deploymentVersionId: observed.deploymentVersionId, executionId: observed.executionId, jobId: observed.jobId,
   } : finalReceipt(observed, error || interrupted)

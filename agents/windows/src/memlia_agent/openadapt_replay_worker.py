@@ -201,6 +201,8 @@ def _session(rt, service, root, request, ports, binding):
 
 
 def run_directory(root, request):
+    if request.get('mode') != 'test':
+        raise ReplayWorkerError('replay_production_unqualified')
     ports = _admission_port()  # Before native imports, model initialization or sockets.
     binding = service = session = None
     try:
@@ -291,6 +293,8 @@ def run_directory(root, request):
         if observed.model_dump(mode='json')!=report.model_dump(mode='json'):
             raise ReplayWorkerError('replay_report_changed')
         inventory(root,64*1024*1024)
+        if observed.production_eligible is not False or observed.execution_outcome == 'VERIFIED':
+            raise ReplayWorkerError('replay_report_changed')
         return dict(status='observed',reportSha256=hashlib.sha256(raw).hexdigest(),
                     transactionOutcome=observed.transaction_outcome,
                     verified=(observed.transaction_outcome=='VERIFIED' and observed.execution_outcome=='VERIFIED'

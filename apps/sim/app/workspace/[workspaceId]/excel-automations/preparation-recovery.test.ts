@@ -3,8 +3,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   clearPreparationRecovery,
+  persistExecutionRecovery,
   persistPreparationRecovery,
   readPreparationRecovery,
+  readPreparedRecovery,
+  retainPreparedRecovery,
 } from './preparation-recovery'
 
 const scope = { userId: 'subject', workspaceId: 'space', workflowId: 'workflow' }
@@ -154,4 +157,142 @@ describe('reprise dédiée Excel — Web Storage jsdom réel', () => {
     expect(clearPreparationRecovery(scope, entry)).toBe(false)
     expect(sessionStorage.getItem(key)).toBe(entry)
   })
+})
+
+const prepared = {
+  status: 'prepared_for_test' as const,
+  workflowId: 'workflow',
+  deploymentVersionId: 'deployment',
+  version: 2,
+  snapshotDigest: `sha256:${'b'.repeat(64)}`,
+  executionAvailable: false as const,
+  activationAvailable: false as const,
+}
+
+it('recharge un indice préparé fermé sans lui attribuer accord ni résultat', () => {
+  const saved = JSON.stringify({ ...scope, version: 2, body, prepared, executionId: null })
+  sessionStorage.setItem(key, saved)
+  expect(readPreparationRecovery(scope)).toEqual({
+    status: 'prepared',
+    body,
+    prepared,
+    executionId: null,
+    entry: saved,
+  })
+})
+it('recharge le même identifiant de test avant toute observation réseau', () => {
+  const saved = JSON.stringify({ ...scope, version: 2, body, prepared, executionId: 'run-owned' })
+  sessionStorage.setItem(key, saved)
+  expect(readPreparationRecovery(scope)).toMatchObject({
+    status: 'prepared',
+    body,
+    prepared,
+    executionId: 'run-owned',
+  })
+})
+
+function preparedHint() {
+  const pending = persistPreparationRecovery(scope, body, null)
+  if (pending.status !== 'saved') throw new Error('pending')
+  const ready = retainPreparedRecovery(scope, body, prepared, pending.entry)
+  if (ready.status !== 'saved') throw new Error('prepared')
+  return ready.entry
+}
+it('reprise reload — conserve le reçu et un seul identifiant avec CAS, jamais accord ni fichier', () => {
+  const ready = preparedHint()
+  expect(readPreparedRecovery(scope, body, prepared)).toMatchObject({ executionId: null })
+  const sent = persistExecutionRecovery(scope, body, prepared, 'stable-run', ready)
+  expect(sent.status).toBe('saved')
+  if (sent.status !== 'saved') throw new Error('saved')
+  expect(JSON.parse(sent.entry)).toEqual({
+    ...scope,
+    version: 2,
+    body,
+    prepared,
+    executionId: 'stable-run',
+  })
+  expect(persistExecutionRecovery(scope, body, prepared, 'new-run', sent.entry)).toEqual({
+    status: 'blocked',
+  })
+  expect(sessionStorage.getItem(key)).toBe(sent.entry)
+})
+it('reprise reload — refuse un reçu étranger ou un binding modifié sans altérer l’indice', () => {
+  const ready = preparedHint()
+  expect(readPreparedRecovery(scope, { ...body, expectedRevision: 8 }, prepared)).toEqual({
+    status: 'blocked',
+  })
+  expect(
+    readPreparedRecovery(scope, body, { ...prepared, deploymentVersionId: 'foreign' })
+  ).toEqual({ status: 'blocked' })
+  for (const patch of [
+    { prepared: { ...prepared, workflowId: 'foreign' } },
+    { prepared: { ...prepared, activationAvailable: true } },
+    { executionId: 'invalid\n' },
+    { agreed: true },
+    { results: [] },
+  ]) {
+    sessionStorage.setItem(key, JSON.stringify({ ...JSON.parse(ready), ...patch }))
+    expect(readPreparationRecovery(scope)).toEqual({ status: 'blocked' })
+  }
+})
+it('reprise reload — une écriture ambiguë garde le premier identifiant sans autoriser un autre', () => {
+  const ready = preparedHint()
+  const original = sessionStorage.getItem.bind(sessionStorage)
+  const denied = vi
+    .spyOn(Object.getPrototypeOf(sessionStorage), 'getItem')
+    .mockImplementation((name: string) => {
+      const value = original(name)
+      if (value?.includes('stable-run')) throw new Error('private-read-denied')
+      return value
+    })
+  expect(persistExecutionRecovery(scope, body, prepared, 'stable-run', ready)).toEqual({
+    status: 'blocked',
+  })
+  denied.mockRestore()
+  const saved = original(key)!
+  expect(JSON.parse(saved).executionId).toBe('stable-run')
+  expect(persistExecutionRecovery(scope, body, prepared, 'other-run', ready)).toEqual({
+    status: 'blocked',
+  })
+  expect(sessionStorage.getItem(key)).toBe(saved)
+})
+it('reprise reload — préserve un remplacement concurrent lors de la réception ou de l’envoi', () => {
+  const pending = persistPreparationRecovery(scope, body, null)
+  if (pending.status !== 'saved') throw new Error('pending')
+  sessionStorage.setItem(key, 'foreign-entry')
+  expect(retainPreparedRecovery(scope, body, prepared, pending.entry)).toEqual({
+    status: 'blocked',
+  })
+  expect(sessionStorage.getItem(key)).toBe('foreign-entry')
+  sessionStorage.removeItem(key)
+  const ready = preparedHint()
+  sessionStorage.setItem(key, 'foreign-entry')
+  expect(persistExecutionRecovery(scope, body, prepared, 'run', ready)).toEqual({
+    status: 'blocked',
+  })
+  expect(sessionStorage.getItem(key)).toBe('foreign-entry')
+})
+it('reprise reload — une nouvelle préparation remplace seulement le reçu de sa lignée exacte', () => {
+  const ready = preparedHint()
+  expect(
+    persistPreparationRecovery(scope, { ...body, operationId: 'new-operation' }, ready)
+  ).toEqual({ status: 'blocked' })
+  const next = {
+    ...body,
+    operationId: 'new-operation',
+    previousTestVersionId: prepared.deploymentVersionId,
+  }
+  expect(persistPreparationRecovery(scope, next, ready).status).toBe('saved')
+  expect(readPreparationRecovery(scope)).toMatchObject({ status: 'pending', body: next })
+})
+it('reprise reload — refuse une mise à jour ignorée avant la préparation suivante', () => {
+  const ready = preparedHint()
+  vi.spyOn(Object.getPrototypeOf(sessionStorage), 'setItem').mockImplementation(() => {})
+  const next = {
+    ...body,
+    operationId: 'new-operation',
+    previousTestVersionId: prepared.deploymentVersionId,
+  }
+  expect(persistPreparationRecovery(scope, next, ready)).toEqual({ status: 'blocked' })
+  expect(sessionStorage.getItem(key)).toBe(ready)
 })

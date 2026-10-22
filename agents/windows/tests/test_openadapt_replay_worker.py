@@ -204,7 +204,7 @@ class ReplayWorkerCompositionTests(unittest.TestCase):
             with self.subTest(surface=surface),tempfile.TemporaryDirectory() as directory:
                 worker,stack,request,trace,rt=self.fixture(Path(directory),mode='production',surface=surface)
                 with stack,self.assertRaises(worker.ReplayWorkerError):worker.run_directory(Path(directory),request)
-                self.assertNotIn('service_started',trace);self.assertIn('admission_closed',trace)
+                self.assertNotIn('service_started',trace);self.assertNotIn('admission_closed',trace)
 
     def test_service_close_unknown_retains_report_and_still_closes_admission(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -302,3 +302,12 @@ class ReplayOwnedServiceTests(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main()
+
+
+class PersonalReplayWorkerTests(unittest.TestCase):
+    def test_production_refuses_before_admission_runtime_or_files(self):
+        worker=importlib.import_module('memlia_agent.openadapt_replay_worker')
+        with patch.object(worker,'_admission_port') as port,patch.object(worker,'_runtime') as runtime:
+            with self.assertRaises(worker.ReplayWorkerError) as caught:worker.run_directory(Path('/not-opened'),{'mode':'production'})
+        self.assertEqual(caught.exception.code,'replay_production_unqualified')
+        port.assert_not_called();runtime.assert_not_called()

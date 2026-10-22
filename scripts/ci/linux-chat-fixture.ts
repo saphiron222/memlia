@@ -49,6 +49,49 @@ export function cleanupFailureReceipt(stage: unknown, index: unknown, error: unk
     sqlstate: typeof code === 'string' && code.length === 5 && /^[A-Z0-9]{5}$/.test(code) ? code : null }
 }
 
+/** Pending events written by the native account erasure, each bound to one erased scope. */
+const ERASURE_OUTBOX_OWNERS: Record<string, 'projectId' | 'workspaceId'> = {
+  'project-file.storage.prefix-cleanup': 'projectId',
+  'account-deletion.storage.workspace-sweep': 'workspaceId',
+  'execution.removal-stop': 'workspaceId',
+}
+const DEPLOYMENT_PREPARATION_OUTBOX = 'workflow.deployment.prepare.v2'
+
+/**
+ * outbox_event is required empty at seed: every census row must be an event this recipe
+ * provoked, bound to a captured scope and in its expected state, or the cleanup refuses.
+ * Never a type-wide or status-wide selection. Returns only CAS identities for deletion.
+ */
+export function ownedOutboxResidue(rows: readonly Record<string, unknown>[], scope: {
+  workspaceIds: readonly unknown[]; projectIds: readonly unknown[]; userId: string
+  deployments: readonly Record<string, unknown>[] }) {
+  const refuse = (reason: string): never => { throw Error('fixture_outbox_residue_refused:' + reason) }
+  if (!Array.isArray(rows) || rows.length > 32) refuse('surplus')
+  const preparedOperations = new Set<unknown>()
+  return rows.map(row => {
+    if (typeof row.id !== 'string' || typeof row.digest !== 'string' || !/^[a-f0-9]{32}$/.test(row.digest)
+        || typeof row.version !== 'string' || !/^[0-9]+$/.test(row.version)) refuse('malformed')
+    if (row.fresh !== true) refuse('stale')
+    const owner = Object.hasOwn(ERASURE_OUTBOX_OWNERS, String(row.eventType)) ? ERASURE_OUTBOX_OWNERS[String(row.eventType)] : undefined
+    if (owner) {
+      if (row.status !== 'pending' || row.attempts !== 0 || row.unlocked !== true || row.unprocessed !== true)
+        refuse('unexpected_state')
+      if (!(owner === 'projectId' ? scope.projectIds : scope.workspaceIds).includes(row[owner])) refuse('unowned')
+    } else if (row.eventType === DEPLOYMENT_PREPARATION_OUTBOX) {
+      // Created by the owned POST /deploy and processed inline once, without failure.
+      if (row.status !== 'completed' || row.attempts !== 0 || row.unlocked !== true || row.unprocessed !== false
+          || row.noError !== true || row.processedInOrder !== true) refuse('unexpected_state')
+      const deployment = scope.deployments.find(item => item.operationId === row.operationId)
+      if (!deployment || typeof row.operationId !== 'string' || row.userId !== scope.userId
+          || deployment.workflowId !== row.workflowId || deployment.deploymentVersionId !== row.deploymentVersionId
+          || deployment.generation !== row.generation) refuse('unowned')
+      if (preparedOperations.has(row.operationId)) refuse('surplus')
+      preparedOperations.add(row.operationId)
+    } else refuse('unexpected_type')
+    return { id: row.id as string, digest: row.digest as string, version: row.version as string }
+  })
+}
+
 export function validateTarget(raw: string, nonce: string, mode: string) {
   if (
     !/^[a-f0-9]{32}$/.test(nonce) ||
@@ -394,6 +437,16 @@ async function main() {
         assertRecipe(workspaces.length <= 8 && projects.length <= 8)
         const workspaceIds = workspaces.map((r) => r.id)
         const projectIds = projects.map((r) => r.id)
+        // Native erasure cascades deployment rows; keep the owned identities that their
+        // completed preparation events must name, never a type-wide outbox selection.
+        const deployments =
+          await sql`SELECT o.id AS "operationId",o.workflow_id AS "workflowId",
+      o.deployment_version_id AS "deploymentVersionId",o.generation::text AS generation
+      FROM workflow_deployment_operation o JOIN workflow w ON w.id=o.workflow_id
+      JOIN workflow_deployment_version v ON v.id=o.deployment_version_id AND v.workflow_id=o.workflow_id
+      WHERE w.workspace_id=ANY(${workspaceIds}::text[]) AND o.actor_id=${fixture.userId} AND o.status='active'
+      ORDER BY o.id LIMIT 17`
+        assertRecipe(deployments.length <= 16)
         // The native one-time-token plugin stores the calling session token as value.
         // Capture row versions only, never token or session values, before native deletion.
         const verification =
@@ -404,7 +457,7 @@ async function main() {
         assertRecipe(verification.length <= 32)
         writeFileSync(
           join(directory, 'owned-scopes.private.json'),
-          JSON.stringify({ workspaceIds, projectIds, verification }) + '\n',
+          JSON.stringify({ workspaceIds, projectIds, deployments, verification }) + '\n',
           { mode: 0o600 }
         )
         importedDeletion = true
@@ -439,12 +492,19 @@ async function main() {
         const audit =
           await sql`SELECT t.id,md5(row_to_json(t)::text) AS digest,t.xmin::text AS version FROM audit_log t
       WHERE t.actor_email=${fixture.email} AND t.created_at>=${start}::timestamptz AT TIME ZONE 'UTC' LIMIT 33`
-        const outbox =
-          await sql`SELECT t.id,md5(row_to_json(t)::text) AS digest,t.xmin::text AS version FROM outbox_event t
-      WHERE t.status='pending' AND t.attempts=0 AND t.locked_at IS NULL AND t.processed_at IS NULL
-      AND t.created_at>=${start}::timestamptz AT TIME ZONE 'UTC'
-      AND ((t.event_type='project-file.storage.prefix-cleanup' AND t.payload->>'projectId'=ANY(${projectIds}::text[]))
-        OR (t.event_type IN ('account-deletion.storage.workspace-sweep','execution.removal-stop') AND t.payload->>'workspaceId'=ANY(${workspaceIds}::text[]))) LIMIT 33`
+        // Required empty at seed: census every row; only rows bound to this recipe are kept.
+        const outboxCensus =
+          await sql`SELECT t.id,t.event_type AS "eventType",t.status,t.attempts,
+      t.locked_at IS NULL AS unlocked,t.processed_at IS NULL AS unprocessed,t.last_error IS NULL AS "noError",
+      (t.created_at>=${start}::timestamptz AT TIME ZONE 'UTC'
+        AND t.created_at<=clock_timestamp() AT TIME ZONE 'UTC') AS fresh,
+      (t.processed_at>=t.created_at AND t.processed_at<=clock_timestamp() AT TIME ZONE 'UTC') AS "processedInOrder",
+      t.payload->>'projectId' AS "projectId",t.payload->>'workspaceId' AS "workspaceId",
+      t.payload->>'workflowId' AS "workflowId",t.payload->>'deploymentVersionId' AS "deploymentVersionId",
+      t.payload->>'operationId' AS "operationId",t.payload->>'generation' AS generation,t.payload->>'userId' AS "userId",
+      md5(row_to_json(t)::text) AS digest,t.xmin::text AS version
+      FROM outbox_event t ORDER BY t.id LIMIT 33`
+        const outbox = ownedOutboxResidue(outboxCensus, { workspaceIds, projectIds, deployments, userId: fixture.userId })
         // Fresh dedicated database; only two owned loopback services admitted traffic.
         // Legacy direct HTTP uses the verified Docker gateway; the durable HTTPS
         // recipe forces Chromium to IPv4 loopback and requires the existing proxy
@@ -510,6 +570,8 @@ async function main() {
           }
           cleanupStage = 'baseline_compare'
           cleanupIndex = -1
+          // Compare every table before refusing, so one run names all residues (counts only).
+          const mismatches: { index: number; table: string; baselineCount: number; count: number }[] = []
           for (const item of baseline) {
             cleanupIndex += 1
             assertRecipe(
@@ -520,7 +582,16 @@ async function main() {
             const rows = await tx.unsafe(
               `SELECT count(*)::int AS n,md5(coalesce(string_agg(md5(row_to_json(t)::text),'' ORDER BY md5(row_to_json(t)::text)),'')) AS digest FROM public."${item.table}" t`
             )
-            assertRecipe(rows[0].n === item.count && rows[0].digest === item.digest)
+            if (rows[0].n !== item.count || rows[0].digest !== item.digest)
+              mismatches.push({ index: cleanupIndex, table: item.table, baselineCount: item.count, count: rows[0].n })
+          }
+          if (mismatches.length > 0) {
+            cleanupIndex = mismatches[0].index
+            try {
+              writeFileSync(join(directory, 'baseline-mismatches.private.json'), JSON.stringify(mismatches) + '\n',
+                { mode: 0o600, flag: 'wx' })
+            } catch { /* Preserve existing evidence; the refusal below stands either way. */ }
+            assertRecipe(false)
           }
         })
         cleanupStage = 'proof_write'

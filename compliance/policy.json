@@ -1219,6 +1219,23 @@
         412
       ],
       "reason": "Fixture CI Memlia native, source exacte uniquement. fixtureSourceRoot admet exclusivement /work par d\u00e9faut ou /app exact, toute autre valeur refuse. createRequire fixe packages/db r\u00e9sout seulement postgres3.4.9 (Unlicense) et drizzle-orm0.45.2/migrator (Apache-2.0), apps/sim r\u00e9sout better-auth1.6.27/crypto (MIT), versions verrouill\u00e9es. Six imports produit fixes : packages/db/schema.ts, packages/db/script-migrations/index.ts, packages/db/db.ts, apps/sim/lib/core/config/redis.ts, apps/sim/lib/mothership/chat-status.ts, apps/sim/lib/users/account-deletion.ts. Aucune donn\u00e9e, nonce, DSN ou cookie ne construit une cible. Admission de ce blob et de ces dix expressions seulement ; ne dispense ni scan transitif ni artefacts ni qualification native. Revue ind\u00e9pendante Fondation le21octobre2026."
+    },
+    {
+      "path": "scripts/ci/linux-chat-fixture.ts",
+      "sha256": "eda2b9bd2112ce0ecb3468257cb56fa364b8b5b8f29fdaf37a0a99540b57bd1e",
+      "lines": [
+        122,
+        123,
+        266,
+        270,
+        348,
+        350,
+        377,
+        379,
+        381,
+        465
+      ],
+      "reason": "Fixture CI Memlia native, source exacte uniquement. fixtureSourceRoot admet exclusivement /work par d\u00e9faut ou /app exact, toute autre valeur refuse. createRequire fixe packages/db r\u00e9sout seulement postgres3.4.9 (Unlicense) et drizzle-orm0.45.2/migrator (Apache-2.0), apps/sim r\u00e9sout better-auth1.6.27/crypto (MIT), versions verrouill\u00e9es. Six imports produit fixes : packages/db/schema.ts, packages/db/script-migrations/index.ts, packages/db/db.ts, apps/sim/lib/core/config/redis.ts, apps/sim/lib/mothership/chat-status.ts, apps/sim/lib/users/account-deletion.ts. Aucune donn\u00e9e, nonce, DSN ou cookie ne construit une cible. Admission de ce blob et de ces dix expressions seulement ; ne dispense ni scan transitif ni artefacts ni qualification native. Revue ind\u00e9pendante Fondation le21octobre2026."
     }
   ]
 }

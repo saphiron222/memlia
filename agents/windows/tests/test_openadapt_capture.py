@@ -1,5 +1,5 @@
 # Copyright (c) 2026 Memlia. All rights reserved.
-"""Inactive host boundaries; no synthetic local consent or desktop capture."""
+"""Native boundaries doubled; no Windows consent or desktop capture qualification."""
 import importlib.util
 from contextlib import ExitStack
 import json
@@ -284,6 +284,9 @@ class CaptureCompositionTests(unittest.TestCase):
             def _start(self):
                 if not consent: raise CaptureUnavailable('local_consent_unavailable')
                 trace.append('consented')
+            def consent_observation(self,**kwargs):
+                return {'consentId':'fictitious-consent','confirmedLocallyAt':'2026-10-21T18:00:00.000Z',
+                        'commandDigest':DIGEST,'windowsSid':'S-1-5-21-1','sessionId':'1'}
             def checkpoint(self, **kwargs):
                 if cancel or partial_preparing and self._work_pending:
                     raise StopRequested('stop_requested')
@@ -339,6 +342,23 @@ class CaptureCompositionTests(unittest.TestCase):
         stack.enter_context(patch.object(CaptureInputFactory, 'from_controls', return_value=factory))
         return host, stack, dict(operation_digest=DIGEST, deadline_monotonic=deadline,
                                 max_bytes=4096, revalidate=authority), trace, job_values
+
+    def test_consent_hook_follows_local_decision_and_precedes_worker(self):
+        host,stack,request,trace,jobs=self.composed()
+        def accepted(observation):
+            self.assertEqual(observation['commandDigest'],DIGEST)
+            trace.append('server_consent')
+        request['on_local_consent']=accepted
+        with stack:
+            host.record_capture(**request)
+        self.assertLess(trace.index('consented'),trace.index('server_consent'))
+        self.assertLess(trace.index('server_consent'),trace.index('job_start'))
+
+    def test_refused_consent_hook_never_starts_capture(self):
+        host,stack,request,trace,jobs=self.composed()
+        request['on_local_consent']=lambda observation:True
+        with stack,self.assertRaises(host.CaptureError): host.record_capture(**request)
+        self.assertNotIn('job_start',trace)
 
     def test_composed_capture_delivers_bytes_only_after_normal_exit_and_every_cleanup(self):
         host, stack, request, trace, jobs = self.composed()

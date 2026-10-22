@@ -79,9 +79,11 @@ _active = None  # Strong ownership, including after an exception/unknown cleanup
 
 
 class _CaptureRun:
-    def __init__(self, *, operation_digest, deadline_monotonic, max_bytes, revalidate):
+    def __init__(self, *, operation_digest, deadline_monotonic, max_bytes, revalidate,
+                 on_local_consent=None):
         self.digest, self.deadline, self.max_bytes = operation_digest, deadline_monotonic, max_bytes
         self.revalidate = revalidate
+        self.on_local_consent = on_local_consent
         self.owner, self.pid, self.tid = threading.current_thread(), os.getpid(), threading.get_native_id()
         self.reservation = self.signal = self.controls = self.job = None
         self.temporary = None
@@ -117,6 +119,10 @@ class _CaptureRun:
         self._authority()
         self.controls = _CaptureControls(self.reservation, self.signal, self.digest)
         self.controls._start()  # Actual local consent; no network boolean substitutes it.
+        if self.on_local_consent is not None:
+            observation = self.controls.consent_observation(operation_digest=self.digest)
+            if self.on_local_consent(observation) is not None:
+                raise CaptureError('capture_authority_unavailable')
         self._authority()
         factory = CaptureInputFactory.from_controls(self.controls, operation_digest=self.digest)
         self.temporary = tempfile.TemporaryDirectory(prefix='memlia-capture-')
@@ -227,7 +233,8 @@ class _CaptureRun:
         return True
 
 
-def record_capture(*, operation_digest, deadline_monotonic, max_bytes, revalidate):
+def record_capture(*, operation_digest, deadline_monotonic, max_bytes, revalidate,
+                   on_local_consent=None):
     """Internal trusted caller only. No public command, route or server authority.
 
     revalidate is the required native authority/lease port, not a network boolean.
@@ -243,7 +250,8 @@ def record_capture(*, operation_digest, deadline_monotonic, max_bytes, revalidat
             pass
     if (type(operation_digest) is not str or not _DIGEST.fullmatch(operation_digest)
             or not deadline_valid or type(max_bytes) is not int
-            or not 1 <= max_bytes <= 2147483648 or not callable(revalidate)):
+            or not 1 <= max_bytes <= 2147483648 or not callable(revalidate)
+            or on_local_consent is not None and not callable(on_local_consent)):
         raise CaptureError('invalid_capture_request')
     with _registry_lock:
         if _active is not None:
@@ -251,7 +259,7 @@ def record_capture(*, operation_digest, deadline_monotonic, max_bytes, revalidat
         if sys.platform != 'win32':
             raise CaptureError('capture_runtime_unavailable')
         owner = _CaptureRun(operation_digest=operation_digest, deadline_monotonic=deadline_monotonic,
-                            max_bytes=max_bytes, revalidate=revalidate)
+                            max_bytes=max_bytes, revalidate=revalidate, on_local_consent=on_local_consent)
         _active = owner
     failure = 'capture_failed'
     result = None

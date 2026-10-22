@@ -59,7 +59,9 @@ vérifié par SHA256 après installation dans la recette.
 
 Les assets cron sont téléchargés depuis GitHub, le CDN Alpine et le proxy Go
 public avec TLS vérifié. Le binaire et les métadonnées Supercronic sont figés par
-SHA256 ; les 19 paquets Alpine le sont dans `tests/cron-apk.sha256`. Les archives
+SHA256 ; les 19 paquets Alpine le sont par nom et SHA256 dans `tests/cron-apk.sha256`
+(arm64) et `tests/cron-apk-amd64.sha256` (amd64), rafraîchis seulement par la
+procédure explicite décrite plus bas. Les archives
 des 16 modules détectés dans le binaire sont vérifiées contre leurs checksums
 Go h1 ; leurs 30 fichiers de licence/notice et leurs métadonnées sont conservés.
 Le build vérifie à nouveau le binaire et les APK. `apk` vérifie aussi les
@@ -86,17 +88,73 @@ Le helper CI `scripts/ci/workflow-worker-image.py` conserve son archive Git
 vérifiée et son superviseur, réemploie le même writer de métadonnées et contrôle
 les deux labels sur l'image obtenue.
 
-Cron sélectionne explicitement arm64 ou amd64. `tests/cron-apk.sha256` reste
-inchangé ; `tests/cron-apk-amd64.sha256` conserve les mêmes 19 noms et versions.
+Cron sélectionne explicitement arm64 ou amd64. Les deux verrous portent les mêmes
+19 noms de paquets, chacun avec ses empreintes propres à l'architecture.
 Supercronic reste v0.2.33 : le binaire amd64 correspond au SHA1 officiel
 `71b0d58cc53f6bd72cf2f293e09e294b79c666d8`, puis au SHA256
 `feefa310da569c81b99e1027b86b27b51e6ee9ab647747b49099645120cfc671`.
-Les signatures des 19 APK amd64 ont été vérifiées avec la clé Alpine officielle ;
-`apk` les vérifie encore au build. Les sommes Go h1 des 16 modules et leurs
-licences sont vérifiées par le même fetcher. Aucune version ni empreinte arm64
-n'est remplacée. L'index Alpine épinglé contient les deux architectures.
+Les signatures des APK sont vérifiées au rafraîchissement du verrou (ci-dessous)
+et `apk` les vérifie encore au build. Les sommes Go h1 des 16 modules et leurs
+licences sont vérifiées par le même fetcher.
 Sources : [publication Supercronic](https://github.com/aptible/supercronic/releases/tag/v0.2.33),
-[clé Alpine](https://alpinelinux.org/keys/alpine-devel@lists.alpinelinux.org-6165ee59.rsa.pub).
+clés Alpine [x86_64](https://alpinelinux.org/keys/alpine-devel@lists.alpinelinux.org-6165ee59.rsa.pub)
+et [aarch64](https://alpinelinux.org/keys/alpine-devel@lists.alpinelinux.org-616ae350.rsa.pub).
+
+### Rafraîchir le verrou APK du cron
+
+Alpine retire de `v3.24/main` les versions remplacées d'un paquet : tout verrou de
+version finit par pointer vers un fichier supprimé. Observation ponctuelle du
+22/10/2026, à ne pas généraliser : depuis la VM de build OVH (GRA11),
+`ca-certificates-20260909-r0.apk` a répondu 404 à 4 requêtes sur 5, et 200 à la
+cinquième. Le même jour, ce fichier répondait encore 200 depuis le Mac et lors de
+la revue à 8 h 20. Ces réponses divergent selon le cache du CDN interrogé. L'index
+signé, lui, ne publiait plus que `20261020-r0`. Le CI télécharge les assets à
+chaque exécution : il échouera dès qu'il tombera sur un nœud purgé. Les APK ne
+sont ni copiés dans ce dépôt public ni servis par un miroir à nous : des binaires
+GPL comme busybox imposent alors une offre de sources, hors de ce périmètre.
+
+Le fetch du build ne résout jamais de version : il télécharge exactement ce que
+nomme le verrou et refuse un SHA256 divergent. Un paquet retiré (HTTP 404/410)
+le fait échouer avec le nom du fichier et la commande à lancer. Le
+rafraîchissement est une étape de maintenance distincte, lancée depuis la racine
+du dépôt avec curl et Python 3 :
+
+```sh
+python3 deploy/memlia/images/tests/fetch_cron_assets.py --refresh-lock --architecture amd64
+python3 deploy/memlia/images/tests/fetch_cron_assets.py --refresh-lock --architecture arm64
+```
+
+Pour chaque architecture, l'outil télécharge `APKINDEX.tar.gz` et vérifie sa
+signature RSA avec la seule clé Alpine embarquée dans `fetch_cron_assets.py`
+(6165ee59 pour x86_64, 616ae350 pour aarch64). Ces fichiers sont identiques, à
+l'octet, sur alpinelinux.org/keys, dans `main/alpine-keys` d'aports 3.24-stable et
+dans `/etc/apk/keys` de la base `alpine:3.24.2` épinglée par digest. Il refuse
+alors une autre clé, une signature invalide, un index tronqué ou suivi de données
+non signées, une entrée dupliquée ou d'une autre architecture. Il résout ensuite
+les mêmes 19 noms à leur version courante et refuse un nom absent de l'index ou
+une dépendance non fournie par l'ensemble verrouillé. Il refuse aussi toute
+version inférieure à celle du verrou, comparée selon l'ordre d'apk pour les
+formes utilisées (`1.37.0-r31`, `20261020-r0`, `2026e-r0`, suffixes `_rc`, `_git`,
+`_p`). Une autre forme est refusée plutôt que devinée. Un index périmé mais
+signé, servi par un cache, ne peut donc pas faire régresser un paquet. Chaque
+APK est enfin contrôlé contre l'index : taille `S:`, hash `C:` du segment de
+contrôle, signature du paquet par la même clé, nom et version de `.PKGINFO`,
+`datahash` du segment de données. Le verrou n'est réécrit, trié, synchronisé sur
+disque puis remplacé de façon atomique, qu'après tous ces contrôles ; tout refus
+le laisse intact. L'outil affiche l'empreinte de l'index et chaque changement
+avec son sens (`(upgrade)`). Une même version avec de nouveaux octets est
+signalée, car elle demande une revue.
+
+Relire ensuite le diff des deux verrous et le committer. `apk add --no-network`
+reste l'arbitre final au build : un verrou rafraîchi n'est qualifié qu'après un
+nouveau build et ses smoke tests.
+
+Rafraîchissement du 22/10/2026 (index `v3.24.3-4-g83133521279`, SHA256
+`6d1d7b0e…22e4` pour x86_64 et `9d6e669a…4ab8` pour aarch64). Cinq versions
+changent sur les deux architectures : brotli-libs 1.2.0-r1 → 1.2.1-r0, c-ares
+1.34.8-r0 → 1.34.9-r0, ca-certificates et ca-certificates-bundle 20260909-r0 →
+20261020-r0, musl 1.2.6-r2 → 1.2.6-r3. Les 14 autres paquets gardent leurs
+empreintes. Ces verrous rafraîchis n'ont encore été qualifiés par aucun build.
 
 Ces contrôles de préparation ne qualifient aucun nouveau build Docker. Les
 résultats arm64 historiques ci-dessous restent attribués à leurs anciennes sources.
@@ -130,9 +188,9 @@ refuse une autre architecture. Les bases sont les images officielles :
 
 La base cron passe du tag amont Alpine 3.21 à la base Alpine 3.24.2 figée et
 qualifiée localement. Les paquets restent natifs (curl, certificats CA, tzdata et
-leur fermeture de dépendances). Les URL de paquets peuvent un jour disparaître :
-conserver le cache d’assets vérifié pour reconstruire ; ne pas remplacer
-silencieusement une version ou un hash. Les tags `p03-local` servent au
+leur fermeture de dépendances). Les URL de paquets disparaissent quand Alpine
+publie une nouvelle version : ne jamais remplacer une version ou un hash à la
+main, passer par le rafraîchissement vérifié décrit plus haut. Les tags `p03-local` servent au
 laboratoire ; un artefact de livraison devra être référencé par digest après
 les gates de publication. L’égalité bit à bit de deux builds n’est pas qualifiée.
 
@@ -142,6 +200,10 @@ les gates de publication. L’égalité bit à bit de deux builds n’est pas qu
 python3 -m unittest discover -s tests -v
 MEMLIA_IMAGE_SMOKE=1 python3 -m unittest discover -s tests -v
 ```
+
+La première commande tourne hors réseau. `tests/test_cron_apk_lock.py` signe ses
+index et paquets fictifs avec des clés RSA générées par le CLI `openssl`, requis
+par cette suite : il sert d'implémentation indépendante du vérificateur testé.
 
 La seconde commande requiert `DOCKER_CONFIG`, `DOCKER_HOST` et les deux images
 locales. Elle teste des conteneurs isolés sans réseau : manque de configuration,

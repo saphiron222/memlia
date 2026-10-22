@@ -92,7 +92,88 @@ def verify_durable_submission(raw,prepared):
     return value
 
 
-def project_cleanup_failure(raw):
+def verify_inactive_submission(raw,prepared,identities_raw,version_raw,enqueued_raw,observation_raw):
+    """Normalize protected captures, never treat a derived job ID as an observed queue row."""
+    from memlia_excel.process import pairs,non_json
+    def closed(raw):
+        require(0<len(raw)<=16384)
+        return json.loads(raw,object_pairs_hook=pairs,parse_constant=non_json)
+    def phase(raw,status):
+        value=closed(raw)
+        require(type(value)is dict and set(value)=={'status','raw','overflow'}
+                and type(value['status'])is int and value['status']==status and value['overflow'] is False
+                and type(value['raw'])is str)
+        return closed(value['raw'].encode())
+    def identity(value):return type(value)is str and re.fullmatch(r'[A-Za-z0-9_-]{1,128}',value)
+    def digest(value):return type(value)is str and re.fullmatch(r'sha256:[a-f0-9]{64}',value)
+    value=closed(raw);ids=closed(identities_raw)
+    require(type(value)is dict and set(value)=={'status','scope','authenticated','preparedForTest','queued',
+        'browserClosed','activationRequested','workflowId','workspaceId','deploymentVersionId','executionId','snapshotDigest'}
+        and value['status']=='passed' and value['scope']=='native_session_inactive_test_submission'
+        and value['activationRequested'] is False
+        and all(value[k] is True for k in ('authenticated','preparedForTest','queued','browserClosed')))
+    require(type(ids)is dict and set(ids)=={'workflowId','workspaceId','preparation','executionId'})
+    for key in ('workflowId','workspaceId','executionId'):
+        require(identity(value[key]) and value[key]==ids[key])
+    require(value['workflowId']==prepared['workflowId'] and value['workspaceId']==prepared['workspaceId'])
+    preparation=ids['preparation']
+    require(type(preparation)is dict and set(preparation)=={'expectedRevision','expectedStateDigest','operationId'}
+            and type(preparation['expectedRevision'])is int and 0<=preparation['expectedRevision']<=2**53-1
+            and digest(preparation['expectedStateDigest']) and identity(preparation['operationId']))
+    observation=phase(observation_raw,200)
+    require(type(observation)is dict and set(observation)=={'workflowId','workspaceId','expectedRevision','expectedStateDigest'}
+            and observation==dict(workflowId=value['workflowId'],workspaceId=value['workspaceId'],
+                expectedRevision=preparation['expectedRevision'],expectedStateDigest=preparation['expectedStateDigest'])
+            and type(observation['expectedRevision'])is int)
+    version=phase(version_raw,200)
+    require(type(version)is dict and set(version)=={'status','workflowId','deploymentVersionId','version','snapshotDigest',
+        'executionAvailable','activationAvailable'} and version['status']=='prepared_for_test'
+        and version['executionAvailable'] is False and version['activationAvailable'] is False
+        and type(version['version'])is int and 1<=version['version']<=2**53-1
+        and identity(version['deploymentVersionId']) and digest(version['snapshotDigest'])
+        and all(version[key]==value[key] for key in ('workflowId','deploymentVersionId','snapshotDigest')))
+    queued=phase(enqueued_raw,202)
+    require(type(queued)is dict and set(queued)=={'status','workflowId','deploymentVersionId','snapshotDigest','executionId'}
+            and queued['status']=='queued' and all(queued[key]==value[key]
+                for key in ('workflowId','deploymentVersionId','snapshotDigest','executionId')))
+    return dict(value,jobId='workflow-execution:'+value['executionId'],jobIdSource='derived_expected',
+                inactiveTest=dict(workspaceId=value['workspaceId'],preparation=preparation,prepared=version))
+
+
+BASELINE_LIMIT=262_144
+
+
+def owned_resource_refusal(kind,raw,name,labels):
+    """Closed code naming why a Docker network/volume is not proven owned by this run, else None."""
+    try:rows=json.loads(raw)
+    except Exception:return kind+'_inspection_refused'
+    if type(rows)is not list or len(rows)!=1 or type(rows[0])is not dict or rows[0].get('Name')!=name:
+        return kind+'_identity_refused'
+    actual=rows[0].get('Labels')
+    # Docker reports Labels: null for a volume created outside Compose by a plain `docker run --mount`.
+    if not actual:return kind+'_labels_missing'
+    if type(actual)is not dict or any(actual.get(key)!=value for key,value in labels.items()):return kind+'_labels_foreign'
+    if kind=='network' and rows[0].get('Containers'):return 'network_in_use'
+    if kind=='volume' and (rows[0].get('Driver')!='local' or rows[0].get('Options')):return 'volume_driver_refused'
+    return None
+
+
+def captured_table_count(raw):
+    """Entries of the reference the fixture captured for this run: the only compare-index bound."""
+    from memlia_excel.process import pairs,non_json
+    require(type(raw)is bytes and 0<len(raw)<=BASELINE_LIMIT)
+    rows=json.loads(raw,object_pairs_hook=pairs,parse_constant=non_json)
+    require(type(rows)is list and 1<=len(rows)<=1024)
+    require(all(type(row)is dict and set(row)=={'table','count','digest'}
+                and type(row['table'])is str and re.fullmatch(r'[a-z_0-9]+',row['table'])
+                and type(row['count'])is int and row['count']>=0
+                and type(row['digest'])is str and re.fullmatch(r'[a-f0-9]{32}',row['digest']) for row in rows))
+    require(len({row['table'] for row in rows})==len(rows))
+    return len(rows)
+
+
+def project_cleanup_failure(raw,read_baseline):
+    """read_baseline is called only to bound an index: an unindexed receipt survives a missing reference."""
     from memlia_excel.process import pairs,non_json
     require(0<len(raw)<=1024)
     value=json.loads(raw,object_pairs_hook=pairs,parse_constant=non_json)
@@ -100,7 +181,8 @@ def project_cleanup_failure(raw):
     require(value['status']=='failed' and value['code']=='fixture_cleanup_refused'
             and value['stage'] in CLEANUP_STAGES)
     index,state=value['index'],value['sqlstate']
-    require(index is None or (value['stage']=='baseline_compare' and type(index)is int and 0<=index<183))
+    require(index is None or (value['stage']=='baseline_compare' and type(index)is int and index>=0
+                              and index<captured_table_count(read_baseline())))
     require(state is None or (type(state)is str and len(state)==5
             and all(char in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789' for char in state)))
     return value
@@ -145,18 +227,28 @@ def verify_durable_result(raw,submission):
     from memlia_excel.process import pairs,non_json
     require(0<len(raw)<=MAX_RESULT)
     value=json.loads(raw,object_pairs_hook=pairs,parse_constant=non_json)
-    require(type(value)is dict and set(value)=={'status','scope','checks','durable','file','download'}
-            and value['status']=='passed' and value['scope']=='native_durable_compose')
+    inactive=submission.get('inactiveTest') is not None
+    fields={'status','scope','checks','durable','file','download'}|({'inactive'} if inactive else set())
+    require(type(value)is dict and set(value)==fields and value['status']=='passed'
+            and value['scope']==('native_inactive_test_compose' if inactive else 'native_durable_compose'))
+    if inactive:
+        pin=value['inactive'];identity=('workflowId','workspaceId','executionId','deploymentVersionId','snapshotDigest')
+        require(type(pin)is dict and set(pin)==set(identity)|{'versionInactive','payloadBound','journalVersionBound','resultFileBound'}
+                and all(pin[k]==submission[k] for k in identity)
+                and all(pin[k] is True for k in ('versionInactive','payloadBound','journalVersionBound','resultFileBound')))
     require(type(value['checks'])is dict and set(value['checks'])==set(CHECKS)
             and all(value['checks'][key] is (key!='ownedRunFixtureRetired') for key in CHECKS))
     native=value['durable']
-    require(type(native)is dict and set(native)=={'jobId','executionId','completed','attempts',
+    require(type(native)is dict and set(native)=={'jobId','executionId','deploymentVersionId','completed','attempts',
             'transportAcked','oneDelivery','oneExecutionLog'}
             and native['jobId']==submission['jobId'] and native['executionId']==submission['executionId']
+            # The fixture read this version from the completed run's journal; it must be the browser's.
+            and type(native['deploymentVersionId'])is str and native['deploymentVersionId']==submission['deploymentVersionId']
             and type(native['attempts'])is int and native['attempts']==1
             and all(native[key] is True for key in ('completed','transportAcked','oneDelivery','oneExecutionLog')))
     return dict(scope=value['scope'],businessPassed=True,**verify_recorded_download(value['file'],value['download']),
-                singleAttempt=True,transportAcked=True,oneExecutionLog=True,liveProviderTested=False)
+                singleAttempt=True,transportAcked=True,oneExecutionLog=True,liveProviderTested=False,
+                **({'inactiveVersionPinned':True} if inactive else {}))
 
 
 def verify_bootstrap_receipt(raw,phase,nonce):
@@ -177,8 +269,10 @@ def verify_bootstrap_receipt(raw,phase,nonce):
 
 
 def durable_configuration(value):
-    require(type(value)is dict and set(value)=={'schemaVersion','sourceCommit','lockSha256','nonce',
-            'envFile','bootstrapFile','images','browser'}
+    require(type(value)is dict and set(value) in ({'schemaVersion','sourceCommit','lockSha256','nonce',
+            'envFile','bootstrapFile','images','browser'}, {'schemaVersion','sourceCommit','lockSha256','nonce',
+            'envFile','bootstrapFile','images','browser','journey'})
+            and ('journey' not in value or value['journey']=='inactive-test')
             and value['schemaVersion']=='memlia.excel-durable-qualification/v1')
     for key,size in (('sourceCommit',40),('lockSha256',64),('nonce',32)):
         require(type(value[key])is str and re.fullmatch('[a-f0-9]{'+str(size)+'}',value[key]))
@@ -227,24 +321,73 @@ def protected_durable_file(path,*,executable=False,limit=65536):
     return bytes(result)
 
 
+def compose_preflight():
+    spec=importlib.util.spec_from_file_location('excel_compose_preflight',ROOT/'deploy/memlia/preflight.py')
+    preflight=importlib.util.module_from_spec(spec);spec.loader.exec_module(preflight)
+    return preflight
+
+
+def repo_digest(reference):
+    """Docker records a pulled `repository:tag@digest` as `repository@digest` only."""
+    recorded=compose_preflight().repo_digest(reference);require(recorded)
+    return recorded
+
+
+def compose_bytes(value,expected):
+    """Resolved Compose byte limit: int, or its exact decimal string (Compose v5.6.1)."""
+    return type(value)is int and value==expected or type(value)is str and value==str(expected)
+
+
+# linux-chat-browser.mjs sets TMPDIR=<cwd>/tmp; Chromium's process singleton binds a Unix
+# socket at TMPDIR/org.chromium.Chromium.XXXXXX/SingletonSocket. sockaddr_un.sun_path holds
+# 108 bytes including the NUL (run9: 145 bytes under the host socket directory, SIGABRT).
+BROWSER_ROOT=Path('/run')
+SUN_PATH_MAX=107
+CHROMIUM_SINGLETON='tmp/org.chromium.Chromium.XXXXXX/SingletonSocket'
+
+
+def browser_socket_fits(profile):
+    return len(os.fsencode(str(profile/CHROMIUM_SINGLETON)))<=SUN_PATH_MAX
+
+
+def browser_profile(nonce):
+    """Short browser working directory owned by this run; refused if its socket cannot bind."""
+    require(type(nonce)is str and re.fullmatch('[a-f0-9]{32}',nonce))
+    profile=BROWSER_ROOT/('memlia-browser-'+nonce[:16])
+    require(browser_socket_fits(profile),'browser_socket_path_refused')
+    return profile
+
+
+def create_browser_profile(profile,*,owner=0,uid=1001,gid=1001):
+    """Exclusive 0700 directory for UID 1001 under a real, owner-only-writable parent."""
+    parent=profile.parent.lstat()
+    require(stat.S_ISDIR(parent.st_mode) and parent.st_uid==owner and not parent.st_mode&0o022,
+            'browser_profile_parent_refused')
+    profile.mkdir(mode=0o700);os.chown(profile,uid,gid)
+    info=profile.lstat()
+    require(stat.S_ISDIR(info.st_mode) and stat.S_IMODE(info.st_mode)==0o700
+            and info.st_uid==uid and info.st_gid==gid,'browser_profile_refused')
+
+
 def verify_durable_image(row,name,config):
     expected=config['images'][name]
     require(row['Id']==expected['imageId'] and row['Os']=='linux' and row['Architecture']=='amd64'
-            and expected['reference'] in row.get('RepoDigests',[]))
+            and repo_digest(expected['reference']) in (row.get('RepoDigests') or []))
     if name not in ('db','redis'):
         labels=row['Config'].get('Labels') or {}
         require(labels.get('org.memlia.source')==config['sourceCommit']
                 and labels.get('org.memlia.lock')==config['lockSha256'])
     if name=='workflow-worker':
+        # Same image and inherited node entrypoint that deploy/memlia/operations.py attests
+        # for agent-control; it execs `bun` directly since bun is an executable on PATH.
         require(row['Config']['User']=='1001:1001' and row['Config']['WorkingDir']=='/app/apps/sim'
-                and not row['Config'].get('Entrypoint')
+                and row['Config'].get('Entrypoint')==['docker-entrypoint.sh']
                 and row['Config']['Cmd']==['bun','--no-env-file','--tsconfig-override=tsconfig.json',
                                            'scripts/memlia-workflow-worker.ts'])
 
 
 def validate_durable_model(model,config,socket):
-    spec=importlib.util.spec_from_file_location('excel_compose_preflight',ROOT/'deploy/memlia/preflight.py')
-    preflight=importlib.util.module_from_spec(spec);spec.loader.exec_module(preflight)
+    preflight=compose_preflight()
     require(preflight.validate(model)==[] and model.get('name')=='memlia-excel-durable-'+config['nonce'])
     services=model['services'];worker=services['workflow-worker'];web=services['web']
     require(set(services)==set(config['images']) and all(services[name]['image']==image['reference']
@@ -253,7 +396,8 @@ def validate_durable_model(model,config,socket):
             and worker.get('working_dir')=='/app/apps/sim' and worker.get('pull_policy')=='never'
             and worker.get('restart')=='no' and worker.get('cap_drop')==['ALL']
             and worker.get('security_opt')==['no-new-privileges:true']
-            and worker.get('mem_limit')==4*1024**3 and worker.get('memswap_limit')==4*1024**3
+            and compose_bytes(worker.get('mem_limit'),4*1024**3)
+            and compose_bytes(worker.get('memswap_limit'),4*1024**3)
             and float(worker.get('cpus',0))==2 and worker.get('pids_limit')==256
             and not worker.get('command') and not worker.get('entrypoint')
             and not worker.get('privileged') and not worker.get('devices')
@@ -460,7 +604,8 @@ def consume(socket,wire,deadline,cancel,work,record):
         except Exception:
             if name=='cleanup':
                 try:
-                    record['cleanupFailure']=project_cleanup_failure(read_closed(scratch/'ui/cleanup-failure.private.json',1024))
+                    record['cleanupFailure']=project_cleanup_failure(read_closed(scratch/'ui/cleanup-failure.private.json',1024),
+                                                                     lambda:read_closed(scratch/'ui/baseline.json',BASELINE_LIMIT))
                 except Exception:pass
                 try:
                     state=inspect(item,running=False)['State']['ExitCode']
@@ -575,9 +720,11 @@ def consume_durable(socket,wire,deadline,cancel,work,record,configuration):
     raw_config=protected_durable_file(configuration)
     config=durable_configuration(_json(raw_config));nonce=config['nonce']
     project='memlia-excel-durable-'+nonce
+    inactive=config.get('journey')=='inactive-test'
     record.update(passed=False,businessPassed=False,drainPassed=False,cleanupComplete=False,
-                  resourcesRetained=True,scope='native_durable_compose',phase='durable_preflight',
+                  resourcesRetained=True,scope='native_inactive_test_compose' if inactive else 'native_durable_compose',phase='durable_preflight',
                   composeFixtureStarted=False,serviceInstalled=False,clientSessions=[])
+    if inactive:record['journey']='inactive-test'
     env_raw=protected_durable_file(config['envFile'])
     bootstrap_raw=protected_durable_file(config['bootstrapFile']);bootstrap=_json(bootstrap_raw)
     require(bootstrap.get('deploymentId')==nonce and bootstrap.get('database')=='memlia_ui_'+nonce
@@ -602,11 +749,12 @@ def consume_durable(socket,wire,deadline,cancel,work,record,configuration):
         require(sha256(content).hexdigest()==tool['sha256'])
     ca=protected_durable_file(browser['ca']['path'])
     ssl_context=ssl.create_default_context(cadata=ca.decode('ascii'))
+    # Refused before any owned work exists; recorded for reconciliation of a kept profile.
+    profile=browser_profile(nonce);record['browserProfile']=str(profile)
     work.mkdir(mode=0o700);identity=(work.stat().st_dev,work.stat().st_ino)
     scratch=work/'scratch';scratch.mkdir(mode=0o700);os.chown(scratch,1001,1001)
     for name in ('ui','application','tmp'):
         (scratch/name).mkdir(mode=0o700);os.chown(scratch/name,1001,1001)
-    profile=socket.parent/('browser-'+nonce)
     owned={};model=None;complete=False;closed=True;started=False;bootstrap_volume=project+'_bootstrap-state'
     def write(path,data,uid=0):
         with os.fdopen(os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600),'wb') as stream:stream.write(data)
@@ -647,6 +795,14 @@ def consume_durable(socket,wire,deadline,cancel,work,record,configuration):
             deadline+(180 if cleanup else 0)),__import__('threading').Event() if cleanup else cancel,
             capture=capture,receipt=observation)
     def cmd(args,**kwargs):return client([*DOCKER,*args],**kwargs)
+    def create_owned_volume(name,labels):
+        # `docker volume create` adopts an existing name silently: require absence, then the labels.
+        require(not raw(['volume','ls','-q','--filter','name=^'+name+'$']).strip())
+        cmd(['volume','create',*[part for key,value in labels.items() for part in ('--label',key+'='+value)],name])
+        row=s._one(raw(['volume','inspect',name]))
+        require(row.get('Name')==name and type(row.get('Labels'))is dict
+                and all(row['Labels'].get(key)==value for key,value in labels.items())
+                and row.get('Driver')=='local' and not row.get('Options'))
     def image(name):
         expected=config['images'][name]
         row=s._one(raw(['image','inspect',expected['reference']]))
@@ -689,6 +845,7 @@ def consume_durable(socket,wire,deadline,cancel,work,record,configuration):
         nonlocal started
         if 'workflow-worker' in services:
             require(record.get('browserClosedBeforeWorker') is True
+                    and (record.get('journey')!='inactive-test' or record.get('inactiveSubmissionValidated') is True)
                     and record.get('bootstrapPhases')==['prepare','grants','verify']
                     and record.get('fixturePhases')==['metadata','baseline','seed','durable-prepare','durable-publish']
                     and all(item.get('waited') is True and item.get('groupClosed') is True
@@ -765,7 +922,8 @@ def consume_durable(socket,wire,deadline,cancel,work,record,configuration):
         write(scratch/'ui/credentials.private.json',json.dumps(fixture).encode(),1001)
         env=dict(model['services']['web']['environment'],RECIPE_NONCE=nonce,DISABLE_AUTH='false',
                  HOME='/scratch',TMPDIR='/scratch/tmp',SIM_DB_ROLE='web',MEMLIA_CI_FIXTURE_SOURCE_ROOT='/app')
-        for key in ('MEMLIA_EXCEL_HOST_SOCKET','MEMLIA_EXCEL_HOST_OPERATOR_UID'):env.pop(key,None)
+        for key in ('MEMLIA_EXCEL_HOST_SOCKET','MEMLIA_EXCEL_HOST_OPERATOR_UID','MEMLIA_CI_EXCEL_JOURNEY'):env.pop(key,None)
+        if inactive:env['MEMLIA_CI_EXCEL_JOURNEY']='inactive-test'
         require(env['DATABASE_URL']==bootstrap['urls']['web']
                 and env['MEMLIA_PG_BOSS_DATABASE_URL']==bootstrap['urls']['transport']
                 and model['services']['workflow-worker']['environment']['DATABASE_URL']==bootstrap['urls']['worker'])
@@ -775,8 +933,11 @@ def consume_durable(socket,wire,deadline,cancel,work,record,configuration):
                       DATABASE_URL=bootstrap['urls']['migrate'],MIGRATION_DATABASE_URL=bootstrap['urls']['migrate'])
         write(work/'metadata.env',''.join(key+'='+value+'\n' for key,value in metadata.items()).encode())
         up('db','redis',wait=True)
-        cmd(['volume','create','--label','com.docker.compose.project='+project,
-             '--label','org.memlia.excel.application='+nonce,bootstrap_volume])
+        create_owned_volume(bootstrap_volume,{'com.docker.compose.project':project,'org.memlia.excel.application':nonce})
+        # A one-off fixture mounts uploads before Compose starts web: pre-create it with the labels
+        # Compose itself would set, so Compose adopts it silently and teardown can prove it owned.
+        create_owned_volume(model['volumes']['uploads']['name'],{'com.docker.compose.project':project,
+            'com.docker.compose.volume':'uploads','org.memlia.excel.application':nonce})
         bootstrap_phase('prepare')
         record['phase']='durable_migrations';up('migrations')
         migration=next(cid for cid,value in owned.items() if value[0]=='migrations')
@@ -789,7 +950,7 @@ def consume_durable(socket,wire,deadline,cancel,work,record,configuration):
         # The external reviewed fixture ingress must present this CA and origin.
         with urllib.request.urlopen(origin+'/login',context=ssl_context,timeout=min(10,max(.1,deadline-time.monotonic()))) as response:
             require(response.status==200)
-        profile.mkdir(mode=0o700);os.chown(profile,1001,1001)
+        create_browser_profile(profile)
         for name in ('.pki','.pki/nssdb'):
             (profile/name).mkdir(mode=0o700);os.chown(profile/name,1001,1001)
         write(profile/'ca.pem',ca,1001)
@@ -802,9 +963,15 @@ def consume_durable(socket,wire,deadline,cancel,work,record,configuration):
             client([*run_as,browser['certutil']['path'],*args],cwd=profile)
         record['phase']='durable_browser'
         client([*run_as,browser['node']['path'],str(ROOT/'scripts/ci/linux-chat-browser.mjs'),str(ROOT),
-                str(profile/'credentials.json'),str(profile/'submission.json'),'--durable',str(profile/'prepared.json'),
+                str(profile/'credentials.json'),str(profile/'submission.json'),'--inactive-test' if inactive else '--durable',str(profile/'prepared.json'),
                 browser['chromium']['path']],cwd=profile)
-        submission=verify_durable_submission(read_closed(profile/'submission.json',16384),prepared)
+        submission=(verify_inactive_submission(read_closed(profile/'submission.json',16384),prepared,
+            read_closed(profile/'submission.json.test-identities.private.json',16384),
+            read_closed(profile/'submission.json.test-prepare.private.json',16384),
+            read_closed(profile/'submission.json.test-enqueue.private.json',16384),
+            read_closed(profile/'submission.json.test-observe.private.json',16384)) if inactive else
+            verify_durable_submission(read_closed(profile/'submission.json',16384),prepared))
+        if inactive:record['inactiveSubmissionValidated']=True
         require(all(item.get('waited') is True and item.get('groupClosed') is True for item in record['clientSessions']))
         record['browserClosedBeforeWorker']=True
         write(scratch/'durable-submission.private.json',json.dumps(submission).encode(),1001)
@@ -824,7 +991,8 @@ def consume_durable(socket,wire,deadline,cancel,work,record,configuration):
                 and row['State']['ExitCode']==0 and row['State']['OOMKilled'] is False)
         record['drainPassed']=True
         fixture_phase('durable-retire')
-        require(_json(read_closed(scratch/'durable-retired.private.json',4096))=={'retired':True})
+        require(_json(read_closed(scratch/'durable-retired.private.json',4096))==
+                ({'retired':True,'inactivePreparationRetired':True} if inactive else {'retired':True}))
         # Stop web before account erasure so no owned producer can repopulate rows.
         client([*compose,'stop','--timeout','30','web','realtime'],cleanup=True)
         for mode in ('cleanup','readback','metadata-final'):fixture_phase(mode)
@@ -835,6 +1003,7 @@ def consume_durable(socket,wire,deadline,cancel,work,record,configuration):
     finally:
         # Never use compose down or a project-name purge after an unknown acknowledgement.
         try:
+            retained=[]
             if complete:
                 require(all(item.get('waited') is True and item.get('groupClosed') is True
                             for item in record['clientSessions']))
@@ -847,18 +1016,32 @@ def consume_durable(socket,wire,deadline,cancel,work,record,configuration):
                     if complete:cmd(['container','rm',cid],cleanup=True)
                 if complete:
                     require(not raw(['container','ls','-aq','--filter','label=com.docker.compose.project='+project],cleanup=True).strip())
-                    for kind,entries in (('network',model['networks']),('volume',model['volumes']|{'bootstrap-state':{'name':bootstrap_volume}})):
-                        for entry in entries.values():
-                            name=entry['name'];rows=json.loads(raw([kind,'inspect',name],cleanup=True))
-                            require(len(rows)==1 and rows[0]['Name']==name
-                                    and rows[0].get('Labels',{}).get('com.docker.compose.project')==project
-                                    and rows[0].get('Labels',{}).get('org.memlia.excel.application')==nonce)
-                            if kind=='network':require(not rows[0]['Containers'])
-                            else:require(rows[0]['Driver']=='local' and not rows[0].get('Options'))
-                            cmd([kind,'rm',name],cleanup=True)
-                            require(not raw([kind,'ls','-q','--filter','name=^'+name+'$'],cleanup=True).strip())
+                    owner={'com.docker.compose.project':project,'org.memlia.excel.application':nonce}
+                    for kind,entries,keyed in (('network',model['networks'],False),('volume',model['volumes'],True),
+                                               ('volume',{'bootstrap-state':{'name':bootstrap_volume}},False)):
+                        for key,entry in entries.items():
+                            name=entry['name']
+                            # Continue past one refusal: only a proven-owned resource is ever removed.
+                            try:code=owned_resource_refusal(kind,raw([kind,'inspect',name],cleanup=True),name,
+                                    owner|({'com.docker.compose.volume':key} if keyed else {}))
+                            except Exception:code=kind+'_inspection_refused'
+                            if code is None:
+                                try:
+                                    cmd([kind,'rm',name],cleanup=True)
+                                    if raw([kind,'ls','-q','--filter','name=^'+name+'$'],cleanup=True).strip():
+                                        code=kind+'_removal_unconfirmed'
+                                except Exception:code=kind+'_removal_refused'
+                            if code:retained.append(dict(kind=kind,resource=key,code=code))
             require(complete and all(item.get('waited') is True and item.get('groupClosed') is True for item in record['clientSessions']))
-            if profile.exists():remove_closed_tree(profile,tree_snapshot(profile))
+            if retained:record['retainedResources']=retained
+            # Recorded first: a failed profile removal is named with the volumes, never masks them.
+            try:
+                if profile.exists():remove_closed_tree(profile,tree_snapshot(profile))
+            except Exception:
+                retained.append(dict(kind='profile',resource='chromium',code='profile_removal_refused'))
+                record['retainedResources']=retained
+            if retained:
+                raise ValueError('owned_resources_retained:'+','.join(r['kind']+':'+r['resource']+':'+r['code'] for r in retained))
             require((work.stat().st_dev,work.stat().st_ino)==identity)
             remove_closed_tree(work,tree_snapshot(work))
             record.update(cleanupComplete=True,resourcesRetained=False)

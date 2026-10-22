@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import ctypes
+from datetime import datetime, timezone
 import os
 import re
 import sys
 import threading
 import time
+import uuid
 
 from .resources import DesktopReservation
 from .session import _function, observe_session
@@ -20,6 +22,12 @@ _CANCEL = 2
 _JOIN_SECONDS = 2.0
 _POLL_SECONDS = .05
 _HEARTBEAT_SECONDS = 1.0
+# One source for the dialog buttons and their lookup: Windows 11 hosts TaskDialog buttons
+# under DirectUIHWND/CtrlNotifySink with control id 0, so GetDlgItem cannot find them.
+_LABELS = {_APPROVE: 'Autoriser cet enregistrement', _FINISH: 'Terminer l’enregistrement',
+           _CANCEL: 'Refuser / Arrêter maintenant'}
+_DESCENDANTS = 256  # This dialog has about twenty descendants; more is not this dialog.
+_ENUM = getattr(ctypes, 'WINFUNCTYPE', ctypes.CFUNCTYPE)(ctypes.c_int32, ctypes.c_void_p, ctypes.c_void_p)
 _DIGEST = re.compile(r'sha256:[a-f0-9]{64}\Z')
 
 
@@ -92,7 +100,9 @@ class _TaskDialog:
         self._monitor = _function(user, 'MonitorFromWindow', pointer, [pointer, u32])
         self._monitor_info = _function(user, 'GetMonitorInfoW', i32, [pointer, ctypes.POINTER(_Monitor)])
         self._cloaked = _function(dwm, 'DwmGetWindowAttribute', i32, [pointer, u32, pointer, u32])
-        self._button = _function(user, 'GetDlgItem', pointer, [pointer, i32])
+        self._enum_children = _function(user, 'EnumChildWindows', i32, [pointer, _ENUM, pointer])
+        self._class_name = _function(user, 'GetClassNameW', i32, [pointer, ctypes.c_wchar_p, i32])
+        self._text = _function(user, 'GetWindowTextW', i32, [pointer, ctypes.c_wchar_p, i32])
         self._point = _function(user, 'WindowFromPoint', pointer, [_Point])
         self._child = _function(user, 'IsChild', i32, [pointer, pointer])
         self._send = _function(user, 'SendMessageW', ctypes.c_ssize_t,
@@ -100,6 +110,39 @@ class _TaskDialog:
         self._title = _function(user, 'SetWindowTextW', i32, [pointer, ctypes.c_wchar_p])
         self._tid = threading.get_native_id()
         self._pid = os.getpid()
+
+    def _descendants(self, hwnd):
+        """Own dialog descendants as (handle, class, text); bounded, refused beyond."""
+        found, refused = [], False
+
+        def visit(handle, unused):
+            nonlocal refused
+            try:
+                if len(found) >= _DESCENDANTS:
+                    refused = True
+                    return 0
+                kind, text = ctypes.create_unicode_buffer(64), ctypes.create_unicode_buffer(128)
+                self._class_name(handle, kind, 64)
+                self._text(handle, text, 128)
+                found.append((handle, kind.value, text.value))
+                return 1
+            except BaseException:
+                refused = True  # ctypes would swallow it and skip a window: never a partial view.
+                return 0
+        callback = _ENUM(visit)  # Strongly owned until EnumChildWindows returns.
+        self._enum_children(hwnd, callback, None)
+        if refused:
+            raise CaptureUnavailable('indicator_unavailable')
+        return found
+
+    def _button(self, hwnd, button):
+        """Exactly one descendant Button carrying this dialog's own label, else none."""
+        label = _LABELS.get(button)
+        if not hwnd or label is None:
+            return None
+        matches = [handle for handle, kind, text in self._descendants(hwnd)
+                   if kind == 'Button' and text == label]
+        return matches[0] if len(matches) == 1 else None
 
     def make_topmost(self, hwnd):
         # Keep the indicator above ordinary application windows even when inactive.
@@ -190,9 +233,9 @@ class _TaskDialog:
         callback = callback_type(lambda hwnd, event, value, unused, reference:
                                  owner._notification(self, hwnd, event, value))
         buttons = (_Button * 3)(
-            _Button(_APPROVE, 'Autoriser cet enregistrement'),
-            _Button(_FINISH, 'Terminer l’enregistrement'),
-            _Button(_CANCEL, 'Refuser / Arrêter maintenant'))
+            _Button(_APPROVE, _LABELS[_APPROVE]),
+            _Button(_FINISH, _LABELS[_FINISH]),
+            _Button(_CANCEL, _LABELS[_CANCEL]))
         config = _Config()
         config.cbSize = ctypes.sizeof(config)
         config.dwFlags = 0x0008 | 0x0800  # CANCELLATION|CALLBACK_TIMER; no minimize/hyperlinks.
@@ -232,6 +275,7 @@ class _CaptureControls:
         self._created, self._decided, self._done = threading.Event(), threading.Event(), threading.Event()
         self._hwnd, self._api, self._failure = None, None, None
         self._approved, self._started, self._closed = False, False, False
+        self._consent = None
         self._closing, self._stopping = False, False
         self._work_pending = self._recording_started = self._recording_stopped = False
         self._recording_indicated = self._finish_requested = False
@@ -325,6 +369,16 @@ class _CaptureControls:
                         self._stop_indicator(api, hwnd)
                     else:
                         with self._lock:
+                            # Created only on the native APPROVE callback, after
+                            # the current desktop and visible indicator checks.
+                            self._consent = {
+                                'consentId': str(uuid.uuid4()),
+                                'confirmedLocallyAt': datetime.now(timezone.utc).isoformat(
+                                    timespec='milliseconds').replace('+00:00', 'Z'),
+                                'commandDigest': self._digest,
+                                'windowsSid': self._observed.windows_sid,
+                                'sessionId': str(self._observed.session_id),
+                            }
                             self._approved = True
                         self._decided.set()
                 elif (self._approved and self._recording_started and not self._recording_stopped
@@ -392,6 +446,16 @@ class _CaptureControls:
         if type(operation_digest) is not str or operation_digest != self._digest:
             self._fail('capture_operation_mismatch')
             raise CaptureUnavailable('capture_operation_mismatch')
+
+    def consent_observation(self, *, operation_digest):
+        """Native observation only; the caller must obtain server authority."""
+        self.checkpoint(operation_digest=operation_digest)
+        with self._lock:
+            observation = dict(self._consent) if self._consent is not None else None
+        if observation is None:
+            raise CaptureUnavailable('local_consent_unavailable')
+        self.checkpoint(operation_digest=operation_digest)
+        return observation
 
     def recording_preparing(self, *, operation_digest):
         """Arm cleanup BEFORE creating the owned worker; not proof it has started."""

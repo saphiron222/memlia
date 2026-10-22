@@ -4,7 +4,7 @@ import { afterAll, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import type { NextRequest } from 'next/server'
 import type { RateLimitStorageAdapter } from '../../apps/sim/lib/core/rate-limiter/storage/adapter'
-import { durableDraftFromProcedure, durableFixtureMode, retireOwnedRun, verifyTransportIsolation } from './excel-file-workflow'
+import { durableDraftFromProcedure, durableFixtureMode, observeDurableCompletion, retireOwnedRun, verifyTransportIsolation } from './excel-file-workflow'
 import { fixtures } from '../../packages/memlia-contracts/tests/fixtures'
 import { candidateTableNames, fixtureSourceRoot, verifyCandidateCatalog } from './linux-chat-fixture'
 import { pgTable, text } from 'drizzle-orm/pg-core'
@@ -416,4 +416,303 @@ test('owned search queue purge requires the exact composite identity and version
   await expect(execute([])).rejects.toThrow('owned_fixture_cleanup_refused')
   await expect(execute([{ entity_id: row.entityId }, { entity_id: row.entityId }]))
     .rejects.toThrow('owned_fixture_cleanup_refused')
+})
+
+test('inactive fixture binds the raw preparation and derives only an expected queue identity', async () => {
+  const { captureInactiveTestSubmission } = await import('./excel-file-workflow')
+  const binding = { workspaceId: 'space', preparation: { expectedRevision: 7, expectedStateDigest: 'sha256:' + 'a'.repeat(64), operationId: 'owned-op' }, prepared: { status: 'prepared_for_test', workflowId: 'flow', deploymentVersionId: 'inactive', version: 1, snapshotDigest: 'sha256:' + 'b'.repeat(64), executionAvailable: false, activationAvailable: false } }
+  const value = { status: 'passed', scope: 'native_session_inactive_test_submission', authenticated: true, preparedForTest: true, queued: true, browserClosed: true, activationRequested: false, workflowId: 'flow', workspaceId: 'space', deploymentVersionId: 'inactive', executionId: 'run', snapshotDigest: binding.prepared.snapshotDigest, jobId: 'workflow-execution:run', jobIdSource: 'derived_expected', inactiveTest: binding }
+  expect(await captureInactiveTestSubmission(value, 'flow', 'space')).toEqual(binding)
+  for (const delta of [{ jobIdSource: 'observed' }, { jobId: 'foreign' }, { activationRequested: true }, { deploymentVersionId: 'foreign' }, { workspaceId: 'foreign' }, { deployed: true }, { executionId: 'run\n', jobId: 'workflow-execution:run\n' }])
+    await expect(captureInactiveTestSubmission({ ...value, ...delta }, 'flow', 'space')).rejects.toThrow('excel_application_refused')
+})
+
+test('inactive observation requires exact human payload, snapshot digest, inactive version and journal pin', async () => {
+  const { assertInactiveJobPayload, verifyInactiveVersionObservation } = await import('./excel-file-workflow')
+  const { normalizedStringify } = await import('../../apps/sim/lib/workflows/comparison/normalize')
+  const { createHash } = await import('node:crypto')
+  const state = { blocks: { excel: { id: 'excel', type: 'memlia_excel' } }, edges: [], variables: {} }
+  const hash = 'sha256:' + createHash('sha256').update(normalizedStringify(state)).digest('hex')
+  const binding = { workspaceId: 'space', preparation: { expectedRevision: 7, expectedStateDigest: 'sha256:' + 'a'.repeat(64), operationId: 'owned-op' }, prepared: { status: 'prepared_for_test' as const, workflowId: 'flow', deploymentVersionId: 'inactive', version: 1, snapshotDigest: hash, executionAvailable: false as const, activationAvailable: false as const } }
+  const payload = { workflowId: 'flow', workspaceId: 'space', executionId: 'run', userId: 'user', principal: { principal: { kind: 'session', userId: 'user', sessionId: 'session' } }, executionMode: 'async', admissionCompleted: true, enforceCredentialAccess: true, isPublicApiAccess: false, excelTestExecution: binding }
+  await assertInactiveJobPayload(payload, binding, 'run', 'user')
+  for (const delta of [{ userId: 'foreign' }, { executionId: 'foreign' }, { excelTestExecution: { ...binding, workspaceId: 'foreign' } }, { enforceCredentialAccess: false }, { isPublicApiAccess: true }, { excelTestExecution: undefined }])
+    await expect(assertInactiveJobPayload({ ...payload, ...delta }, binding, 'run', 'user')).rejects.toThrow('excel_application_refused')
+  const row = { id: 'inactive', version: 1, workflow_id: 'flow', workspace_id: 'space', created_by: 'user', preparation_kind: 'excel_test_v1', is_active: false, snapshot_digest: hash, state }
+  await verifyInactiveVersionObservation([row], binding, 'user')
+  for (const delta of [{ is_active: true }, { version: 2 }, { created_by: 'foreign' }, { snapshot_digest: 'sha256:' + 'c'.repeat(64) }, { state: { blocks: {} } }, { preparation_kind: null }])
+    await expect(verifyInactiveVersionObservation([{ ...row, ...delta }], binding, 'user')).rejects.toThrow('excel_application_refused')
+})
+
+async function inactiveRetirementFixture() {
+  const { createHash } = await import('node:crypto')
+  const { normalizedStringify } = await import('../../apps/sim/lib/workflows/comparison/normalize')
+  const hash = (value: unknown) => 'sha256:' + createHash('sha256').update(normalizedStringify(value)).digest('hex')
+  const state = { blocks: { excel: { id: 'excel', type: 'memlia_excel' } }, edges: [] }
+  const binding = { workspaceId: 'space', preparation: { expectedRevision: 7, expectedStateDigest: 'sha256:' + 'a'.repeat(64), operationId: 'owned-op' }, prepared: { status: 'prepared_for_test' as const, workflowId: 'flow', deploymentVersionId: 'inactive', version: 1, snapshotDigest: hash(state), executionAvailable: false as const, activationAvailable: false as const } }
+  const scope = { workflowId: 'flow', workspaceId: 'space', organizationId: null }
+  const key = 'excel-test-preparation:' + hash({ scope, actorId: 'user' }) + ':owned-op'
+  const fingerprint = hash({ scope, actorId: 'user', ...binding.preparation, policyVersion: 'memlia_excel_test_admission_v1' })
+  const result = { status: 'completed', requestFingerprint: fingerprint, result: binding.prepared }
+  const payload = { workflowId: 'flow', workspaceId: 'space', executionId: 'run', userId: 'user', principal: { principal: { kind: 'session', userId: 'user', sessionId: 'session' } }, executionMode: 'async', admissionCompleted: true, enforceCredentialAccess: true, isPublicApiAccess: false, excelTestExecution: binding }
+  return { binding, key, fingerprint, result, payload, preparationRow: { id: 'inactive', version: 1, workflow_id: 'flow', workspace_id: 'space', created_by: 'user', preparation_kind: 'excel_test_v1', is_active: false, snapshot_digest: hash(state), state, preparation_key: key, preparation_version: 'p1', preparation_digest: 'pd', result } }
+}
+test('inactive retirement derives the native namespace and fingerprint for only this actor and operation', async () => {
+  const { inactivePreparationIdentity } = await import('./excel-file-workflow')
+  const f = await inactiveRetirementFixture()
+  expect(await inactivePreparationIdentity(f.binding, 'user')).toEqual({ key: f.key, fingerprint: f.fingerprint, result: f.result })
+  expect((await inactivePreparationIdentity(f.binding, 'foreign')).key).not.toBe(f.key)
+  expect((await inactivePreparationIdentity({ ...f.binding, preparation: { ...f.binding.preparation, operationId: 'other' } }, 'user')).key).not.toBe(f.key)
+})
+test('inactive retirement locks completed exact preparation/version and CAS-deletes its one key in the same transaction', async () => {
+  const f = await inactiveRetirementFixture()
+  const statements: { text: string; values: unknown[] }[] = []
+  const captures: string[] = []
+  const tx = async (parts: TemplateStringsArray, ...values: unknown[]) => {
+    const text = parts.join('?'); statements.push({ text, values })
+    if (text.includes('FROM async_jobs j')) return [{ id: 'workflow-execution:run', version: 'j1', digest: 'jd', event_id: 'event', event_version: 'e1', event_digest: 'ed', payload: f.payload }]
+    if (text.includes('SELECT l.id')) return [{ log_id: 'log', log_version: 'l1', log_digest: 'ld', snapshot_id: 'snap', snapshot_version: 's1', snapshot_digest: 'sd', claim_key: 'workflow-execution-id:run', claim_version: 'k1', claim_digest: 'kd', deployment_version_id: 'inactive' }]
+    if (text.includes('SELECT k.key AS preparation_key')) return [f.preparationRow]
+    return [{ key: f.key, id: 'owned' }]
+  }
+  const db = { $client: { begin: async (body: (sql: unknown) => Promise<void>) => body(tx) } }
+  await retireOwnedRun(db as never, { runId: 'run' }, { id: 'flow' }, { id: 'space' }, 'user', 'workflow-execution:run', { binding: f.binding, capture: (name: string) => captures.push(name) })
+  const locked = statements.find(s => s.text.includes('SELECT k.key AS preparation_key'))!
+  expect(locked.text).toContain('FOR UPDATE OF k,v,w')
+  expect(locked.text).toContain("v.preparation_kind='excel_test_v1'")
+  expect(locked.text).toContain('v.is_active=false')
+  expect(locked.values).toContain(f.key)
+  expect(locked.values).toContain(JSON.stringify(f.result))
+  const deleted = statements.find(s => s.text.includes('DELETE FROM idempotency_key k') && s.values.includes(f.key))!
+  expect(deleted.text).toContain('k.xmin::text=')
+  expect(deleted.text).toContain('md5(row_to_json(k)::text)=')
+  expect(deleted.values).toContain('p1')
+  expect(deleted.values).toContain('pd')
+  expect(deleted.text).not.toMatch(/LIKE|starts_with|left\(/)
+  expect(captures).toEqual(['retire-job', 'retire-preparation'])
+})
+test('inactive retirement refuses ambiguous, stale or foreign preparation before any fixture deletion', async () => {
+  const f = await inactiveRetirementFixture()
+  for (const delta of [null, { result: { ...f.result, status: 'pending' } }, { result: { ...f.result, requestFingerprint: 'foreign' } }, { created_by: 'foreign' }, { version: 2 }, { is_active: true }, { state: {} }, { preparation_key: 'foreign' }]) {
+    let deleted = false
+    const tx = async (parts: TemplateStringsArray) => {
+      const text = parts.join('?')
+      if (text.includes('FROM async_jobs j')) return [{ id: 'workflow-execution:run', version: 'j1', digest: 'jd', event_id: 'event', event_version: 'e1', event_digest: 'ed', payload: f.payload }]
+      if (text.includes('SELECT l.id')) return [{ deployment_version_id: 'inactive' }]
+      if (text.includes('SELECT k.key AS preparation_key')) return delta === null ? [] : [{ ...f.preparationRow, ...delta }]
+      if (text.includes('DELETE FROM')) deleted = true
+      return [{ id: 'owned' }]
+    }
+    const db = { $client: { begin: async (body: (sql: unknown) => Promise<void>) => body(tx) } }
+    await expect(retireOwnedRun(db as never, { runId: 'run' }, { id: 'flow' }, { id: 'space' }, 'user', 'workflow-execution:run', { binding: f.binding, capture: () => {} })).rejects.toThrow('excel_application_refused')
+    expect(deleted).toBe(false)
+  }
+})
+
+test('inactive retirement holds the owned run when the preparation CAS no longer matches', async () => {
+  const f = await inactiveRetirementFixture()
+  const deletes: string[] = []
+  const tx = async (parts: TemplateStringsArray, ...values: unknown[]) => {
+    const text = parts.join('?')
+    if (text.includes('FROM async_jobs j')) return [{ id: 'workflow-execution:run', version: 'j1', digest: 'jd', event_id: 'event', event_version: 'e1', event_digest: 'ed', payload: f.payload }]
+    if (text.includes('SELECT l.id')) return [{ deployment_version_id: 'inactive' }]
+    if (text.includes('SELECT k.key AS preparation_key')) return [f.preparationRow]
+    if (text.includes('DELETE FROM')) { deletes.push(text); expect(values).toContain(f.key); return [] }
+    return []
+  }
+  const db = { $client: { begin: async (body: (sql: unknown) => Promise<void>) => body(tx) } }
+  await expect(retireOwnedRun(db as never, { runId: 'run' }, { id: 'flow' }, { id: 'space' }, 'user', 'workflow-execution:run', { binding: f.binding, capture: () => {} })).rejects.toThrow('excel_application_refused')
+  expect(deletes).toHaveLength(1)
+  expect(deletes[0]).toContain('DELETE FROM idempotency_key k')
+  expect(deletes.some(text => text.includes('DELETE FROM workflow_execution_logs'))).toBe(false)
+  // The SQL port is doubled: native PostgreSQL transactional rollback remains unqualified.
+})
+
+test('active readback binds the completed run to the browser-validated version, which must be the live one', async () => {
+  const nonce = 'a'.repeat(32)
+  const saved = { web: process.env.DATABASE_URL, queue: process.env.MEMLIA_PG_BOSS_DATABASE_URL, nonce: process.env.RECIPE_NONCE }
+  process.env.DATABASE_URL = 'postgres://ui_web_' + nonce + ':x@database:5432/memlia_ui_' + nonce
+  process.env.MEMLIA_PG_BOSS_DATABASE_URL = 'postgres://ui_transport_' + nonce + ':x@database:5432/memlia_ui_' + nonce
+  process.env.RECIPE_NONCE = nonce
+  const submission = { jobId: 'workflow-execution:run', executionId: 'run', deploymentVersionId: 'live-version' }
+  const observe = async (logVersion: unknown, active: unknown[], value: Record<string, unknown> = submission) => {
+    const versionReads: unknown[][] = []
+    const db = { $client: async (parts: TemplateStringsArray, ...values: unknown[]) => {
+      const text = parts.join('?')
+      if (text.includes('pg_catalog.pg_class')) return [{ oid: '1234' }]
+      if (text.includes('FROM async_jobs')) return [{ id: submission.jobId, status: 'completed', attempts: 1, output: { success: true },
+        payload: { executionId: 'run', workflowId: 'flow', workspaceId: 'space', userId: 'user', principal: { principal: { kind: 'session' } } } }]
+      if (text.includes('FROM workflow_execution_logs')) return [{ execution_id: 'run', status: 'completed', deployment_version_id: logVersion }]
+      if (text.includes('FROM workflow_deployment_version')) {
+        expect(text).toContain('JOIN workflow w ON w.id=v.workflow_id')
+        expect(text).toContain('w.workspace_id=?')
+        expect(text).toContain('v.is_active=true')
+        versionReads.push(values); return active
+      }
+      throw Error('unexpected ' + text)
+    } }
+    const queue = Object.assign(async (parts: TemplateStringsArray) => parts.join('?').includes('memlia_jobs.job')
+      ? [{ id: 'delivery', state: 'completed' }]
+      : [{ role: 'ui_transport_' + nonce, ddl: false, business_usage: false, business_read: false }], { end: async () => {} })
+    const completion = await observeDurableCompletion(db as never, value as never, 'flow', 'space', 'user', undefined, () => {}, () => queue as never)
+    expect(completion).toEqual({ journalDeploymentVersionId: logVersion })
+    return versionReads
+  }
+  try {
+    const live = { id: 'live-version', workflow_id: 'flow', workspace_id: 'space', is_active: true }
+    expect(await observe('live-version', [live])).toEqual([['flow', 'space']])
+    for (const [logVersion, active, value] of [
+      ['other-version', [live], submission], [null, [live], submission],
+      ['live-version', [], submission], ['live-version', [{ ...live, id: 'other-version' }], submission],
+      ['live-version', [live, { ...live, id: 'second-live' }], submission], ['live-version', [{ ...live, is_active: false }], submission],
+      ['live-version', [{ ...live, workspace_id: 'foreign' }], submission], ['live-version', [{ ...live, workflow_id: 'foreign' }], submission],
+      ['live-version', [live], { ...submission, deploymentVersionId: undefined }], ['live-version', [live], { ...submission, deploymentVersionId: 'live-version\n' }],
+    ] as const) await expect(observe(logVersion, [...active], value)).rejects.toThrow('excel_durable_version_unbound')
+  } finally {
+    for (const [key, value] of [['DATABASE_URL', saved.web], ['MEMLIA_PG_BOSS_DATABASE_URL', saved.queue], ['RECIPE_NONCE', saved.nonce]] as const)
+      if (value === undefined) delete process.env[key]; else process.env[key] = value
+  }
+})
+
+const OWNED_OUTBOX_SCOPE = {
+  workspaceIds: ['owned-workspace'], projectIds: ['owned-project'], userId: 'owned-user',
+  deployments: [{ operationId: 'owned-operation', workflowId: 'owned-workflow', deploymentVersionId: 'owned-version', generation: '1' }],
+}
+function preparationEvent(change: Record<string, unknown> = {}) {
+  return { id: 'event-preparation', eventType: 'workflow.deployment.prepare.v2', status: 'completed', attempts: 0,
+    unlocked: true, unprocessed: false, noError: true, fresh: true, processedInOrder: true,
+    projectId: null, workspaceId: null, workflowId: 'owned-workflow', deploymentVersionId: 'owned-version',
+    operationId: 'owned-operation', generation: '1', userId: 'owned-user', digest: 'b'.repeat(32), version: '7', ...change }
+}
+function erasureEvent(eventType: string, change: Record<string, unknown> = {}) {
+  return { id: 'event-' + eventType, eventType, status: 'pending', attempts: 0, unlocked: true, unprocessed: true,
+    noError: true, fresh: true, processedInOrder: null, projectId: eventType.startsWith('project-file') ? 'owned-project' : null,
+    workspaceId: eventType.startsWith('project-file') ? null : 'owned-workspace', workflowId: null, deploymentVersionId: null,
+    operationId: null, generation: null, userId: null, digest: 'c'.repeat(32), version: '8', ...change }
+}
+const ERASURE_TYPES = ['project-file.storage.prefix-cleanup', 'account-deletion.storage.workspace-sweep', 'execution.removal-stop']
+
+test('owned outbox census keeps erasure events and the completed preparation of a captured deployment', async () => {
+  const { ownedOutboxResidue } = await import('./linux-chat-fixture')
+  expect(ownedOutboxResidue([], OWNED_OUTBOX_SCOPE)).toEqual([])
+  const rows = [preparationEvent(), ...ERASURE_TYPES.map(type => erasureEvent(type)), erasureEvent(ERASURE_TYPES[0], { id: 'event-delayed' })]
+  expect(ownedOutboxResidue(rows, OWNED_OUTBOX_SCOPE)).toEqual(rows.map(row => ({ id: row.id, digest: row.digest, version: row.version })))
+})
+
+test('owned outbox census refuses by name a foreign, non-terminal, unexpected or surplus event', async () => {
+  const { ownedOutboxResidue } = await import('./linux-chat-fixture')
+  const refused = (rows: unknown[], reason: string) =>
+    expect(() => ownedOutboxResidue(rows as never, OWNED_OUTBOX_SCOPE)).toThrow('fixture_outbox_residue_refused:' + reason)
+  // A type-only selection would accept these: each names another workflow, version, operation or actor.
+  for (const change of [{ workflowId: 'foreign-workflow' }, { deploymentVersionId: 'foreign-version' },
+    { operationId: 'foreign-operation' }, { userId: 'foreign-user' }, { generation: '2' }, { workflowId: null }])
+    refused([preparationEvent(change)], 'unowned')
+  for (const change of [{ status: 'pending' }, { status: 'dead_letter' }, { unlocked: false }, { unprocessed: true },
+    { attempts: 1 }, { noError: false }, { processedInOrder: false }, { processedInOrder: null }])
+    refused([preparationEvent(change)], 'unexpected_state')
+  for (const type of ERASURE_TYPES) {
+    refused([erasureEvent(type, { projectId: 'foreign-project', workspaceId: 'foreign-workspace' })], 'unowned')
+    for (const change of [{ status: 'completed' }, { attempts: 1 }, { unlocked: false }, { unprocessed: false }])
+      refused([erasureEvent(type, change)], 'unexpected_state')
+  }
+  for (const eventType of ['workflow.deployment.cleanup-undeployed-side-effects', 'workflow.deployment.sync-active-side-effects', 'other'])
+    refused([preparationEvent({ eventType })], 'unexpected_type')
+  refused([preparationEvent({ fresh: false })], 'stale')
+  refused([erasureEvent(ERASURE_TYPES[1], { fresh: null })], 'stale')
+  for (const change of [{ digest: 'not-a-digest' }, { version: '7 OR true' }, { id: 7 }])
+    refused([preparationEvent(change)], 'malformed')
+  refused([preparationEvent(), preparationEvent({ id: 'event-replayed' })], 'surplus')
+  refused(Array(33).fill(erasureEvent(ERASURE_TYPES[1])), 'surplus')
+  // One refused row refuses the whole census, never a partial deletion list.
+  refused([preparationEvent(), erasureEvent(ERASURE_TYPES[2], { workspaceId: 'foreign-workspace' })], 'unowned')
+})
+
+function cleanupFragment(start: string, end: string, prefix: string, suffix: string) {
+  const text = readFileSync(new URL('./linux-chat-fixture.ts', import.meta.url), 'utf8')
+  const from = text.indexOf(start)
+  const to = text.indexOf(end, from)
+  if (from < 0 || to < 0) throw Error('cleanup_fragment_missing')
+  return new Bun.Transpiler({ loader: 'ts' }).transformSync(prefix + text.slice(from, to) + suffix)
+}
+
+test('owned deployment capture binds only active operations of the captured workspaces before erasure', async () => {
+  const code = cleanupFragment('        const deployments =', '        // The native one-time-token plugin',
+    'async function invoke() {\n', '\nreturn deployments;\n}')
+  const assertRecipe = (value: unknown) => { if (!value) throw Error('owned_fixture_cleanup_refused') }
+  const workspaceIds = ['owned-workspace']
+  const fixture = { userId: 'owned-user' }
+  const execute = (rows: unknown[]) => new Function('sql', 'workspaceIds', 'fixture', 'assertRecipe', code + '\nreturn invoke();')(
+    async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      const query = strings.join('?')
+      expect(query).toContain('FROM workflow_deployment_operation o JOIN workflow w ON w.id=o.workflow_id')
+      expect(query).toContain('v.id=o.deployment_version_id AND v.workflow_id=o.workflow_id')
+      expect(query).toContain('w.workspace_id=ANY(')
+      expect(query).toContain('o.actor_id=')
+      expect(query).toContain("o.status='active'")
+      expect(query).toContain('LIMIT 17')
+      expect(values).toEqual([workspaceIds, fixture.userId])
+      return rows
+    }, workspaceIds, fixture, assertRecipe)
+  await expect(execute([])).resolves.toEqual([])
+  await expect(execute([OWNED_OUTBOX_SCOPE.deployments[0]])).resolves.toEqual(OWNED_OUTBOX_SCOPE.deployments)
+  await expect(execute(Array(17).fill(OWNED_OUTBOX_SCOPE.deployments[0]))).rejects.toThrow('owned_fixture_cleanup_refused')
+})
+
+test('outbox residue is a census of every row classified by the owned binding', async () => {
+  const { ownedOutboxResidue } = await import('./linux-chat-fixture')
+  const code = cleanupFragment('        const outboxCensus =', '        // Fresh dedicated database;',
+    'async function invoke() {\n', '\nreturn outbox;\n}')
+  const start = '2026-10-20T00:00:00Z'
+  const execute = (rows: unknown[]) => new Function('sql', 'start', 'workspaceIds', 'projectIds', 'deployments', 'fixture',
+    'ownedOutboxResidue', code + '\nreturn invoke();')(
+    async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      const query = strings.join('?')
+      expect(query).toContain('FROM outbox_event t ORDER BY t.id LIMIT 33')
+      // A census: no type, status or payload predicate may hide a row from the classifier.
+      expect(query).not.toMatch(/WHERE/i)
+      for (const field of ['projectId', 'workspaceId', 'workflowId', 'deploymentVersionId', 'operationId', 'generation', 'userId'])
+        expect(query).toContain("t.payload->>'" + field + "'")
+      expect(query).toContain('md5(row_to_json(t)::text) AS digest')
+      expect(query).toContain('t.xmin::text AS version')
+      expect(values).toEqual([start])
+      return rows
+    }, start, OWNED_OUTBOX_SCOPE.workspaceIds, OWNED_OUTBOX_SCOPE.projectIds, OWNED_OUTBOX_SCOPE.deployments,
+    { userId: OWNED_OUTBOX_SCOPE.userId }, ownedOutboxResidue)
+  await expect(execute([preparationEvent()])).resolves.toEqual([{ id: 'event-preparation', digest: 'b'.repeat(32), version: '7' }])
+  await expect(execute([preparationEvent({ workflowId: 'foreign-workflow' })])).rejects.toThrow('fixture_outbox_residue_refused:unowned')
+})
+
+test('baseline compare checks every table and names all mismatches privately before refusing at the first', async () => {
+  const code = cleanupFragment("          cleanupStage = 'baseline_compare'", "        })\n        cleanupStage = 'proof_write'",
+    'let cleanupStage = "residue_delete"; let cleanupIndex = null;\nasync function invoke() {\n',
+    '\n}\nreturn { invoke, index: () => cleanupIndex, stage: () => cleanupStage };')
+  const assertRecipe = (value: unknown) => { if (!value) throw Error('owned_fixture_cleanup_refused') }
+  const baseline = ['a_table', 'b_table', 'c_table', 'd_table'].map(table => ({ table, count: 1, digest: 'd'.repeat(32) }))
+  const run = async (actual: Record<string, { n: number; digest: string }>, write = (..._: unknown[]) => {}) => {
+    const queried: string[] = []
+    const scope = new Function('tx', 'baseline', 'assertRecipe', 'writeFileSync', 'join', 'directory', code)(
+      { unsafe: async (query: string) => { const table = query.match(/public\."([a-z_]+)"/)![1]; queried.push(table)
+        return [actual[table] ?? { n: 1, digest: 'd'.repeat(32) }] } },
+      baseline, assertRecipe, write, (...parts: string[]) => parts.join('/'), '/scratch/ui')
+    return { scope, queried, result: scope.invoke() }
+  }
+  const clean = await run({})
+  await expect(clean.result).resolves.toBeUndefined()
+  expect(clean.queried).toEqual(baseline.map(item => item.table))
+  const writes: unknown[][] = []
+  const dirty = await run({ b_table: { n: 2, digest: 'e'.repeat(32) }, d_table: { n: 1, digest: 'f'.repeat(32) } },
+    (...args: unknown[]) => writes.push(args))
+  await expect(dirty.result).rejects.toThrow('owned_fixture_cleanup_refused')
+  expect(dirty.queried).toEqual(baseline.map(item => item.table))
+  expect(dirty.scope.stage()).toBe('baseline_compare')
+  expect(dirty.scope.index()).toBe(1)
+  expect(writes).toHaveLength(1)
+  expect(writes[0][0]).toBe('/scratch/ui/baseline-mismatches.private.json')
+  expect(JSON.parse(String(writes[0][1]))).toEqual([
+    { index: 1, table: 'b_table', baselineCount: 1, count: 2 }, { index: 3, table: 'd_table', baselineCount: 1, count: 1 }])
+  expect(writes[0][2]).toEqual({ mode: 0o600, flag: 'wx' })
+  // Unwritable or pre-existing evidence never turns the refusal into success.
+  const blocked = await run({ c_table: { n: 0, digest: 'e'.repeat(32) } }, () => { throw Error('EEXIST') })
+  await expect(blocked.result).rejects.toThrow('owned_fixture_cleanup_refused')
+  expect(blocked.scope.index()).toBe(2)
 })

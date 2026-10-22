@@ -296,6 +296,34 @@ class CaptureControlsTests(unittest.TestCase):
             self.assert_fixed(caught, 'capture_operation_mismatch')
             owner.close()
 
+    def test_observation_cannot_be_obtained_without_a_native_decision(self):
+        with self.owned() as (reservation,signal):
+            owner=controls._CaptureControls(reservation,signal,DIGEST)
+            with self.assertRaises(controls.CaptureUnavailable) as caught:
+                owner.consent_observation(operation_digest=DIGEST)
+            self.assert_fixed(caught,'local_consent_unavailable')
+            self.assertIsNone(owner._consent)
+            owner.close()
+
+    def test_callback_metadata_is_bound_and_copied_without_qualifying_native_consent(self):
+        # Isolated callback transition double only. This does not display a
+        # Windows dialog or grant any authority to a production adapter.
+        with self.owned() as (reservation,signal):
+            owner=self.transition_state(reservation,signal)
+            owner._approved=False
+            owner._api.mark_authorized=lambda hwnd:None
+            self.assertIsNone(owner._consent)
+            owner._notification(owner._api,123,2,100)
+            observation=owner.consent_observation(operation_digest=DIGEST)
+            self.assertEqual(set(observation),{'consentId','confirmedLocallyAt','commandDigest','windowsSid','sessionId'})
+            self.assertEqual(observation['commandDigest'],DIGEST)
+            self.assertEqual(observation['windowsSid'],OBSERVED.windows_sid)
+            self.assertEqual(observation['sessionId'],'1')
+            self.assertRegex(observation['consentId'],r'^[0-9a-f-]{36}$')
+            self.assertRegex(observation['confirmedLocallyAt'],r'^\d{4}-.*[.]\d{3}Z$')
+            observation['commandDigest']='changed-fiction'
+            self.assertEqual(owner.consent_observation(operation_digest=DIGEST)['commandDigest'],DIGEST)
+
     def test_foreign_owner_cannot_transfer_or_close_controls(self):
         with self.owned() as (reservation, signal):
             owner = controls._CaptureControls(reservation, signal, DIGEST)
@@ -808,6 +836,88 @@ class NativeVisibilityTests(unittest.TestCase):
             with self.assertRaises(controls.CaptureUnavailable) as caught:
                 api.show(owner)
         self.assertEqual(caught.exception.code, 'dialog_unavailable')
+
+
+class NestedButtonLookupTests(unittest.TestCase):
+    """Windows 11 TaskDialog: buttons are nested under DirectUIHWND/CtrlNotifySink with
+    control id 0 (native observation 22/10), so GetDlgItem on the dialog finds none."""
+
+    NESTED = [(10, 'DirectUIHWND', ''), (11, 'CtrlNotifySink', ''), (12, 'ScrollBar', ''),
+              (21, 'Button', 'Autoriser cet enregistrement'),
+              (22, 'Button', 'Terminer l’enregistrement'),
+              (23, 'Button', 'Refuser / Arrêter maintenant')]
+
+    def api(self, descendants):
+        api = object.__new__(controls._TaskDialog)
+        api._descendants = lambda hwnd: list(descendants)
+        return api
+
+    def test_nested_buttons_are_found_by_their_exact_own_label(self):
+        api = self.api(self.NESTED)
+        self.assertEqual([api._button(1, button) for button in
+                          (controls._APPROVE, controls._FINISH, controls._CANCEL)], [21, 22, 23])
+
+    def test_duplicate_missing_partial_foreign_class_or_unknown_button_refuse(self):
+        cases = {'duplicate': self.NESTED + [(24, 'Button', 'Terminer l’enregistrement')],
+                 'missing': [row for row in self.NESTED if row[0] != 22],
+                 'partial': [row if row[0] != 22 else (22, 'Button', 'Terminer l’enregistrement ')
+                             for row in self.NESTED],
+                 'foreign_class': [row if row[0] != 22 else (22, 'Static', row[2]) for row in self.NESTED]}
+        for name, descendants in cases.items():
+            with self.subTest(case=name):
+                self.assertFalse(self.api(descendants)._button(1, controls._FINISH))
+        self.assertFalse(self.api(self.NESTED)._button(1, 999))
+
+    def test_descendant_enumeration_is_bounded_and_fails_closed(self):
+        api = object.__new__(controls._TaskDialog)
+
+        def enumerate_children(parent, callback, unused):
+            for handle in range(1, controls._DESCENDANTS + 10):
+                if not callback(handle, None):
+                    break
+            return 1
+        api._enum_children = enumerate_children
+        api._class_name = lambda handle, buffer, size: 0
+        api._text = lambda handle, buffer, size: 0
+        with self.assertRaises(controls.CaptureUnavailable):
+            api._descendants(1)
+
+    def test_failed_descendant_read_refuses_instead_of_skipping_a_window(self):
+        api = object.__new__(controls._TaskDialog)
+        api._enum_children = lambda parent, callback, unused: callback(5, None)
+
+        def fails(handle, buffer, size):
+            raise OSError('native')
+        api._class_name, api._text = fails, lambda handle, buffer, size: 0
+        with self.assertRaises(controls.CaptureUnavailable):
+            api._descendants(1)
+
+    def test_null_dialog_never_enumerates_top_level_windows(self):
+        api = object.__new__(controls._TaskDialog)
+
+        def forbidden(hwnd):
+            raise AssertionError('enumerated without a dialog')
+        api._descendants = forbidden
+        self.assertIsNone(api._button(0, controls._FINISH))
+        self.assertIsNone(api._button(None, controls._CANCEL))
+
+    def test_visibility_check_asks_for_the_stop_button_itself(self):
+        api = NativeVisibilityTests().native()
+        requested = []
+
+        def button(hwnd, identifier):
+            requested.append(identifier)
+            return 456 if identifier == controls._CANCEL else 0
+        api._button = button
+        api.check_visible(123)
+        self.assertEqual(requested, [controls._CANCEL])
+
+    def test_dialog_buttons_use_the_same_labels_as_the_lookup(self):
+        self.assertEqual(set(controls._LABELS), {controls._APPROVE, controls._FINISH, controls._CANCEL})
+        import inspect
+        source = inspect.getsource(controls._TaskDialog.show)
+        for name in ('_APPROVE', '_FINISH', '_CANCEL'):
+            self.assertIn('_Button(%s, _LABELS[%s])' % (name, name), source)
 
 
 if __name__ == '__main__':

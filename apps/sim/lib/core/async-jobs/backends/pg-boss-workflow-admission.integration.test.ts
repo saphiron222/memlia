@@ -1,4 +1,9 @@
 // Copyright 2026 Memlia. All rights reserved.
+// Environment contract (private file MEMLIA_QUEUE_ADMISSION_TEST_ENV_FILE, never printed):
+// TEST_DATABASE_URL is the native `web` runtime role (business DML, reads public."user");
+// MIGRATION_DATABASE_URL is the schema owner of the same `_test_` database, for fixtures only.
+// This file is not the one of pg-boss-client.integration.test.ts, whose TEST_DATABASE_URL
+// must lack business table rights: run each suite with its own file.
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
@@ -341,6 +346,8 @@ test(
         assert.doesNotThrow(() =>
           prepare({ ...p, executionTimeoutMs: 86_340_000 - 300_000 }, identity())
         )
+        // A session queue request may carry no input: omitted, never persisted as an undefined key.
+        assert.doesNotThrow(() => prepare({ ...p, input: undefined }, identity()))
         for (const patch of [
           { enforceCredentialAccess: undefined },
           { enforceCredentialAccess: false },
@@ -352,7 +359,6 @@ test(
           { executionTimeoutMs: 0 },
           { executionTimeoutMs: Number.POSITIVE_INFINITY },
           { executionTimeoutMs: 86_340_000 - 300_000 + 1 },
-          { input: undefined },
           { input: { hidden: undefined } },
           { input: new Date() },
           { input: () => 0 },

@@ -844,4 +844,166 @@ class WebContextCheck(unittest.TestCase):
                                   capture_output=True,timeout=2)
             self.assertEqual(result.returncode,expected);self.assertEqual(result.stdout+result.stderr,b'')
 
+class InactiveJourney(unittest.TestCase):
+    def test_qualification_json_is_unchanged_by_default_and_selects_only_exact_journey(self):
+        import ast
+        private=Path('/var/lib/memlia-excel-ci-fixture/private');images={'owned':'image'};browser={'owned':'browser'}
+        expected={'schemaVersion':'memlia.excel-durable-qualification/v1','sourceCommit':'a'*40,'lockSha256':'b'*64,'nonce':'c'*32,
+                  'envFile':str(private/'compose.env'),'bootstrapFile':str(private/'bootstrap.json'),'images':images,'browser':browser}
+        original=(json.dumps(expected,sort_keys=True)+'\n').encode()
+        default=ci.qualification_values('a'*40,'b'*64,'c'*32,private,images,browser)
+        explicit=ci.qualification_values('a'*40,'b'*64,'c'*32,private,images,browser,inactive_test=False)
+        self.assertEqual((json.dumps(default,sort_keys=True)+'\n').encode(),original)
+        self.assertEqual((json.dumps(explicit,sort_keys=True)+'\n').encode(),original)
+        selected=ci.qualification_values('a'*40,'b'*64,'c'*32,private,images,browser,inactive_test=True)
+        self.assertEqual(selected,expected|{'journey':'inactive-test'})
+        self.assertEqual((json.dumps(expected,sort_keys=True)+'\n').encode(),original)
+        with tempfile.TemporaryDirectory() as d:
+            path=Path(d)/'qualification.json';ci.write_private(path,default)
+            self.assertEqual(path.read_bytes(),original)
+        # Execute the producer's actual configuration assignment, not an alternative fixture producer.
+        tree=ast.parse(Path(ci.__file__).read_text())
+        run=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='run')
+        assignment=next(n for n in ast.walk(run) if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='qualification' for t in n.targets))
+        for flag in (False,True):
+            scope={'qualification_values':ci.qualification_values,'expected':'a'*40,'lock':'b'*64,'nonce':'c'*32,
+                   'private':private,'images':images,'browser':browser,'inactive_test':flag}
+            exec(compile(ast.Module(body=[assignment],type_ignores=[]),str(ci.__file__),'exec'),scope)
+            self.assertEqual(scope['qualification'],expected|({'journey':'inactive-test'} if flag else {}))
+
+    def test_cli_selector_is_explicit_closed_and_refused_outside_durable(self):
+        import contextlib,io
+        common=['--expected-commit','a'*40,'--output','/var/lib/memlia-excel-ci-fixture']
+        tools=['--node','/tools/node','--wheelhouse','/tools/wheels']
+        for extra,expected in [([],False),(['--inactive-test'],True)]:
+            parsed=ci.arguments(['--exercise-durable',*common,*tools,*extra])
+            self.assertIs(parsed.inactive_test,expected);self.assertEqual(parsed.mode,'durable')
+        self.assertIs(ci.arguments(['--check-web-context',*common]).inactive_test,False)
+        for flags in [['--check-web-context','--inactive-test'],['--inactive-test'],
+                      ['--check-web-context','--exercise-durable','--inactive-test'],
+                      ['--exercise-durable','--inactive-test=other'],['--exercise-durable','--journey','other']]:
+            with self.subTest(flags=flags),contextlib.redirect_stderr(io.StringIO()),self.assertRaises(SystemExit) as error:
+                ci.arguments([*flags,*common,*tools])
+            self.assertEqual(error.exception.code,2)
+
+    def test_incompatible_selection_is_refused_before_platform_or_filesystem_io(self):
+        from unittest.mock import patch
+        with patch.object(ci.os,'geteuid',side_effect=AssertionError('platform reached')),patch.object(Path,'exists',side_effect=AssertionError('filesystem reached')):
+            for mode,flag in [('web-check',True),('durable','inactive-test'),('durable',1),('durable',None)]:
+                with self.subTest(mode=mode,flag=flag),self.assertRaises(ValueError):
+                    ci.run('a'*40,Path('/var/lib/memlia-excel-ci-fixture'),Path('/tools/node'),Path('/tools/wheels'),mode=mode,inactive_test=flag)
+        for invalid in ('inactive-test',1,None):
+            with self.subTest(invalid=invalid),self.assertRaises(ValueError):
+                ci.qualification_values('a'*40,'b'*64,'c'*32,Path('/private'),{}, {},inactive_test=invalid)
+
+    def test_manual_input_and_all_flag_combinations_are_closed_before_checkout(self):
+        import os,subprocess
+        workflow=(ci.ROOT/'.github/workflows/memlia-excel-linux.yml').read_text()
+        inputs=workflow.split('  workflow_dispatch:\n',1)[1].split('  pull_request:',1)[0]
+        option=inputs.split('      inactive_test:\n',1)[1].split('      check_web_context:\n',1)[0]
+        for field in ('        required: false\n','        default: false\n','        type: boolean\n'):self.assertIn(field,option)
+        self.assertIn('!inputs.inactive_test',workflow.split('  durable:\n',1)[0])
+        job=workflow.split('  durable:\n',1)[1]
+        self.assertIn('inputs.exercise_durable || inputs.check_web_context || inputs.inactive_test',job)
+        line=next(line.strip().removeprefix('run: ') for line in job.splitlines() if line.strip().startswith('run: test '))
+        self.assertLess(job.index('run: test '),job.index('actions/checkout@'))
+        for durable in ('0','1'):
+            for check in ('0','1'):
+                for inactive in ('0','1'):
+                    result=subprocess.run(['/bin/bash','-c',line],env=os.environ|{'MEMLIA_EXERCISE_DURABLE':durable,
+                        'MEMLIA_CHECK_WEB_CONTEXT':check,'MEMLIA_INACTIVE_TEST':inactive},capture_output=True,timeout=2)
+                    expected=not(durable=='1' and check=='1') and (inactive=='0' or (durable=='1' and check=='0'))
+                    with self.subTest(durable=durable,check=check,inactive=inactive):
+                        self.assertEqual(result.returncode,0 if expected else 1);self.assertEqual(result.stdout+result.stderr,b'')
+
+    def test_manual_runner_forwards_selector_only_when_requested(self):
+        import os,subprocess
+        workflow=(ci.ROOT/'.github/workflows/memlia-excel-linux.yml').read_text()
+        step=workflow.split('      - name: Exécuter uniquement le parcours manuel sélectionné\n',1)[1].split('      - name:',1)[0]
+        self.assertIn("MEMLIA_INACTIVE_TEST: ${{ inputs.inactive_test && '1' || '0' }}",step)
+        block='if [[ "$MEMLIA_CHECK_WEB_CONTEXT" == 1 ]]; then'+step.split('if [[ "$MEMLIA_CHECK_WEB_CONTEXT" == 1 ]]; then',1)[1].split('          timeout --signal=',1)[0]
+        for check,inactive,expected in [('0','0',['--exercise-durable','--node','/fixture/node','--wheelhouse','/fixture/temp/excel-durable-wheels']),
+                                       ('0','1',['--exercise-durable','--node','/fixture/node','--wheelhouse','/fixture/temp/excel-durable-wheels','--inactive-test']),
+                                       ('1','0',['--check-web-context'])]:
+            code='set -euo pipefail\ncommand() { printf /fixture/node; }\n'+block+'\nprintf "%s\\0" "${extra[@]}"'
+            result=subprocess.run(['/bin/bash','-c',code],env=os.environ|{'MEMLIA_CHECK_WEB_CONTEXT':check,'MEMLIA_INACTIVE_TEST':inactive,
+                'RUNNER_TEMP':'/fixture/temp'},capture_output=True,timeout=2)
+            self.assertEqual(result.returncode,0);self.assertEqual(result.stderr,b'')
+            self.assertEqual(result.stdout.decode().split('\0')[:-1],expected)
+
+class BuilderAdmission(unittest.TestCase):
+    """Real start_builder fragment of run(), Docker doubled; shared admission/verify are real."""
+    def start(self,store):
+        import ast,sys,textwrap,time
+        directory=str(ci.ROOT/'runtimes/excel/linux')
+        if directory not in sys.path:sys.path.insert(0,directory)
+        import test_image_identity as fixture
+        native=ci.load(ci.ROOT/'scripts/ci/workflow-worker-image.py','builder_admission_native')
+        tree=ast.parse(Path(ci.__file__).read_text())
+        run=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='run')
+        node=next(n for n in run.body if isinstance(n,ast.FunctionDef) and n.name=='start_builder')
+        source=('def outer():\n    builder_unknown=builder_id=builder_image=None\n'
+                +textwrap.indent(ast.unparse(node),'    ')
+                +'\n    return start_builder,lambda:(builder_unknown,builder_id,builder_image)\n')
+        folder=tempfile.TemporaryDirectory();self.addCleanup(folder.cleanup)
+        private=Path(folder.name);calls=[];manifest=native.BUILDKIT.split('@')[1]
+        cid='e'*64;name='memlia-excel-build-fixture'
+        def docker(args,**kw):
+            calls.append(args[:2])
+            if args[:2]==['image','save']:
+                self.assertEqual((args[2],args[4],kw.get('seconds')),('--output',native.BUILDKIT,180))
+                if store=='save-fails':
+                    Path(args[3]).write_bytes(b'partial');raise ValueError('command_failed')
+                members=fixture.saved_members(fixture.BUILDKIT)
+                if store=='containerd-config':
+                    members=[(n,fixture.PYTHON[2].read_bytes() if n.endswith(manifest[7:]) else d) for n,d in members]
+                (private/'fixture').mkdir(exist_ok=True)
+                Path(args[3]).write_bytes(fixture.archive(private/'fixture',members).read_bytes())
+                return b''
+            if args[:2]==['container','exec']:
+                return {'memory.max':str(13*1024**3),'memory.swap.max':str(24*1024**3),'cpu.max':'400000 100000','pids.max':'512'}[args[-1].rsplit('/',1)[1]].encode()
+            if args[:2]==['container','update']:self.assertFalse((private/'buildkit-image.tar').exists())
+            return b''
+        def one(args,**kw):
+            if args[:2]==['image','inspect']:
+                row=fixture.classic_row(fixture.BUILDKIT) if store=='classic' else fixture.containerd_row(fixture.BUILDKIT)
+                if store=='index':row['Descriptor']['mediaType']='application/vnd.oci.image.index.v1+json'
+                return row
+            return {'Id':cid,'Name':'/buildx_buildkit_'+name+'0','Image':native.BUILDKIT_CONFIG if store=='classic' else manifest,
+                    'Mounts':[{'Type':'volume','Name':'buildx_buildkit_'+name+'0_state','Destination':'/var/lib/buildkit'}],
+                    'HostConfig':{'Memory':13*1024**3,'MemorySwap':37*1024**3,'CpuQuota':400000,'CpuPeriod':100000,'PidsLimit':512},
+                    'State':{'Running':True,'OOMKilled':False}}
+        scope={'docker':docker,'one':one,'require':ci.require,'native':native,'private':private,'builder':name,
+               'record':{},'write_private':lambda path,data:path.write_bytes(data)}
+        exec(compile(source,str(ci.__file__),'exec'),scope)
+        start,state=scope['outer']()
+        return start,state,calls,private,native
+
+    def test_classic_and_containerd_builders_are_admitted_then_reverified_by_the_kernel_check(self):
+        for store in ('classic','containerd'):
+            with self.subTest(store=store):
+                start,state,calls,private,native=self.start(store)
+                kernel=start();unknown,builder_id,image=state()
+                self.assertEqual((unknown,builder_id),(False,'e'*64))
+                self.assertEqual(image,native.BUILDKIT_CONFIG if store=='classic' else native.BUILDKIT.split('@')[1])
+                self.assertEqual(['image','save'] in calls,store=='containerd')
+                self.assertFalse((private/'buildkit-image.tar').exists())
+                kernel()
+
+    def test_foreign_manifest_or_failed_export_is_refused_before_any_builder_mutation(self):
+        for store in ('containerd-config','save-fails'):
+            with self.subTest(store=store):
+                start,state,calls,private,native=self.start(store)
+                with self.assertRaises(ValueError):start()
+                self.assertIsNone(state()[2]);self.assertNotIn(['container','update'],calls)
+                self.assertFalse((private/'buildkit-image.tar').exists())
+
+    def test_builder_pulled_by_index_keeps_a_distinct_closed_receipt_code(self):
+        start,state,calls,private,native=self.start('index')
+        with self.assertRaises(ValueError) as caught:start()
+        self.assertEqual(ci.error_code(caught.exception),'builder_identity_index_refused')
+        self.assertIn('builder_identity_index_refused',ci.ERROR_CODES)
+        self.assertNotIn(['image','save'],calls);self.assertNotIn(['container','update'],calls)
+
+
 if __name__=='__main__':unittest.main()

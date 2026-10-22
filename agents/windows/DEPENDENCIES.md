@@ -90,3 +90,9 @@ ni CredMan/ACL Windows, ni le packaging ou les notices d’un installer non cons
 
 Les ajouts Memlia conservent les droits réservés du LICENSE de ce package. Les
 licences permissives des dépendances ne leur accordent aucune licence implicite.
+
+## Validation canonique des commandes
+
+Le host réutilise `memlia-contracts==0.1.0`, **construit depuis le package local du monorepo**, jamais téléchargé sous ce nom depuis un index public. Son JSON Schema est exporté du Zod canonique ; aucun schéma Python recopié. Installer d’abord la fermeture externe hashée de `requirements.lock`, puis le wheel local contrôlé avec `--no-deps --no-index`. Le paquet Memlia garde ses droits réservés.
+
+Fermeture réemployée de P00/P10 : jsonschema4.26.0, attrs26.1.0, jsonschema-specifications2025.9.1, referencing0.37.0, rpds-py2026.9.1 (MIT), typing-extensions4.16.0 (PSF-2.0, déjà présente). Conserver les textes LICENSE des distributions livrées. Les nouvelles roues natives rpds-py verrouillées sont Windows CPython3.12 x64 et le profil de tests Mac CPython3.13 arm64 ; le lock ne revendique pas d’autres profils. Roue Windows SHA256 `5ce8943f79c2210f7abcc28e86367b03b28d95027fd01c46d2472373ae70c86f` ; MIT inclus `rpds_py-2026.9.1.dist-info/licenses/LICENSE`, copyright Julian Berman2023. Les bibliothèques Rust embarquées et le Python gelé restent à inventorier dans le packaging final ; l’admission de cette roue n’est pas une qualification de l’installateur Windows. Aucun extra/résolveur distant ajouté.

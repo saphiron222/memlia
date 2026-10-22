@@ -8,13 +8,19 @@ import {
 import { workspaceAuthzMock, workspaceAuthzMockFns } from '@sim/testing/mocks/workspace-authz.mock'
 import { beforeEach, expect, it, vi } from 'vitest'
 import { fixtures } from '../../../../../packages/memlia-contracts/tests/fixtures'
-const infra = vi.hoisted(() => ({ config: vi.fn() }))
+
+const infra = vi.hoisted(() => ({ config: vi.fn(), files: vi.fn() }))
+vi.mock('@/lib/memlia/excel/application/selected-files', () => ({
+  inspectSelectedExcelFiles: infra.files,
+}))
 vi.mock('@/lib/workflows/application/context', () => workflowContextMock)
 vi.mock('@sim/platform-authz/workspace', () => workspaceAuthzMock)
 vi.mock('@/lib/permission-groups/config-scope.server', () => ({
   resolvePermissionGroupConfig: infra.config,
 }))
+
 import { createExcelPreviewTools } from './excel-preview-tools'
+
 const scope = () => ({
   principal: createSessionPrincipal({ userId: 'excel-reader' }),
   workspaceId: 'workspace-1',
@@ -41,6 +47,7 @@ function draft() {
 const resolve = workflowContextMockFns.mockResolveActiveWorkflowApplicationContext
 const permission = workspaceAuthzMockFns.mockResolveEffectiveWorkspacePermission
 beforeEach(() => {
+  infra.files.mockReset().mockResolvedValue({ analysis: 'selected_file_sample', files: [] })
   resolve.mockReset().mockResolvedValue({
     workflowId: 'workflow-1',
     workflow: { id: 'workflow-1', workspaceId: 'workspace-1' },
@@ -51,6 +58,30 @@ beforeEach(() => {
   })
   permission.mockReset().mockResolvedValue('read')
   infra.config.mockReset().mockResolvedValue(null)
+})
+it('inspecte seulement la sélection serveur, sans permettre un fileId modèle ni autorité périmée', async () => {
+  const tools = createExcelPreviewTools({ ...scope(), excelFileIds: ['selected-file'] })
+  expect(await tools.dispatch('excel_inspect_selected_files', {})).toMatchObject({
+    ok: true,
+    data: { analysis: 'selected_file_sample' },
+  })
+  expect(infra.files).toHaveBeenCalledWith(
+    { principal: scope().principal, workspaceId: 'workspace-1', fileIds: ['selected-file'] },
+    undefined
+  )
+  infra.files.mockClear()
+  expect(
+    await tools.dispatch('excel_inspect_selected_files', { fileId: 'foreign-file' })
+  ).toMatchObject({ ok: false, error: { code: 'invalid_input' } })
+  expect(infra.files).not.toHaveBeenCalled()
+  permission.mockResolvedValue(null)
+  expect(await tools.dispatch('excel_inspect_selected_files', {})).toMatchObject({ ok: false })
+  expect(infra.files).not.toHaveBeenCalled()
+  permission.mockResolvedValue('read')
+  expect(
+    await createExcelPreviewTools(scope()).dispatch('excel_inspect_selected_files', {})
+  ).toMatchObject({ ok: false })
+  expect(infra.files).not.toHaveBeenCalled()
 })
 it('describes primitive options without runtime, publication or file authority', async () => {
   const result = await createExcelPreviewTools(scope()).dispatch('excel_describe_capabilities', {})

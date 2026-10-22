@@ -231,3 +231,6 @@ export function getEnrollmentService(): Promise<Service | null> {
   servicePromise ??= initialize()
   return servicePromise
 }
+
+// Internal reuse by the dedicated control process; identical protected-reader policy.
+export { readProtected as readProtectedAgentRuntimeFile }

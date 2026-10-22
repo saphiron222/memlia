@@ -22,6 +22,7 @@ import uuid
 import struct
 import stat
 
+import image_identity
 import prepare_context
 import supervisor as s
 
@@ -589,7 +590,16 @@ def run(wheelhouse, output, *, exercise_host=False, exercise_application=False, 
         check_disk(output, receipt, receipt['phase'])
         build_command(['pull', '--platform', 'linux/amd64', PYTHON_BASE], output, deadline, cancel)
         base = s._one(docker(['image', 'inspect', PYTHON_BASE], deadline=deadline))
-        require(base['Id'] == PYTHON_CONFIG and base['Os'] == 'linux' and base['Architecture'] == 'amd64')
+        def save_base():
+            # containerd store only: the pulled manifest, read back from a local export.
+            build_command(['image', 'save', base['Id']], output, deadline, cancel,
+                          artifact=output/'base-image.tar', receipt=receipt)
+            return output/'base-image.tar'
+        try:
+            require(image_identity.admit(base, PYTHON_BASE, PYTHON_CONFIG, save_base) == base['Id']
+                    and base['Os'] == 'linux' and base['Architecture'] == 'amd64')
+        finally:
+            (output/'base-image.tar').unlink(missing_ok=True)
         receipt['phase'] = 'image_build'
         check_disk(output, receipt, receipt['phase'])
         build_attempted = True
@@ -627,8 +637,9 @@ def run(wheelhouse, output, *, exercise_host=False, exercise_application=False, 
             staged = prepare_release(receipt, operator_release, docker, image, nonce, output, deadline, cancel)
         receipt['status'] = 'passed'
         receipt['linuxRecipeCompleted'] = True
-    except Exception:
-        receipt['code'] = 'linux_recipe_refused'
+    except Exception as error:
+        index = isinstance(error, ValueError) and error.args == ('image_identity_index_refused',)
+        receipt['code'] = 'linux_recipe_base_index_refused' if index else 'linux_recipe_refused'
     finally:
         check_disk(output, receipt, 'cleanup_before', enforce=False)
         # Only this image's exact ID + build nonce. No global prune/cache deletion.

@@ -1,0 +1,96 @@
+# Copyright (c) 2026 Memlia. All rights reserved.
+# OPTIONAL and UNQUALIFIED. Never loaded by compose.yaml automatically.
+# After qualification, explicitly select: -f compose.yaml -f compose.excel.yaml.
+# The operator starts the separately installed excel-host.service first and
+# verifies its protected socket, image proof and real UID/GID1001 peer mapping.
+# A stale socket/unknown cleanup requires reconciliation, not deletion/restart.
+# Native pg-boss currently accepts session workflow-execution only. API keys,
+# manual draft async, scheduled/sub-jobs and other kinds are NOT enabled by this
+# overlay. Provision/grant the existing business/transport schema roles first;
+# different variables alone do not prove different PostgreSQL privileges.
+# No secret values, image digest, proof or admission is supplied here.
+services:
+  web:
+    # Existing outbox publication/cron is reused, never a second dispatcher.
+    # This changes only native queue selection, not user or execution authority.
+    environment:
+      MEMLIA_DURABLE_WORKFLOWS_ENABLED: '1'
+      MEMLIA_PG_BOSS_ENABLED: '1'
+      MEMLIA_PG_BOSS_DATABASE_URL: ${MEMLIA_PG_BOSS_DATABASE_URL:?Dedicated transport role required}
+      TRIGGER_DEV_ENABLED: 'false'
+
+  workflow-worker:
+    image: ${MEMLIA_IMAGE_PREFIX:?Memlia image prefix required}/workflow-worker@sha256:${MEMLIA_WORKFLOW_WORKER_SHA256:?Qualified worker digest required}
+    # Require the exact image already admitted and loaded by the operator.
+    pull_policy: never
+    user: '1001:1001'
+    working_dir: /app/apps/sim
+    init: true
+    restart: 'no'
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    cpus: '2.0'
+    mem_limit: 4g
+    memswap_limit: 4g
+    pids_limit: 256
+    stop_signal: SIGTERM
+    stop_grace_period: 160s
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=268435456,mode=0700,uid=1001,gid=1001
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: '3'}
+    networks: [backend, egress]
+    environment:
+      NODE_ENV: production
+      SIM_DB_ROLE: trigger
+      DB_APP_NAME: memlia-workflow-worker
+      DATABASE_URL: ${DATABASE_URL_WORKFLOW_WORKER:?Non-owner worker business role required}
+      MEMLIA_DURABLE_WORKFLOWS_ENABLED: '1'
+      MEMLIA_PG_BOSS_ENABLED: '1'
+      MEMLIA_PG_BOSS_DATABASE_URL: ${MEMLIA_PG_BOSS_DATABASE_URL:?Dedicated transport role required}
+      TRIGGER_DEV_ENABLED: 'false'
+      MEMLIA_EXCEL_HOST_SOCKET: /run/memlia-excel/host.sock
+      MEMLIA_EXCEL_HOST_OPERATOR_UID: '0'
+      BETTER_AUTH_URL: ${NEXT_PUBLIC_APP_URL:?HTTPS cabinet origin required}
+      NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:?HTTPS cabinet origin required}
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?Required authentication secret}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Required persistent encryption key}
+      INTERNAL_API_SECRET: ${INTERNAL_API_SECRET:?Required shared internal secret}
+      REDIS_URL: redis://redis:6379
+      SOCKET_SERVER_URL: http://realtime:3002
+      STORAGE_PROVIDER: local
+      EGRESS_ALLOWED_HOSTS: ${EGRESS_ALLOWED_HOSTS:-}
+      MAX_TOOL_ITERATIONS: ${MAX_TOOL_ITERATIONS:-20}
+      EXECUTION_TIMEOUT_FREE: ${EXECUTION_TIMEOUT_FREE:-900}
+      EXECUTION_TIMEOUT_ASYNC_FREE: ${EXECUTION_TIMEOUT_ASYNC_FREE:-900}
+      NEXT_TELEMETRY_DISABLED: '1'
+      VERCEL_TELEMETRY_DISABLED: '1'
+      DO_NOT_TRACK: '1'
+      SIM_TELEMETRY_DISABLED: '1'
+      NEXT_PUBLIC_POSTHOG_ENABLED: 'false'
+      NEXT_PUBLIC_POSTHOG_KEY: ''
+      SENTRY_DSN: ''
+      NEXT_PUBLIC_SENTRY_DSN: ''
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OLLAMA_URL: ${OLLAMA_URL:-}
+    volumes:
+      - type: volume
+        source: uploads
+        target: /app/apps/sim/uploads
+      - type: bind
+        source: /run/memlia-excel
+        target: /run/memlia-excel
+        read_only: true
+        bind:
+          create_host_path: false
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      migrations: {condition: service_completed_successfully}
+      realtime: {condition: service_healthy}
+# Keep the image CMD, drain/abort/claim/session checks and terminal finalization.
+# No fabricated health endpoint: PID life does not attest a completed workflow.
+#160s bounds container stop; timeout/kill leaves native work potentially uncertain.

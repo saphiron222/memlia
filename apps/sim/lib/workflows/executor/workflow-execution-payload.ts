@@ -4,6 +4,7 @@
 // No runner is imported at runtime.
 import { serializePrincipal, type WorkflowExecutionPrincipal } from '@sim/auth/principal'
 import type { BillingAttributionSnapshot } from '@/lib/billing/core/attribution'
+import type { ExcelTestExecutionBinding } from '@/lib/api/contracts/excel-test-preparations'
 import { captureRequestAttribution } from '@/lib/core/utils/request-attribution'
 import type { WorkflowExecutionPayload } from '@/background/workflow-execution'
 import type { ResolvedSecretTraceProvenanceV1 } from '@/executor/utils/resolved-secret-trace-registry'
@@ -27,6 +28,8 @@ export interface EnqueueWorkflowExecutionParams {
   /** Identity decisions the enqueuing surface made; the worker cannot re-derive them. */
   enforceCredentialAccess?: boolean
   isPublicApiAccess?: boolean
+  /** Server-admitted proof, resolved afresh by the worker before using an inactive pin. */
+  excelTestExecution?: ExcelTestExecutionBinding
 }
 
 export function prepareWorkflowExecutionPayload(params: EnqueueWorkflowExecutionParams) {
@@ -47,6 +50,7 @@ export function prepareWorkflowExecutionPayload(params: EnqueueWorkflowExecution
     trustedInitialResolvedSecretTraceProvenance,
     enforceCredentialAccess,
     isPublicApiAccess,
+    excelTestExecution,
   } = params
   const attribution = captureRequestAttribution()
   const correlation = {
@@ -64,7 +68,7 @@ export function prepareWorkflowExecutionPayload(params: EnqueueWorkflowExecution
     userId,
     billingAttribution,
     workspaceId,
-    input,
+    ...(input !== undefined ? { input } : {}),
     triggerType,
     ...(triggerBlockId !== undefined ? { triggerBlockId } : {}),
     executionId,
@@ -74,6 +78,7 @@ export function prepareWorkflowExecutionPayload(params: EnqueueWorkflowExecution
     ...(attribution !== undefined ? { attribution } : {}),
     ...(enforceCredentialAccess !== undefined ? { enforceCredentialAccess } : {}),
     ...(isPublicApiAccess !== undefined ? { isPublicApiAccess } : {}),
+    ...(excelTestExecution !== undefined ? { excelTestExecution } : {}),
     executionMode: 'async',
     admissionCompleted: true,
     executionTimeoutMs,

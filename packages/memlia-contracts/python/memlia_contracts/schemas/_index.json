@@ -2,6 +2,8 @@
   "schemaVersion": "memlia.contract-index/v1",
   "contracts": [
     "AgentCommand",
+    "AgentControlRequest",
+    "AgentControlResponse",
     "Approval",
     "Binding",
     "CommitReceipt",
